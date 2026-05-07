@@ -2,12 +2,8 @@ services:
   - type: web
     name: fbmaniaco-api
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /health
-    disk:
-      name: fbmaniaco-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: HOST
         value: 0.0.0.0
@@ -37,3 +33,9 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE
         sync: false
+      - key: SUPABASE_STATE_BUCKET
+        value: fbmaniaco-runtime
+      - key: SUPABASE_STATE_OBJECT
+        value: runtime-state.json
+      - key: SUPABASE_MEDIA_BUCKET
+        value: fbmaniaco-media

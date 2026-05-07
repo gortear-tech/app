@@ -60,6 +60,7 @@ import {
 } from "@fbmaniaco/providers";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { Buffer } from "node:buffer";
   import {
     assignStyle,
     buildDeepMemory,
@@ -366,6 +367,257 @@ type PersistedRuntimeState = {
   autonomyByBusiness: Array<[string, AutonomyState]>;
 };
 
+const stripInlineImage = (value: string): string => (value.startsWith("data:image/") ? "" : value);
+const trimCloudString = (value: string): string => (value.length > 12000 ? value.slice(0, 12000) : value);
+
+const trimCloudSnapshot = (value: unknown): unknown => {
+  if (typeof value === "string") {
+    return trimCloudString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => trimCloudSnapshot(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, trimCloudSnapshot(item)]));
+  }
+  return value;
+};
+
+const buildCloudRuntimeSnapshot = (snapshot: PersistedRuntimeState): PersistedRuntimeState => ({
+  ...(trimCloudSnapshot(snapshot) as PersistedRuntimeState),
+  photos: snapshot.photos.map((photo) => ({
+    ...(trimCloudSnapshot(photo) as PhotoRecord),
+    uploadUrl: stripInlineImage(photo.uploadUrl),
+  })),
+  variants: snapshot.variants.map((variant) => ({
+    ...(trimCloudSnapshot(variant) as VariantRecord),
+    imageUrl: variant.imageUrl?.startsWith("data:image/") ? null : variant.imageUrl,
+  })),
+});
+
+const parseDataUrl = (value: string): { bytes: Buffer; mimeType: string; extension: string } | null => {
+  const match = value.match(/^data:([^;,]+);base64,(.+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const mimeType = match[1]!.trim().toLowerCase();
+  const extension = mimeType.includes("jpeg") ? "jpg" : mimeType.includes("webp") ? "webp" : mimeType.includes("png") ? "png" : "bin";
+  return {
+    bytes: Buffer.from(match[2]!, "base64"),
+    mimeType,
+    extension,
+  };
+};
+
+const encodeStoragePath = (objectKey: string): string =>
+  objectKey
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+
+class SupabaseRuntimeSnapshotStore {
+  private bucketReady = false;
+
+  constructor(
+    private readonly options: {
+      supabaseUrl?: string;
+      serviceRole?: string;
+      bucket: string;
+      objectKey: string;
+    },
+  ) {}
+
+  private get enabled(): boolean {
+    return Boolean(this.options.supabaseUrl?.trim() && this.options.serviceRole?.trim());
+  }
+
+  private get baseUrl(): string {
+    return this.options.supabaseUrl?.trim().replace(/\/$/, "") ?? "";
+  }
+
+  private get headers(): Record<string, string> {
+    const serviceRole = this.options.serviceRole?.trim() ?? "";
+    return {
+      apikey: serviceRole,
+      Authorization: `Bearer ${serviceRole}`,
+      "Content-Type": "application/json",
+    };
+  }
+
+  private encodedObjectPath(): string {
+    return encodeStoragePath(this.options.objectKey);
+  }
+
+  private async ensureBucket(): Promise<void> {
+    if (!this.enabled || this.bucketReady) {
+      return;
+    }
+
+    const response = await fetch(`${this.baseUrl}/storage/v1/bucket`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify({
+        id: this.options.bucket,
+        name: this.options.bucket,
+        public: false,
+      }),
+    });
+
+    if (!response.ok && response.status !== 409) {
+      const text = await response.text().catch(() => "");
+      if (response.status !== 400 || !text.toLowerCase().includes("already")) {
+        throw new Error(`Supabase state bucket creation failed (${response.status}): ${text || response.statusText}`);
+      }
+    }
+
+    this.bucketReady = true;
+  }
+
+  async downloadSnapshot(): Promise<Partial<PersistedRuntimeState> | null> {
+    if (!this.enabled) {
+      return null;
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/storage/v1/object/${encodeURIComponent(this.options.bucket)}/${this.encodedObjectPath()}`,
+      { headers: this.headers },
+    );
+
+    if (response.status === 404) {
+      await this.ensureBucket();
+      return null;
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Supabase state restore failed (${response.status}): ${text || response.statusText}`);
+    }
+
+    const raw = await response.text();
+    if (!raw.trim()) {
+      return null;
+    }
+    return JSON.parse(raw) as Partial<PersistedRuntimeState>;
+  }
+
+  async uploadSnapshot(snapshot: PersistedRuntimeState): Promise<void> {
+    if (!this.enabled) {
+      return;
+    }
+
+    await this.ensureBucket();
+    const response = await fetch(
+      `${this.baseUrl}/storage/v1/object/${encodeURIComponent(this.options.bucket)}/${this.encodedObjectPath()}`,
+      {
+        method: "PUT",
+        headers: {
+          ...this.headers,
+          "x-upsert": "true",
+        },
+        body: JSON.stringify(snapshot),
+      },
+    );
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Supabase state backup failed (${response.status}): ${text || response.statusText}`);
+    }
+  }
+}
+
+class SupabaseMediaStore {
+  private bucketReady = false;
+
+  constructor(
+    private readonly options: {
+      supabaseUrl?: string;
+      serviceRole?: string;
+      bucket: string;
+    },
+  ) {}
+
+  private get enabled(): boolean {
+    return Boolean(this.options.supabaseUrl?.trim() && this.options.serviceRole?.trim());
+  }
+
+  private get baseUrl(): string {
+    return this.options.supabaseUrl?.trim().replace(/\/$/, "") ?? "";
+  }
+
+  private get headers(): Record<string, string> {
+    const serviceRole = this.options.serviceRole?.trim() ?? "";
+    return {
+      apikey: serviceRole,
+      Authorization: `Bearer ${serviceRole}`,
+    };
+  }
+
+  private async ensureBucket(): Promise<void> {
+    if (!this.enabled || this.bucketReady) {
+      return;
+    }
+
+    const response = await fetch(`${this.baseUrl}/storage/v1/bucket`, {
+      method: "POST",
+      headers: {
+        ...this.headers,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        id: this.options.bucket,
+        name: this.options.bucket,
+        public: true,
+      }),
+    });
+
+    if (!response.ok && response.status !== 409) {
+      const text = await response.text().catch(() => "");
+      if (response.status !== 400 || !text.toLowerCase().includes("already")) {
+        throw new Error(`Supabase media bucket creation failed (${response.status}): ${text || response.statusText}`);
+      }
+    }
+
+    this.bucketReady = true;
+  }
+
+  async uploadDataUrl(objectKey: string, dataUrl?: string | null): Promise<string | null> {
+    if (!this.enabled || !dataUrl?.startsWith("data:image/")) {
+      return null;
+    }
+
+    const parsed = parseDataUrl(dataUrl);
+    if (!parsed) {
+      return null;
+    }
+
+    await this.ensureBucket();
+    const keyWithExtension = /\.[a-z0-9]{2,5}$/i.test(objectKey) ? objectKey : `${objectKey}.${parsed.extension}`;
+    const safeKey = keyWithExtension.replace(/\\/g, "/").replace(/^\/+/, "");
+    const body = parsed.bytes.buffer.slice(
+      parsed.bytes.byteOffset,
+      parsed.bytes.byteOffset + parsed.bytes.byteLength,
+    ) as ArrayBuffer;
+    const response = await fetch(`${this.baseUrl}/storage/v1/object/${encodeURIComponent(this.options.bucket)}/${encodeStoragePath(safeKey)}`, {
+      method: "PUT",
+      headers: {
+        ...this.headers,
+        "Content-Type": parsed.mimeType,
+        "x-upsert": "true",
+      },
+      body,
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Supabase media upload failed (${response.status}): ${text || response.statusText}`);
+    }
+
+    return `${this.baseUrl}/storage/v1/object/public/${encodeURIComponent(this.options.bucket)}/${encodeStoragePath(safeKey)}`;
+  }
+}
+
 export class FbmaniacoRuntime {
   private metaToken: MetaTokenRecord | null = null;
   private pages: MetaPageRecord[] = [];
@@ -384,6 +636,18 @@ export class FbmaniacoRuntime {
     supabaseUrl: config.supabaseUrl,
     serviceRole: config.supabaseServiceRole,
   });
+  private readonly snapshotStore = new SupabaseRuntimeSnapshotStore({
+    supabaseUrl: config.supabaseUrl,
+    serviceRole: config.supabaseServiceRole,
+    bucket: config.supabaseStateBucket,
+    objectKey: config.supabaseStateObject,
+  });
+  private readonly cloudMediaStore = new SupabaseMediaStore({
+    supabaseUrl: config.supabaseUrl,
+    serviceRole: config.supabaseServiceRole,
+    bucket: config.supabaseMediaBucket,
+  });
+  public readonly ready: Promise<void>;
 
   constructor(
     private readonly visionProvider: VisionAnalysisProvider,
@@ -394,10 +658,8 @@ export class FbmaniacoRuntime {
     private readonly facebookPublishingProvider: FacebookPublishingProvider,
     private readonly pushNotificationProvider: PushNotificationProvider,
   ) {
-    this.restoreStateFromDisk();
-    void this.supabaseMirror.syncState(this.buildSupabaseMirrorState()).catch((error) => {
-      console.warn("[fbmaniaco] failed to sync Supabase planner mirror on startup", error);
-    });
+    const restoredFromDisk = this.restoreStateFromDisk();
+    this.ready = this.initializeState(restoredFromDisk);
   }
 
   bootstrapStatus(): BootstrapStatusResponse {
@@ -1177,7 +1439,16 @@ export class FbmaniacoRuntime {
 
   async completeUpload(batchId: string, body: CompletePhotoUploadRequest): Promise<PhotoRecord> {
     const batch = this.getBatch(batchId);
-    const uploadUrl = normalizeImageUrl(body.imageDataUrl) ?? normalizeImageUrl(await this.mediaStorage.getPresignedDownloadUrl(body.uploadKey));
+    let cloudUploadUrl: string | null = null;
+    try {
+      cloudUploadUrl = await this.cloudMediaStore.uploadDataUrl(`photos/${body.uploadKey}`, body.imageDataUrl);
+    } catch (error) {
+      console.warn("[fbmaniaco] failed to upload original photo to Supabase", error);
+    }
+    const uploadUrl =
+      normalizeImageUrl(cloudUploadUrl) ??
+      normalizeImageUrl(body.imageDataUrl) ??
+      normalizeImageUrl(await this.mediaStorage.getPresignedDownloadUrl(body.uploadKey));
     if (!uploadUrl) {
       throw new AppError({
         code: "photo_upload_invalid",
@@ -1424,6 +1695,12 @@ export class FbmaniacoRuntime {
             styleId: photo.assignedStyle.styleId,
             sourceImageUrl: photo.uploadUrl,
           });
+          let imageUrl = image.imageUrl;
+          try {
+            imageUrl = (await this.cloudMediaStore.uploadDataUrl(`variants/${variant.id}.png`, image.imageUrl)) ?? image.imageUrl;
+          } catch (error) {
+            console.warn("[fbmaniaco] failed to upload generated image to Supabase", error);
+          }
           const caption = await this.captionGenerationProvider.generateCaption({
             prompt: plan.promptFinal,
             styleName: photo.assignedStyle.styleName,
@@ -1433,7 +1710,7 @@ export class FbmaniacoRuntime {
             facebookSeoContext: getBusinessFacebookSeoContext(business),
           });
 
-          variant.imageUrl = image.imageUrl;
+          variant.imageUrl = imageUrl;
           variant.caption = caption.caption;
           variant.status = "generada";
           variant.updatedAt = new Date().toISOString();
@@ -1988,145 +2265,183 @@ export class FbmaniacoRuntime {
     };
   }
 
-  private restoreStateFromDisk(): void {
+  private async initializeState(restoredFromDisk: boolean): Promise<void> {
+    if (!restoredFromDisk) {
+      try {
+        const snapshot = await this.snapshotStore.downloadSnapshot();
+        if (snapshot) {
+          this.restoreStateFromSnapshot(snapshot);
+          this.persistState();
+        }
+      } catch (error) {
+        console.warn("[fbmaniaco] failed to restore runtime state from Supabase", error);
+      }
+    } else {
+      try {
+        await this.snapshotStore.uploadSnapshot(buildCloudRuntimeSnapshot(this.buildPersistedRuntimeState()));
+      } catch (error) {
+        console.warn("[fbmaniaco] failed to back up runtime state to Supabase", error);
+      }
+    }
+
+    void this.supabaseMirror.syncState(this.buildSupabaseMirrorState()).catch((error) => {
+      console.warn("[fbmaniaco] failed to sync Supabase planner mirror on startup", error);
+    });
+  }
+
+  private restoreStateFromDisk(): boolean {
     try {
       if (!existsSync(config.stateFilePath)) {
-        return;
+        return false;
       }
 
       const raw = readFileSync(config.stateFilePath, "utf8");
       if (!raw.trim()) {
-        return;
+        return false;
       }
 
       const snapshot = JSON.parse(raw) as Partial<PersistedRuntimeState>;
-      let stateNeedsPersist = false;
-      const restoredPages = Array.isArray(snapshot.pages)
-        ? snapshot.pages.filter((page): page is MetaPageRecord => Boolean(page && page.pageId))
-        : [];
-      this.pages = restoredPages;
-      const restoredSelectedPageId =
-        typeof snapshot.selectedPageId === "string" && restoredPages.some((page) => page.pageId === snapshot.selectedPageId)
-          ? snapshot.selectedPageId
-          : restoredPages.filter((page) => page.isSelected).length === 1
-            ? restoredPages.find((page) => page.isSelected)?.pageId ?? null
-            : null;
-      const authProvider = this.metaAuthProvider as unknown as {
-        seedPageAccessTokens?: (entries: Array<{ pageId: string; accessToken: string }>) => void;
-      };
-      if (typeof authProvider.seedPageAccessTokens === "function") {
-        try {
-          authProvider.seedPageAccessTokens(
-            this.pages
-              .filter((page): page is MetaPageRecord & { pageAccessToken: string } => Boolean(page.pageAccessToken?.trim()))
-              .map((page) => ({ pageId: page.pageId, accessToken: page.pageAccessToken })),
-          );
-        } catch (error) {
-          console.warn("[fbmaniaco] failed to seed page access tokens from persisted state", error);
-        }
-      }
-      const restoredStyles = Array.isArray(snapshot.visualStyles)
-        ? snapshot.visualStyles.map((style) => sanitizeVisualStyle(style)).filter((style): style is VisualStyle => Boolean(style))
-        : [];
-      this.visualStyles = Array.isArray(snapshot.visualStyles)
-        ? restoredStyles
-        : INITIAL_VISUAL_STYLES.map((style) => cloneVisualStyle(style));
-      this.businesses = new Map(
-        Array.isArray(snapshot.businesses)
-          ? snapshot.businesses
-              .filter((business): business is BusinessRecord => Boolean(business && business.id))
-              .map((business) => [business.id, business])
-          : [],
-      );
-      this.batches = new Map(
-        Array.isArray(snapshot.batches)
-          ? snapshot.batches
-              .filter((batch): batch is BatchRecord => Boolean(batch && batch.id))
-              .map((batch) => [batch.id, batch])
-          : [],
-      );
-      this.photos = new Map(
-        Array.isArray(snapshot.photos)
-          ? snapshot.photos
-              .filter((photo): photo is PhotoRecord => Boolean(photo && photo.id))
-              .map((photo) => [photo.id, photo])
-          : [],
-      );
-      this.variants = new Map(
-        Array.isArray(snapshot.variants)
-          ? snapshot.variants
-              .filter((variant): variant is VariantRecord => Boolean(variant && variant.id))
-              .map((variant) => [variant.id, variant])
-          : [],
-      );
-      this.scheduledPosts = new Map(
-        Array.isArray(snapshot.scheduledPosts)
-          ? snapshot.scheduledPosts
-              .filter((scheduledPost): scheduledPost is ScheduledPostRecord => Boolean(scheduledPost && scheduledPost.id))
-              .map((scheduledPost) => {
-                const normalizedStatus =
-                  scheduledPost.status === "programada" && !scheduledPost.facebookPostId ? "estado_incierto" : scheduledPost.status;
-                if (normalizedStatus !== scheduledPost.status) {
-                  stateNeedsPersist = true;
-                }
-                return [
-                  scheduledPost.id,
-                  {
-                    ...scheduledPost,
-                    status: normalizedStatus,
-                  },
-                ] as const;
-              })
-          : [],
-      );
-      this.events = Array.isArray(snapshot.events) ? snapshot.events : [];
-      this.autonomyByBusiness = new Map(snapshot.autonomyByBusiness ?? []);
-      this.metaToken = snapshot.metaToken ?? this.metaToken;
-      this.pendingDeviceLogin = snapshot.pendingDeviceLogin ?? this.pendingDeviceLogin;
-      this.selectedPageId = restoredSelectedPageId;
-      this.selectedBusinessId =
-        typeof snapshot.selectedBusinessId === "string" && this.businesses.has(snapshot.selectedBusinessId)
-          ? snapshot.selectedBusinessId
-          : this.selectedPageId
-            ? [...this.businesses.values()].find((business) => business.facebookPageId === this.selectedPageId)?.id ?? null
-            : null;
-      if (!this.selectedPageId && this.selectedBusinessId) {
-        this.selectedPageId = this.businesses.get(this.selectedBusinessId)?.facebookPageId ?? null;
-      }
-
-      for (const business of this.businesses.values()) {
-        if (!this.autonomyByBusiness.has(business.id)) {
-          this.autonomyByBusiness.set(business.id, createDefaultAutonomyState(business.autonomySettings));
-        }
-      }
-      if (stateNeedsPersist) {
+      if (this.restoreStateFromSnapshot(snapshot)) {
         this.persistState();
       }
+      return true;
     } catch (error) {
       console.warn("[fbmaniaco] failed to restore runtime state", error);
+      return false;
     }
+  }
+
+  private restoreStateFromSnapshot(snapshot: Partial<PersistedRuntimeState>): boolean {
+    let stateNeedsPersist = false;
+    const restoredPages = Array.isArray(snapshot.pages)
+      ? snapshot.pages.filter((page): page is MetaPageRecord => Boolean(page && page.pageId))
+      : [];
+    this.pages = restoredPages;
+    const restoredSelectedPageId =
+      typeof snapshot.selectedPageId === "string" && restoredPages.some((page) => page.pageId === snapshot.selectedPageId)
+        ? snapshot.selectedPageId
+        : restoredPages.filter((page) => page.isSelected).length === 1
+          ? restoredPages.find((page) => page.isSelected)?.pageId ?? null
+          : null;
+    const authProvider = this.metaAuthProvider as unknown as {
+      seedPageAccessTokens?: (entries: Array<{ pageId: string; accessToken: string }>) => void;
+    };
+    if (typeof authProvider.seedPageAccessTokens === "function") {
+      try {
+        authProvider.seedPageAccessTokens(
+          this.pages
+            .filter((page): page is MetaPageRecord & { pageAccessToken: string } => Boolean(page.pageAccessToken?.trim()))
+            .map((page) => ({ pageId: page.pageId, accessToken: page.pageAccessToken })),
+        );
+      } catch (error) {
+        console.warn("[fbmaniaco] failed to seed page access tokens from persisted state", error);
+      }
+    }
+    const restoredStyles = Array.isArray(snapshot.visualStyles)
+      ? snapshot.visualStyles.map((style) => sanitizeVisualStyle(style)).filter((style): style is VisualStyle => Boolean(style))
+      : [];
+    this.visualStyles = Array.isArray(snapshot.visualStyles)
+      ? restoredStyles
+      : INITIAL_VISUAL_STYLES.map((style) => cloneVisualStyle(style));
+    this.businesses = new Map(
+      Array.isArray(snapshot.businesses)
+        ? snapshot.businesses
+            .filter((business): business is BusinessRecord => Boolean(business && business.id))
+            .map((business) => [business.id, business])
+        : [],
+    );
+    this.batches = new Map(
+      Array.isArray(snapshot.batches)
+        ? snapshot.batches
+            .filter((batch): batch is BatchRecord => Boolean(batch && batch.id))
+            .map((batch) => [batch.id, batch])
+        : [],
+    );
+    this.photos = new Map(
+      Array.isArray(snapshot.photos)
+        ? snapshot.photos
+            .filter((photo): photo is PhotoRecord => Boolean(photo && photo.id))
+            .map((photo) => [photo.id, photo])
+        : [],
+    );
+    this.variants = new Map(
+      Array.isArray(snapshot.variants)
+        ? snapshot.variants
+            .filter((variant): variant is VariantRecord => Boolean(variant && variant.id))
+            .map((variant) => [variant.id, variant])
+        : [],
+    );
+    this.scheduledPosts = new Map(
+      Array.isArray(snapshot.scheduledPosts)
+        ? snapshot.scheduledPosts
+            .filter((scheduledPost): scheduledPost is ScheduledPostRecord => Boolean(scheduledPost && scheduledPost.id))
+            .map((scheduledPost) => {
+              const normalizedStatus =
+                scheduledPost.status === "programada" && !scheduledPost.facebookPostId ? "estado_incierto" : scheduledPost.status;
+              if (normalizedStatus !== scheduledPost.status) {
+                stateNeedsPersist = true;
+              }
+              return [
+                scheduledPost.id,
+                {
+                  ...scheduledPost,
+                  status: normalizedStatus,
+                },
+              ] as const;
+            })
+        : [],
+    );
+    this.events = Array.isArray(snapshot.events) ? snapshot.events : [];
+    this.autonomyByBusiness = new Map(snapshot.autonomyByBusiness ?? []);
+    this.metaToken = snapshot.metaToken ?? this.metaToken;
+    this.pendingDeviceLogin = snapshot.pendingDeviceLogin ?? this.pendingDeviceLogin;
+    this.selectedPageId = restoredSelectedPageId;
+    this.selectedBusinessId =
+      typeof snapshot.selectedBusinessId === "string" && this.businesses.has(snapshot.selectedBusinessId)
+        ? snapshot.selectedBusinessId
+        : this.selectedPageId
+          ? [...this.businesses.values()].find((business) => business.facebookPageId === this.selectedPageId)?.id ?? null
+          : null;
+    if (!this.selectedPageId && this.selectedBusinessId) {
+      this.selectedPageId = this.businesses.get(this.selectedBusinessId)?.facebookPageId ?? null;
+    }
+
+    for (const business of this.businesses.values()) {
+      if (!this.autonomyByBusiness.has(business.id)) {
+        this.autonomyByBusiness.set(business.id, createDefaultAutonomyState(business.autonomySettings));
+      }
+    }
+
+    return stateNeedsPersist;
+  }
+
+  private buildPersistedRuntimeState(): PersistedRuntimeState {
+    return {
+      metaToken: this.metaToken,
+      pendingDeviceLogin: this.pendingDeviceLogin,
+      selectedPageId: this.selectedPageId,
+      selectedBusinessId: this.selectedBusinessId,
+      pages: this.pages,
+      businesses: [...this.businesses.values()],
+      visualStyles: this.visualStyles.map((style) => serializeVisualStyle(style)),
+      batches: [...this.batches.values()],
+      photos: [...this.photos.values()],
+      variants: [...this.variants.values()],
+      scheduledPosts: [...this.scheduledPosts.values()],
+      events: this.events,
+      autonomyByBusiness: [...this.autonomyByBusiness.entries()],
+    };
   }
 
   private persistState(): void {
     try {
       const directory = dirname(config.stateFilePath);
       mkdirSync(directory, { recursive: true });
-      const snapshot: PersistedRuntimeState = {
-        metaToken: this.metaToken,
-        pendingDeviceLogin: this.pendingDeviceLogin,
-        selectedPageId: this.selectedPageId,
-        selectedBusinessId: this.selectedBusinessId,
-        pages: this.pages,
-        businesses: [...this.businesses.values()],
-        visualStyles: this.visualStyles.map((style) => serializeVisualStyle(style)),
-        batches: [...this.batches.values()],
-        photos: [...this.photos.values()],
-        variants: [...this.variants.values()],
-        scheduledPosts: [...this.scheduledPosts.values()],
-        events: this.events,
-        autonomyByBusiness: [...this.autonomyByBusiness.entries()],
-      };
+      const snapshot = this.buildPersistedRuntimeState();
       writeFileSync(config.stateFilePath, JSON.stringify(snapshot, null, 2), "utf8");
+      void this.snapshotStore.uploadSnapshot(buildCloudRuntimeSnapshot(snapshot)).catch((error) => {
+        console.warn("[fbmaniaco] failed to back up runtime state to Supabase", error);
+      });
       void this.supabaseMirror.syncState(this.buildSupabaseMirrorState()).catch((error) => {
         console.warn("[fbmaniaco] failed to sync Supabase planner mirror", error);
       });

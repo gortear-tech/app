@@ -18,6 +18,9 @@ export function buildApp() {
   const runtime = createRuntime();
 
   app.register(cors, { origin: true });
+  app.addHook("preHandler", async () => {
+    await runtime.ready;
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof AppError) {
