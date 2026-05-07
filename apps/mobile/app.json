@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "FBmaniaco",
+    "slug": "fbmaniaco",
+    "android": {
+      "package": "com.gabriel.fbmaniaco"
+    },
+    "ios": {
+      "bundleIdentifier": "com.gabriel.fbmaniaco"
+    },
+    "scheme": "fbmaniaco",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "9b10cbee-5ec9-4565-ac13-a27d70c4cc50"
+      }
+    },
+    "owner": "tremender",
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "1.9.25",
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}

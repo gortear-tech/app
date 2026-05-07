@@ -1,0 +1,357 @@
+================================================================================
+WEEKLY REPORTER — DISEÑO DE MÓDULO
+Motor Perron · Capa de Estrategia
+Versión 1.0 | Abril 2026
+================================================================================
+
+Este documento describe el diseño completo del módulo WeeklyReporter dentro de
+Motor Perron. Es un documento de diseño funcional: no contiene código, describe
+comportamiento, reglas y decisiones de diseño.
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. QUÉ ES Y PARA QUÉ SIRVE
+────────────────────────────────────────────────────────────────────────────────
+
+WeeklyReporter es el único módulo de Motor Perron cuyo resultado llega
+directamente al dueño del negocio en lenguaje simple. Todo lo que los otros
+módulos aprenden, analizan y predicen en silencio, WeeklyReporter lo convierte
+en una página de texto claro, objetivo y accionable que el usuario puede leer
+en menos de dos minutos.
+
+Su propósito no es impresionar al usuario con datos. Es que el dueño del negocio
+entienda exactamente qué pasó esta semana, por qué pasó, y qué hacer la siguiente.
+Nada más, nada menos.
+
+El reporte se genera cada domingo y queda disponible en el dashboard del negocio.
+El usuario recibe una notificación push cuando está listo. Los reportes de las
+últimas 12 semanas (3 meses) están disponibles para consulta en cualquier momento.
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. CUÁNDO SE GENERA
+────────────────────────────────────────────────────────────────────────────────
+
+El worker dispara la generación cada domingo en la madrugada, en la zona horaria
+del negocio. Se genera con los datos de la semana que acaba de terminar: de lunes
+a sábado de esa semana.
+
+El reporte no se genera en tiempo real ni bajo demanda. Es un documento fijo que
+refleja el estado del negocio al cierre de cada semana. Si el usuario abre el
+dashboard el miércoles, ve el reporte del domingo anterior, no uno actualizado
+al miércoles.
+
+Cada reporte generado se persiste en base de datos y permanece disponible durante
+12 semanas. Después de ese período se archiva y deja de ser accesible desde la
+interfaz, aunque sigue existiendo para auditoría interna.
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. QUÉ DATOS RECIBE
+────────────────────────────────────────────────────────────────────────────────
+
+WeeklyReporter recibe cuatro fuentes de información, todas ya procesadas por
+otros módulos:
+
+FUENTE 1 — Métricas de la semana
+  Todos los PostPerformance de posts publicados durante la semana que se reporta.
+  Para cada post: alcance, reacciones, comentarios, guardados, score calculado,
+  estilo usado, tipo de contenido, día y franja horaria de publicación.
+
+FUENTE 2 — Métricas de las últimas 4 semanas
+  El promedio de las mismas métricas durante las cuatro semanas anteriores.
+  Este es el período de comparación: la semana actual siempre se evalúa contra
+  ese promedio reciente, no contra el historial completo ni contra el mejor
+  período del negocio.
+
+FUENTE 3 — Mapa causal activo (CausalAnalyzer)
+  Las conclusiones activas del mapa causal con confianza MEDIA o ALTA.
+  WeeklyReporter las usa para explicar por qué algo funcionó o dejó de funcionar,
+  con datos reales como respaldo.
+
+FUENTE 4 — Benchmarks del grupo par (BenchmarkEngine)
+  El rendimiento promedio de negocios similares durante la misma semana.
+  Se usa exclusivamente para la sección de comparación. Nunca influye en
+  las secciones de análisis o recomendaciones.
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. ESTRUCTURA DEL REPORTE
+────────────────────────────────────────────────────────────────────────────────
+
+El reporte tiene siempre cinco secciones en el mismo orden. Cada sección es
+concisa: dos o tres oraciones máximo. El total no excede una página de lectura.
+El tono es neutro y objetivo en todo momento, independientemente de si la semana
+fue buena o mala.
+
+────────────────────────────────────────────────────────────────────────────────
+4.1 SECCIÓN 1 — TRES NÚMEROS DE LA SEMANA
+────────────────────────────────────────────────────────────────────────────────
+
+Tres indicadores clave con su comparación contra el promedio de las últimas
+4 semanas. Se presentan como hechos simples, sin interpretación.
+
+Los tres indicadores son siempre los mismos:
+  - Alcance total de la semana (suma de alcance de todos los posts)
+  - Engagement promedio por post (suma de reacciones + comentarios + guardados
+    dividido entre el número de posts publicados)
+  - Número de posts publicados esa semana
+
+Formato de presentación para cada indicador:
+  [Número] [métrica] · [flecha arriba/abajo/igual] [diferencia] vs las últimas 4 semanas
+
+Ejemplos:
+  "4,230 personas alcanzadas · ↑ 18% vs las últimas 4 semanas"
+  "12 reacciones por post en promedio · ↓ 3% vs las últimas 4 semanas"
+  "5 publicaciones esta semana · igual que las últimas 4 semanas"
+
+Si el negocio no publicó nada esta semana, esta sección muestra solo el dato
+de posts publicados (cero) y omite los otros dos indicadores, indicando que
+no hay datos de alcance ni engagement para la semana.
+
+────────────────────────────────────────────────────────────────────────────────
+4.2 SECCIÓN 2 — EL MEJOR POST DE LA SEMANA
+────────────────────────────────────────────────────────────────────────────────
+
+Identifica el post con el score más alto de la semana y explica en una oración
+por qué funcionó, usando el mapa causal como respaldo cuando hay una conclusión
+aplicable.
+
+Estructura:
+  [Descripción del post: tipo de contenido, día, hora]
+  [Oración explicando por qué funcionó, con dato del mapa causal si existe]
+
+Ejemplos con conclusión causal disponible:
+  "Tu foto de producto del jueves a las 7pm fue la más vista de la semana.
+   Las publicaciones de ese horario tienen en promedio 24% más alcance que
+   el resto de tus posts."
+
+Ejemplos sin conclusión causal disponible:
+  "Tu foto de equipo del martes fue la más vista de la semana con 1,840
+   personas alcanzadas."
+
+Si el negocio no publicó nada esta semana, esta sección muestra el mejor post
+de las últimas 4 semanas como referencia, indicando claramente que corresponde
+a una semana anterior.
+
+────────────────────────────────────────────────────────────────────────────────
+4.3 SECCIÓN 3 — LO QUE NO FUNCIONÓ
+────────────────────────────────────────────────────────────────────────────────
+
+Identifica el patrón de peor rendimiento de la semana. No señala un post
+específico sino un patrón: un tipo de contenido, un horario, un estilo que
+consistentemente rindió por debajo del promedio.
+
+Solo se incluye esta sección si hay al menos 2 posts con rendimiento por debajo
+del promedio semanal del negocio. Con un solo post malo no hay patrón, solo
+un caso aislado.
+
+Estructura:
+  [Descripción del patrón de bajo rendimiento]
+  [Oración explicando por qué, con dato del mapa causal si existe]
+
+Ejemplos con conclusión causal disponible:
+  "Los posts publicados los lunes tuvieron el menor alcance de la semana.
+   Históricamente, los lunes son el día de menor rendimiento para tu negocio."
+
+Ejemplos sin conclusión causal disponible:
+  "Los posts con fondo complejo tuvieron menos alcance que el resto esta semana."
+
+Si no hay un patrón claro de bajo rendimiento, esta sección se omite. El reporte
+no inventa problemas donde no los hay.
+
+────────────────────────────────────────────────────────────────────────────────
+4.4 SECCIÓN 4 — PARA LA SEMANA QUE VIENE
+────────────────────────────────────────────────────────────────────────────────
+
+Dos o tres acciones concretas y específicas para la siguiente semana. No son
+consejos genéricos de marketing: son instrucciones derivadas directamente de
+los datos del negocio.
+
+Cada acción tiene la forma: [qué hacer] + [por qué, en una frase corta].
+
+Ejemplos:
+  "Publica algo el jueves entre 6 y 8pm. Ese horario ha producido tu mejor
+   alcance en las últimas semanas."
+
+  "Intenta una foto de tu equipo o de personas. Llevas 3 semanas sin ese tipo
+   de contenido y históricamente te funciona bien."
+
+  "Si puedes, sube al menos 4 publicaciones esta semana. Las semanas con más
+   posts tienen mejor alcance promedio para tu negocio."
+
+Las acciones se derivan en este orden de prioridad:
+  1. Conclusiones activas del mapa causal de confianza ALTA
+  2. Conclusiones activas del mapa causal de confianza MEDIA
+  3. Huecos de contenido detectados por contentStrategyEngine
+  4. Patrones simples del modelo de rendimiento estadístico
+
+Si no hay suficientes datos para generar acciones concretas (negocio nuevo con
+menos de 10 posts medidos), esta sección sugiere simplemente publicar con
+consistencia para que el sistema pueda aprender.
+
+────────────────────────────────────────────────────────────────────────────────
+4.5 SECCIÓN 5 — CÓMO ESTÁS VS NEGOCIOS SIMILARES
+────────────────────────────────────────────────────────────────────────────────
+
+Un solo dato de comparación contra el grupo par, en lenguaje directo.
+Esta sección usa los benchmarks del BenchmarkEngine y nunca expone datos
+individuales de otros negocios, solo el promedio del grupo.
+
+Estructura:
+  [Métrica del negocio] vs [promedio del grupo par] en [métrica específica]
+
+Ejemplos:
+  "Tu alcance esta semana fue 23% mayor al promedio de restaurantes similares
+   en tu ciudad."
+
+  "Tu engagement por post estuvo 8% por debajo del promedio de negocios
+   similares esta semana."
+
+  "Publicaste más que el promedio de negocios similares: 5 posts vs 3 en promedio."
+
+Si el negocio no tiene suficientes negocios similares en su grupo par para
+generar un benchmark confiable, esta sección se omite del reporte sin explicación.
+El usuario simplemente no ve esa sección esa semana.
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. MANEJO DE SEMANAS SIN PUBLICACIONES
+────────────────────────────────────────────────────────────────────────────────
+
+Si el negocio no publicó nada durante la semana, WeeklyReporter genera un reporte
+parcial en lugar de no generar nada. El reporte parcial contiene:
+
+  Sección 1: Solo el contador de posts (cero). Las métricas de alcance y
+  engagement se omiten porque no hay datos.
+
+  Sección 2: El mejor post de las últimas 4 semanas como referencia, con una
+  línea indicando que esta semana no hubo publicaciones.
+
+  Sección 3: Se omite completamente.
+
+  Sección 4: Una sola acción: retomar la publicación con consistencia, con el
+  mejor horario y tipo de contenido que el historial indica.
+
+  Sección 5: Se omite si no hay datos de la semana para comparar.
+
+El reporte parcial nunca señala la falta de publicaciones como un problema ni
+usa lenguaje que implique juicio. Es un reporte de hechos.
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. REGLAS DE ESCRITURA
+────────────────────────────────────────────────────────────────────────────────
+
+El contenido del reporte sigue estas reglas de escritura en todo momento:
+
+  Lenguaje simple y directo. Sin tecnicismos, sin anglicismos, sin términos
+  de marketing que el dueño de un negocio pequeño no usaría en una conversación.
+
+  Oraciones cortas. Máximo 25 palabras por oración. Si una idea no cabe en
+  25 palabras, se divide en dos oraciones.
+
+  Datos concretos. Cada afirmación va acompañada de un número cuando es posible.
+  "Tu alcance subió" no es suficiente. "Tu alcance subió 18%" sí lo es.
+
+  Sin adjetivos vacíos. Palabras como "excelente", "increíble", "fantástico"
+  o "preocupante" no aparecen en el reporte. Los números hablan solos.
+
+  Sin culpa ni elogio. El reporte no celebra ni reprende. Describe hechos
+  y propone acciones. El tono es el de un asesor objetivo, no el de un
+  motivador ni el de un auditor.
+
+  Sin referencias al sistema. El reporte no menciona a Motor Perron, al
+  algoritmo, a la IA ni a ningún componente técnico. El dueño del negocio
+  no necesita saber cómo se generó el reporte para usarlo.
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. DISPONIBILIDAD Y ACCESO
+────────────────────────────────────────────────────────────────────────────────
+
+NOTIFICACIÓN
+  Cuando el reporte está listo, la API envía una notificación push al usuario.
+  El texto de la notificación es siempre el mismo: el primer número de la
+  sección 1 del reporte. Ejemplo: "Tu reporte semanal está listo: 4,230
+  personas alcanzadas esta semana."
+
+ACCESO DESDE EL DASHBOARD
+  El reporte más reciente aparece como sección visible en el dashboard del
+  negocio. El usuario puede leerlo directamente ahí sin necesidad de navegar
+  a otra pantalla.
+
+HISTORIAL DE REPORTES
+  Los últimos 12 reportes (3 meses) están disponibles desde una sección del
+  dashboard. Se presentan en orden cronológico inverso: el más reciente primero.
+  Cada reporte muestra su fecha y el primer número de su sección 1 como resumen
+  en la lista, para que el usuario pueda identificar semanas de interés sin
+  tener que abrirlos todos.
+
+PERSISTENCIA
+  Cada reporte generado se guarda en base de datos como un documento completo.
+  No se recalcula cuando el usuario lo consulta: siempre muestra el reporte
+  generado el domingo de esa semana, con los datos de ese momento. Esto garantiza
+  que el usuario vea el mismo reporte sin importar cuándo lo abra.
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. CÓMO SE RELACIONA CON LOS DEMÁS MÓDULOS
+────────────────────────────────────────────────────────────────────────────────
+
+CausalAnalyzer (entrada)
+  Proporciona el mapa causal con conclusiones activas que WeeklyReporter usa
+  para explicar el porqué detrás de los números. Sin mapa causal, el reporte
+  describe hechos pero no puede explicar causas.
+
+BenchmarkEngine (entrada)
+  Proporciona los datos del grupo par para la sección de comparación.
+  Es la única fuente de datos externos que entra al reporte.
+
+DeepMemory (entrada indirecta)
+  WeeklyReporter no llama directamente a DeepMemory, pero recibe sus modelos
+  ya procesados a través del worker que orquesta la generación del reporte.
+
+contentStrategyEngine (entrada)
+  Proporciona los huecos de contenido detectados que se usan como fuente de
+  tercer nivel para generar las acciones de la sección 4.
+
+API y Worker (orquestación)
+  El worker llama a WeeklyReporter cada domingo, le pasa todas las fuentes
+  de datos ya preparadas, recibe el reporte generado y lo persiste en base
+  de datos. La API lo expone al frontend cuando el usuario lo consulta.
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. REGLAS IRROMPIBLES
+────────────────────────────────────────────────────────────────────────────────
+
+  1. El reporte se genera siempre, aunque no haya publicaciones. La ausencia
+     de datos produce un reporte parcial, nunca silencio.
+
+  2. El reporte nunca se recalcula después de generado. Lo que se generó el
+     domingo es lo que el usuario verá siempre para esa semana.
+
+  3. El período de comparación es siempre las últimas 4 semanas. No cambia
+     según la antigüedad del negocio ni según cuántos datos haya disponibles.
+
+  4. La sección de benchmarks se omite silenciosamente si no hay grupo par
+     suficiente. No se explica al usuario por qué falta esa sección.
+
+  5. El reporte nunca menciona componentes técnicos del sistema: ni Motor
+     Perron, ni IA, ni algoritmos, ni módulos. Es un reporte de negocio,
+     no un reporte técnico.
+
+  6. Las secciones 3 y 5 pueden omitirse si no hay datos suficientes para
+     generarlas con honestidad. El reporte no inventa patrones ni comparaciones.
+
+  7. Los reportes están disponibles solo durante 12 semanas desde su generación.
+     Después de ese período no son accesibles desde la interfaz del usuario.
+
+  8. La notificación push siempre incluye el dato principal del reporte como
+     adelanto. Nunca es una notificación genérica sin contenido.
+
+
+────────────────────────────────────────────────────────────────────────────────
+FIN DEL DOCUMENTO
+────────────────────────────────────────────────────────────────────────────────

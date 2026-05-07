@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: fbmaniaco-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: fbmaniaco-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      - key: STATE_FILE_PATH
+        value: /var/data/fbmaniaco-state.json
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_VISION_MODEL
+        value: gpt-4o
+      - key: OPENAI_IMAGE_MODEL
+        value: gpt-image-1.5
+      - key: OPENAI_IMAGE_SIZE
+        value: 1024x1024
+      - key: OPENAI_CAPTION_MODEL
+        value: gpt-5.4-mini
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_BOOTSTRAP_TOKEN
+        sync: false
+      - key: META_DEVICE_LOGIN_SCOPES
+        value: pages_show_list,pages_read_engagement,pages_manage_posts
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE
+        sync: false

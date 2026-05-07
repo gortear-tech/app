@@ -1,0 +1,25 @@
+node_modules
+.pnpm-store
+.pnpm-store*
+.codex-runner
+.codex-runner-store
+.runtime
+dist
+build
+coverage
+.turbo
+.expo
+.expo-shared
+.codex-logs
+.android-sdk
+.codex-build-bin
+.codex-build-tools
+.DS_Store
+.env
+.env.*
+!.env.example
+prisma/dev.db
+*.log
+*.apk
+apps/api/data/*.json
+Documentos de diseño/apis de supabase y de meta.txt
