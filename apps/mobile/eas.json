@@ -24,7 +24,8 @@
     },
     "production": {
       "env": {
-        "APP_VARIANT": "production"
+        "APP_VARIANT": "production",
+        "API_URL": "https://fbmaniaco-api.onrender.com"
       }
     }
   },
