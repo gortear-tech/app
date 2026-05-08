@@ -26,6 +26,10 @@
       "env": {
         "APP_VARIANT": "production",
         "API_URL": "https://fbmaniaco-api.onrender.com"
+      },
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
       }
     }
   },
