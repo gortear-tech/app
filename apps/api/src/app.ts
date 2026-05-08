@@ -173,12 +173,6 @@ export function buildApp() {
     return runtime.completeUpload(batchId, request.body as CompletePhotoUploadRequest);
   });
 
-  app.patch("/businesses/:businessId/batches/:batchId/photos/:photoId/style", async (request) => {
-    const { batchId, photoId } = request.params as { batchId: string; photoId: string };
-    const { styleId } = request.body as { styleId: string };
-    return runtime.changePhotoStyle(batchId, photoId, styleId);
-  });
-
   app.post("/businesses/:businessId/batches/:batchId/estimate-cost", async (request) => {
     const { batchId } = request.params as { batchId: string };
     const { variantsPerPhoto } = request.body as { variantsPerPhoto: number };

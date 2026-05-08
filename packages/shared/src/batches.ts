@@ -33,11 +33,6 @@ export interface CompletePhotoUploadRequest {
   imageDataUrl?: string | null;
 }
 
-export interface CorrectPhotoClassificationRequest {
-  subjectType?: string;
-  assignedStyleId?: string;
-}
-
 export interface PhotoUploadIntentResponse {
   uploadUrl: string;
   storageKey: string;

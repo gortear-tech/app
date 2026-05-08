@@ -61,8 +61,6 @@ export type WorkerStatePhoto = {
   uploadUrl?: string | null;
   status: string;
   visionAnalysis?: unknown;
-  assignedStyle?: unknown;
-  editingPrompt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 };
@@ -72,6 +70,7 @@ export type WorkerStateVariant = {
   batchId: string;
   photoId: string;
   styleId: string;
+  assignedStyle?: unknown;
   generationPlan?: unknown;
   promptUsed?: string | null;
   imageUrl?: string | null;

@@ -45,8 +45,6 @@ type PlannerPhoto = {
   uploadUrl?: string | null;
   status: string;
   visionAnalysis?: unknown;
-  assignedStyle?: unknown;
-  editingPrompt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 };
@@ -56,6 +54,7 @@ type PlannerVariant = {
   batchId: string;
   photoId: string;
   styleId: string;
+  assignedStyle?: unknown;
   generationPlan?: unknown;
   promptUsed?: string | null;
   imageUrl?: string | null;
@@ -200,8 +199,6 @@ export class SupabasePlannerMirror {
       upload_url: normalizeImageUrl(photo.uploadUrl) ?? photo.uploadUrl ?? null,
       status: photo.status,
       vision_analysis: photo.visionAnalysis ?? null,
-      assigned_style: photo.assignedStyle ?? null,
-      editing_prompt: photo.editingPrompt ?? null,
       created_at: photo.createdAt ?? new Date().toISOString(),
       updated_at: photo.updatedAt ?? new Date().toISOString(),
     }));

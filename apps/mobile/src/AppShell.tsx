@@ -1161,9 +1161,7 @@ function BatchScreen(props: {
   setBatchState: React.Dispatch<React.SetStateAction<BatchState>>;
   captionDrafts: CaptionDraftMap;
   setCaptionDrafts: React.Dispatch<React.SetStateAction<CaptionDraftMap>>;
-  stylesCatalog: VisualStyle[];
   selectedPhotoId: string | null;
-  stylePickerPhotoId: string | null;
   onBack: () => void;
   onRefresh: () => void;
   onPickPhotos: () => Promise<void>;
@@ -1171,9 +1169,6 @@ function BatchScreen(props: {
   onUploadPhotos: () => Promise<void>;
   onOpenPhotoDetail: (photoId: string) => void;
   onClosePhotoDetail: () => void;
-  onOpenStylePicker: (photoId: string) => void;
-  onCloseStylePicker: () => void;
-  onChooseStyle: (photoId: string, styleId: string) => Promise<void>;
   onCancelBatch: () => void;
   onOpenVariantCount: () => void;
   onGenerateVariants: () => Promise<void>;
@@ -1263,6 +1258,7 @@ function BatchScreen(props: {
   const swipeIndicatorLabel = props.swipeCurrentVariant && currentSwipePhotoIndex >= 0
     ? `F${currentSwipePhotoIndex + 1} · V${currentSwipeVariantIndex} de ${Math.max(1, currentSwipeVariants.length)}`
     : `V${props.swipeIndex + 1} de ${Math.max(1, swipeDeck.length)}`;
+  const swipeStyleName = props.swipeCurrentVariant?.styleName ?? props.swipeCurrentVariant?.assignedStyle?.styleName ?? null;
 
   const swipeResponder = useMemo(
     () =>
@@ -1330,39 +1326,6 @@ function BatchScreen(props: {
     </View>
   );
 
-  const renderStylePicker = () => {
-    const photo = batch?.photos.find((item) => item.id === props.stylePickerPhotoId) ?? null;
-    return (
-      <Modal visible={Boolean(props.stylePickerPhotoId)} transparent animationType="slide" onRequestClose={props.onCloseStylePicker}>
-        <View style={styles.modalBackdrop}>
-          <Pressable style={styles.modalScrim} onPress={props.onCloseStylePicker} />
-          <View style={styles.bottomSheet}>
-            <View style={styles.sheetHandle} />
-            <View style={styles.sheetHeader}>
-              <Text style={styles.sheetTitle}>Cambiar estilo</Text>
-              <SecondaryButton label="✕ Cerrar" onPress={props.onCloseStylePicker} />
-            </View>
-            {photo ? <Text style={styles.bodyMuted}>{photo.assignedStyle?.styleName ?? "Sin estilo asignado"}</Text> : null}
-            <ScrollView contentContainerStyle={styles.sheetBody}>
-              {props.stylesCatalog.map((style) => {
-                const active = photo?.assignedStyle?.styleId === style.id;
-                return (
-                  <Pressable key={style.id} onPress={() => props.onChooseStyle(props.stylePickerPhotoId ?? "", style.id)} style={[styles.styleRow, active && styles.styleRowActive]}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.listTitle}>{style.name}</Text>
-                      <Text style={styles.bodyMuted}>{style.description}</Text>
-                    </View>
-                    {active ? <Text style={styles.styleChip}>Actual</Text> : null}
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-    );
-  };
-
   if (currentStep === "upload") {
     return (
       <View style={styles.screenRoot}>
@@ -1397,7 +1360,6 @@ function BatchScreen(props: {
         <View style={styles.fixedFooter}>
           <PrimaryButton label="Analizar fotos" onPress={props.onUploadPhotos} disabled={props.loading || pendingPhotos.length === 0 || !props.batchId} />
         </View>
-        {renderStylePicker()}
       </View>
     );
   }
@@ -1405,7 +1367,7 @@ function BatchScreen(props: {
   if (currentStep === "review") {
     return (
       <View style={styles.screenRoot}>
-        {renderHeader("🖼️ Thumbnails con estilos", isTiny ? `${reviewPhotos.length} fotos` : `${reviewPhotos.length} fotos analizadas`)}
+        {renderHeader("🖼️ Fotos analizadas", isTiny ? `${reviewPhotos.length} fotos` : `${reviewPhotos.length} fotos listas para generar`) }
         <ScrollView
           contentContainerStyle={[
             styles.batchContent,
@@ -1416,7 +1378,7 @@ function BatchScreen(props: {
           <View style={styles.infoCard}>
             <Text style={styles.sectionLabel}>REVISIÓN RÁPIDA</Text>
             <Text style={styles.bodyMuted}>
-              {isTiny ? "Toca una foto para ver el detalle o cambiar el estilo." : "Toca una foto para ver el detalle o mantén presionado para cambiar el estilo."}
+              {isTiny ? "Toca una foto para ver el detalle." : "Toca una foto para ver el análisis antes de generar variantes."}
             </Text>
           </View>
           <View style={styles.reviewGrid}>
@@ -1424,14 +1386,13 @@ function BatchScreen(props: {
               <Pressable
                 key={photo.id}
                 onPress={() => props.onOpenPhotoDetail(photo.id)}
-                onLongPress={() => props.onOpenStylePicker(photo.id)}
                 style={({ pressed }) => [styles.reviewTile, pressed && styles.reviewTilePressed]}
               >
                 {photo.imageUrl ? <Image source={{ uri: photo.imageUrl }} style={styles.reviewTileImage} /> : <View style={styles.reviewTileFallback} />}
                 <View style={styles.reviewTileOverlay} />
                 <View style={styles.reviewTileLabel}>
                   <Text style={styles.reviewTileLabelText} numberOfLines={1}>
-                    {photo.assignedStyle?.styleName ?? "Pendiente"}
+                    {photo.visionAnalysis?.subject.type ? humanizeEnumLabel(photo.visionAnalysis.subject.type) : "Analizada"}
                   </Text>
                 </View>
               </Pressable>
@@ -1443,7 +1404,6 @@ function BatchScreen(props: {
         <View style={styles.fixedFooter}>
           <PrimaryButton label="✨ Generar variantes" onPress={props.onOpenVariantCount} disabled={props.loading || reviewPhotos.length === 0} />
         </View>
-        {renderStylePicker()}
       </View>
     );
   }
@@ -1459,9 +1419,6 @@ function BatchScreen(props: {
           `Calidad: ${formatPercent(selectedPhoto.visionAnalysis.technicalQuality.sharpness)}`,
         ]
       : [];
-    const promptText = selectedPhoto?.editingPrompt?.trim() ?? "";
-    const promptRefreshing = promptText.length === 0 || promptText === "Actualizando...";
-
     return (
       <View style={styles.screenRoot}>
         <View style={styles.detailHero}>
@@ -1488,39 +1445,6 @@ function BatchScreen(props: {
             {selectedPhoto?.visionAnalysis?.summary ?? "Sin análisis disponible."}
           </Text>
 
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionLabel}>ESTILO ASIGNADO</Text>
-          </View>
-          {selectedPhoto?.assignedStyle ? (
-            <View style={styles.assignedStyleCard}>
-              <View style={styles.assignedStyleHeader}>
-                <Text style={styles.assignedStylePill}>{selectedPhoto.assignedStyle.styleName}</Text>
-                <Text style={styles.bodyMuted}>{selectedPhoto.assignedStyle.intensity}</Text>
-              </View>
-              <Text style={styles.assignedStyleBody} numberOfLines={isTiny ? 2 : undefined}>
-                {selectedPhoto.visionAnalysis?.mood.description ?? "Estilo ajustado para esta foto."}
-              </Text>
-              <View style={styles.metricRow}><Text style={styles.metricLabel}>Contraste</Text><View style={styles.metricTrack}><View style={[styles.metricFill, { width: formatPercent(selectedPhoto.assignedStyle.contrast) }]} /></View></View>
-              <View style={styles.metricRow}><Text style={styles.metricLabel}>Saturación</Text><View style={styles.metricTrack}><View style={[styles.metricFill, { width: formatPercent(selectedPhoto.assignedStyle.saturation) }]} /></View></View>
-              <View style={styles.metricRow}><Text style={styles.metricLabel}>Calidez</Text><View style={styles.metricTrack}><View style={[styles.metricFill, { width: formatPercent(selectedPhoto.assignedStyle.warmth) }]} /></View></View>
-              <View style={styles.metricRow}><Text style={styles.metricLabel}>Nitidez</Text><View style={styles.metricTrack}><View style={[styles.metricFill, { width: formatPercent(selectedPhoto.assignedStyle.sharpness) }]} /></View></View>
-            </View>
-          ) : null}
-
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionLabel}>INSTRUCCION DE EDICION</Text>
-          </View>
-          <View style={styles.promptCard}>
-            {promptRefreshing ? (
-              <View style={styles.promptSkeleton}>
-                <View style={styles.promptSkeletonLine} />
-                <View style={styles.promptSkeletonLineShort} />
-                <Text style={styles.promptSkeletonText}>Actualizando...</Text>
-              </View>
-            ) : (
-              <Text style={styles.bodyMuted} numberOfLines={isTiny ? 3 : undefined}>{promptText}</Text>
-            )}
-          </View>
         </ScrollView>
       </View>
     );
@@ -1622,7 +1546,7 @@ function BatchScreen(props: {
             <Animated.View pointerEvents="none" style={[styles.swipeTint, styles.swipeTintReject, { opacity: swipeRejectTint }]} />
             <View style={[styles.swipeCaptionCard, isTiny && styles.swipeCaptionCardCompact]}>
               <View style={styles.swipeCaptionHeader}>
-                <Text style={styles.swipeCaptionLabel}>Caption</Text>
+                <Text style={styles.swipeCaptionLabel} numberOfLines={1}>{swipeStyleName ? `Caption · ${swipeStyleName}` : "Caption"}</Text>
                 <Pressable onPress={() => setSwipeCaptionExpanded((current) => !current)} style={styles.swipeCaptionToggle}>
                   <Text style={styles.swipeCaptionToggleText}>{swipeCaptionExpanded ? "Contraer" : "Ver más"}</Text>
                 </Pressable>
@@ -1749,7 +1673,6 @@ function BatchScreen(props: {
           </View>
         </SectionCard>
       </ScrollView>
-      {renderStylePicker()}
     </View>
   );
 }
@@ -2519,7 +2442,6 @@ export default function AppShell() {
   const [batchDetail, setBatchDetail] = useState<BatchDetail | null>(null);
   const [batchStep, setBatchStep] = useState<BatchFlowStep>("upload");
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
-  const [stylePickerPhotoId, setStylePickerPhotoId] = useState<string | null>(null);
   const [cancelBatchPromptVisible, setCancelBatchPromptVisible] = useState<CancelBatchPromptState["visible"]>(false);
   const [stylesCatalog, setStylesCatalog] = useState<VisualStyle[]>([]);
   const [analysisBanner, setAnalysisBanner] = useState<AnalysisBannerState | null>(null);
@@ -2554,7 +2476,6 @@ export default function AppShell() {
     setBatchDetail(null);
     setBatchStep("upload");
     setSelectedPhotoId(null);
-    setStylePickerPhotoId(null);
     setAnalysisBanner(null);
     setScheduledPosts([]);
     setCaptionDrafts({});
@@ -3027,7 +2948,6 @@ export default function AppShell() {
       }));
       setBatchStep("upload");
       setSelectedPhotoId(null);
-      setStylePickerPhotoId(null);
       setSwipeDecisions({});
       setSwipeHistory([]);
       setSwipeIndex(0);
@@ -3149,29 +3069,6 @@ export default function AppShell() {
   const handleClosePhotoDetail = () => {
     setSelectedPhotoId(null);
     setBatchStep("review");
-  };
-
-  const handleOpenStylePicker = (photoId: string) => {
-    setStylePickerPhotoId(photoId);
-  };
-
-  const handleCloseStylePicker = () => {
-    setStylePickerPhotoId(null);
-  };
-
-  const handleChooseStyle = async (photoId: string, styleId: string) => {
-    if (!activeBusinessId || !currentBatchId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      await api.changePhotoStyle(activeBusinessId, currentBatchId, photoId, styleId);
-      await refreshBatchData(activeBusinessId, currentBatchId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "No se pudo cambiar el estilo");
-    } finally {
-      setLoading(false);
-      setStylePickerPhotoId(null);
-    }
   };
 
   const handleConfirmCalendar = async (periodDays: 7 | 14 | 30) => {
@@ -3749,9 +3646,7 @@ export default function AppShell() {
           batchState={batchState}
           captionDrafts={captionDrafts}
           setCaptionDrafts={setCaptionDrafts}
-          stylesCatalog={stylesCatalog}
           selectedPhotoId={selectedPhotoId}
-          stylePickerPhotoId={stylePickerPhotoId}
           onBack={goBack}
           onRefresh={() => refreshBatchData()}
           onPickPhotos={handlePickPhotos}
@@ -3759,9 +3654,6 @@ export default function AppShell() {
           onUploadPhotos={handleUploadPhotos}
           onOpenPhotoDetail={handleOpenPhotoDetail}
           onClosePhotoDetail={handleClosePhotoDetail}
-          onOpenStylePicker={handleOpenStylePicker}
-          onCloseStylePicker={handleCloseStylePicker}
-          onChooseStyle={handleChooseStyle}
           onCancelBatch={openCancelBatchPrompt}
           onOpenVariantCount={handleOpenVariantCount}
           onGenerateVariants={handleGenerateVariants}
@@ -5111,77 +5003,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
-  assignedStyleCard: {
-    gap: 10,
-    padding: 14,
-    borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surface,
-  },
-  assignedStyleHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  assignedStylePill: {
-    color: theme.colors.text,
-    backgroundColor: "#2a1508",
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontWeight: "800",
-    overflow: "hidden",
-  },
-  assignedStyleBody: {
-    color: theme.colors.muted,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  metricRow: {
-    gap: 6,
-  },
-  metricLabel: {
-    color: theme.colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  metricTrack: {
-    width: "100%",
-    height: 8,
-    borderRadius: 999,
-    backgroundColor: theme.colors.surfaceAlt,
-    overflow: "hidden",
-  },
-  metricFill: {
-    height: "100%",
-    borderRadius: 999,
-    backgroundColor: theme.colors.accent,
-  },
-  promptCard: {
-    padding: 14,
-    borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.surfaceAlt,
-  },
-  promptSkeleton: {
-    gap: 10,
-  },
-  promptSkeletonLine: {
-    height: 10,
-    borderRadius: 999,
-    backgroundColor: "#2b2b2b",
-  },
-  promptSkeletonLineShort: {
-    width: "72%",
-  },
-  promptSkeletonText: {
-    color: theme.colors.tertiary,
-    fontSize: 12,
-    fontWeight: "700",
-  },
   variantStepper: {
     flexDirection: "row",
     alignItems: "center",
@@ -5354,6 +5175,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   swipeCaptionLabel: {
+    flex: 1,
     color: theme.colors.text,
     fontSize: 11,
     fontWeight: "800",
@@ -5807,31 +5629,6 @@ const styles = StyleSheet.create({
   },
   sheetTitleCompact: {
     fontSize: 16,
-  },
-  styleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    padding: 12,
-    borderRadius: theme.radius.md,
-    backgroundColor: theme.colors.surface,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-  },
-  styleRowActive: {
-    borderColor: theme.colors.accent,
-    backgroundColor: theme.colors.accentSoft,
-  },
-  styleChip: {
-    color: theme.colors.accent,
-    fontSize: 12,
-    fontWeight: "800",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderWidth: 1,
-    borderColor: theme.colors.accent,
   },
   screenBottomSpacer: {
     height: 12,

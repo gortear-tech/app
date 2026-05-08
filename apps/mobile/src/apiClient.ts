@@ -126,12 +126,6 @@ export function createApiClient(baseUrl: string) {
         headers: jsonHeaders,
         body: JSON.stringify({ variantsPerPhoto }),
       }),
-    changePhotoStyle: (businessId: string, batchId: string, photoId: string, styleId: string) =>
-      request<unknown>(`/businesses/${businessId}/batches/${batchId}/photos/${photoId}/style`, {
-        method: "PATCH",
-        headers: jsonHeaders,
-        body: JSON.stringify({ styleId }),
-      }),
     listVariants: (businessId: string, batchId: string) =>
       request<any[]>(`/businesses/${businessId}/batches/${batchId}/variants`),
     approveVariant: (businessId: string, batchId: string, variantId: string) =>

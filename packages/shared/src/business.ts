@@ -51,9 +51,7 @@ export interface OriginalPhotoSummary {
   id: string;
   status: string;
   imageUrl?: string | null;
-  assignedStyle: AssignedStyle | null;
   visionAnalysis: VisionAnalysisResult | null;
-  editingPrompt: string | null;
 }
 
 export interface GeneratedVariantSummary {
@@ -61,6 +59,8 @@ export interface GeneratedVariantSummary {
   photoId: string;
   status: string;
   styleId: string;
+  styleName?: string | null;
+  assignedStyle?: AssignedStyle | null;
   caption?: string | null;
   imageUrl?: string | null;
   generationPlan: GenerationPlan;

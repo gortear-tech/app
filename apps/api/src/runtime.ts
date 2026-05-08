@@ -371,8 +371,6 @@ type PhotoRecord = {
   uploadUrl: string;
   status: PhotoStatus;
   visionAnalysis: VisionAnalysisResult | null;
-  assignedStyle: AssignedStyle | null;
-  editingPrompt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -382,6 +380,7 @@ type VariantRecord = {
   batchId: string;
   photoId: string;
   styleId: string;
+  assignedStyle?: AssignedStyle | null;
   generationPlan: ReturnType<typeof buildGenerationPlan>;
   promptUsed: string;
   imageUrl: string | null;
@@ -917,6 +916,14 @@ export class FbmaniacoRuntime {
     return this.visualStyles.map((style) => cloneVisualStyle(style));
   }
 
+  private styleNameFor(styleId: string | null | undefined): string | null {
+    if (!styleId) {
+      return null;
+    }
+
+    return this.visualStyles.find((style) => style.id === styleId)?.name ?? styleId;
+  }
+
   createStyle(input: CreateVisualStyleRequest): VisualStyle {
     const now = new Date().toISOString();
     const name = input.name.trim();
@@ -1243,8 +1250,6 @@ export class FbmaniacoRuntime {
         uploadUrl: photo.uploadUrl,
         status: photo.status,
         visionAnalysis: photo.visionAnalysis,
-        assignedStyle: photo.assignedStyle,
-        editingPrompt: photo.editingPrompt,
         createdAt: photo.createdAt,
         updatedAt: photo.updatedAt,
       })),
@@ -1253,6 +1258,7 @@ export class FbmaniacoRuntime {
         batchId: variant.batchId,
         photoId: variant.photoId,
         styleId: variant.styleId,
+        assignedStyle: variant.assignedStyle ?? null,
         generationPlan: variant.generationPlan,
         promptUsed: variant.promptUsed,
         imageUrl: variant.imageUrl,
@@ -1476,24 +1482,33 @@ export class FbmaniacoRuntime {
     variantIndex: number;
     photoIndex: number;
   }): AssignedStyle {
-    if (!input.photo.assignedStyle || !input.photo.visionAnalysis) {
+    if (!input.photo.visionAnalysis) {
       throw new AppError({
         code: "photo_not_ready_for_style",
         statusCode: 409,
-        message: "Photo is missing assigned style or analysis",
+        message: "Photo is missing analysis",
         userMessage: "La foto aun no esta lista para generar variantes.",
       });
     }
 
-    if (input.photo.assignedStyle.manualOverride || this.visualStyles.length === 0) {
-      return input.photo.assignedStyle;
+    if (this.visualStyles.length === 0) {
+      throw new AppError({
+        code: "style_catalog_empty",
+        statusCode: 409,
+        message: "No visual styles are configured",
+        userMessage: "Primero agrega al menos un estilo visual para poder generar variantes.",
+      });
     }
 
     const usageByStyle = new Map<string, number>();
+    const usageByStyleForPhoto = new Map<string, number>();
     for (const variantId of input.batch.variantIds) {
       const variant = this.variants.get(variantId);
       if (!variant || variant.status === "fallida" || variant.status === "eliminada") continue;
       usageByStyle.set(variant.styleId, (usageByStyle.get(variant.styleId) ?? 0) + 1);
+      if (variant.photoId === input.photo.id) {
+        usageByStyleForPhoto.set(variant.styleId, (usageByStyleForPhoto.get(variant.styleId) ?? 0) + 1);
+      }
     }
 
     const analysis = input.photo.visionAnalysis;
@@ -1513,13 +1528,13 @@ export class FbmaniacoRuntime {
     const rankedStyles = this.visualStyles
       .map((style, styleIndex) => {
         let score = 0;
-        if (style.id === input.photo.assignedStyle?.styleId) score += input.variantIndex === 0 ? 28 : 4;
         if (includesNormalizedText(style.recommendedIndustries, businessText)) score += 38;
         if (includesNormalizedText(style.recommendedPhotoTypes, photoText)) score += 34;
         if (style.intensity === "ligera" && hasSensitiveVisuals) score += 10;
         if (style.intensity === "fuerte" && hasSensitiveVisuals) score -= 18;
-        score -= (usageByStyle.get(style.id) ?? 0) * 26;
-        score += ((input.photoIndex + input.variantIndex + styleIndex) % 11) / 100;
+        score -= (usageByStyleForPhoto.get(style.id) ?? 0) * 110;
+        score -= (usageByStyle.get(style.id) ?? 0) * 18;
+        score += ((input.photoIndex * 7 + input.variantIndex * 13 + styleIndex) % 17) / 100;
         return { style, score };
       })
       .sort((left, right) => right.score - left.score);
@@ -1545,14 +1560,14 @@ export class FbmaniacoRuntime {
         id: photo.id,
         status: photo.status,
         imageUrl: normalizeImageUrl(photo.uploadUrl),
-        assignedStyle: photo.assignedStyle,
         visionAnalysis: photo.visionAnalysis,
-        editingPrompt: photo.editingPrompt,
       })),
       variants: variants.map((variant) => ({
         id: variant.id,
         photoId: variant.photoId,
         styleId: variant.styleId,
+        styleName: variant.assignedStyle?.styleName ?? this.styleNameFor(variant.styleId),
+        assignedStyle: variant.assignedStyle ?? null,
         status: variant.status,
         caption: variant.caption,
         imageUrl: normalizeImageUrl(variant.imageUrl) ?? normalizeImageUrl(photosById.get(variant.photoId)?.uploadUrl),
@@ -1658,8 +1673,6 @@ export class FbmaniacoRuntime {
       uploadUrl,
       status: "analizando",
       visionAnalysis: null,
-      assignedStyle: null,
-      editingPrompt: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -1670,33 +1683,7 @@ export class FbmaniacoRuntime {
 
     try {
       const analysis = await this.visionProvider.analyze(uploadUrl);
-      const business = this.getBusiness(batch.businessId);
-      const memory = buildDeepMemory(this.events.filter((event) => event.negocioId === batch.businessId));
-      const styleCatalog = this.visualStyles;
-      if (styleCatalog.length === 0) {
-        throw new AppError({
-          code: "style_catalog_empty",
-          statusCode: 409,
-          message: "No visual styles are configured",
-          userMessage: "Primero agrega al menos un estilo visual para poder analizar fotos.",
-        });
-      }
-      const assignedStyle = assignStyle({
-        business: this.businessContextFor(business),
-        analysis,
-        styles: styleCatalog,
-        memory,
-      });
-      const prompt = buildGenerationPlan({
-        business: this.businessContextFor(business),
-        analysis,
-        style: assignedStyle,
-        memory,
-      });
-
       photo.visionAnalysis = analysis;
-      photo.assignedStyle = assignedStyle;
-      photo.editingPrompt = prompt.promptFinal;
       photo.status = "validada";
       photo.updatedAt = new Date().toISOString();
       batch.status = "pendiente_confirmacion";
@@ -1712,69 +1699,6 @@ export class FbmaniacoRuntime {
       this.persistState();
       throw error;
     }
-  }
-
-  changePhotoStyle(batchId: string, photoId: string, styleId: string): PhotoRecord {
-    const batch = this.getBatch(batchId);
-    this.assertBatchCanBeWorked(batch);
-    const photo = this.photos.get(photoId);
-    if (!photo || photo.batchId !== batch.id) {
-      throw new AppError({
-        code: "photo_not_found",
-        statusCode: 404,
-        message: "Photo not found",
-        userMessage: "La foto no existe.",
-      });
-    }
-    if (!photo.visionAnalysis) {
-      throw new AppError({
-        code: "photo_not_analyzed",
-        statusCode: 409,
-        message: "Photo is not analyzed yet",
-        userMessage: "La foto aun no termino de analizarse.",
-      });
-    }
-    const styleCatalog = this.visualStyles;
-    const style = styleCatalog.find((item) => item.id === styleId);
-    if (!style) {
-      throw new AppError({
-        code: "style_not_found",
-        statusCode: 404,
-        message: "Style not found",
-        userMessage: "El estilo no existe.",
-      });
-    }
-
-    const business = this.getBusiness(batch.businessId);
-    const memory = buildDeepMemory(this.events.filter((event) => event.negocioId === batch.businessId));
-    const assignedStyle = assignStyle({
-      business: this.businessContextFor(business),
-      analysis: photo.visionAnalysis,
-      styles: [style],
-      memory,
-    });
-    const prompt = buildGenerationPlan({
-      business: this.businessContextFor(business),
-      analysis: photo.visionAnalysis,
-      style: assignedStyle,
-      memory,
-    });
-    photo.assignedStyle = { ...assignedStyle, manualOverride: true };
-    photo.editingPrompt = prompt.promptFinal;
-    photo.updatedAt = new Date().toISOString();
-    this.photos.set(photo.id, photo);
-
-    this.recordEvent({
-      negocioId: batch.businessId,
-      type: "estilo_cambiado_por_usuario",
-      occurredAt: new Date().toISOString(),
-      styleId: style.id,
-      styleName: style.name,
-      photoType: photo.visionAnalysis.subject.type,
-      score: 0,
-    });
-    this.persistState();
-    return photo;
   }
 
   estimateCost(batchId: string, variantsPerPhoto: number): { estimatedCostUsd: number } {
@@ -1875,7 +1799,7 @@ export class FbmaniacoRuntime {
       if (closedResult) return closedResult;
 
       const photo = this.photos.get(photoId);
-      if (!photo || !photo.visionAnalysis || !photo.assignedStyle || !photo.editingPrompt) continue;
+      if (!photo || !photo.visionAnalysis) continue;
       const existingVariantsForPhoto = batch.variantIds
         .map((variantId) => this.variants.get(variantId))
         .filter((variant): variant is VariantRecord =>
@@ -1915,6 +1839,7 @@ export class FbmaniacoRuntime {
           batchId,
           photoId,
           styleId: selectedStyle.styleId,
+          assignedStyle: selectedStyle,
           generationPlan: plan,
           promptUsed,
           imageUrl: null,
@@ -2022,6 +1947,8 @@ export class FbmaniacoRuntime {
         id: variant.id,
         photoId: variant.photoId,
         styleId: variant.styleId,
+        styleName: variant.assignedStyle?.styleName ?? this.styleNameFor(variant.styleId),
+        assignedStyle: variant.assignedStyle ?? null,
         status: variant.status,
         caption: variant.caption,
         imageUrl: variant.imageUrl,
@@ -2538,7 +2465,7 @@ export class FbmaniacoRuntime {
       caption: variant?.caption ?? null,
       imageUrl: normalizeImageUrl(variant?.imageUrl) ?? normalizeImageUrl(photo?.uploadUrl),
       styleId: variant?.styleId ?? null,
-      styleName: photo?.assignedStyle?.styleName ?? variant?.styleId ?? null,
+      styleName: variant?.assignedStyle?.styleName ?? this.styleNameFor(variant?.styleId),
     };
   }
 
@@ -2706,8 +2633,31 @@ export class FbmaniacoRuntime {
       businesses: [...this.businesses.values()],
       visualStyles: this.visualStyles.map((style) => serializeVisualStyle(style)),
       batches: [...this.batches.values()],
-      photos: [...this.photos.values()],
-      variants: [...this.variants.values()],
+      photos: [...this.photos.values()].map((photo) => ({
+        id: photo.id,
+        batchId: photo.batchId,
+        fileName: photo.fileName,
+        storageKey: photo.storageKey,
+        uploadUrl: photo.uploadUrl,
+        status: photo.status,
+        visionAnalysis: photo.visionAnalysis,
+        createdAt: photo.createdAt,
+        updatedAt: photo.updatedAt,
+      })),
+      variants: [...this.variants.values()].map((variant) => ({
+        id: variant.id,
+        batchId: variant.batchId,
+        photoId: variant.photoId,
+        styleId: variant.styleId,
+        assignedStyle: variant.assignedStyle ?? null,
+        generationPlan: variant.generationPlan,
+        promptUsed: variant.promptUsed,
+        imageUrl: variant.imageUrl,
+        caption: variant.caption,
+        status: variant.status,
+        createdAt: variant.createdAt,
+        updatedAt: variant.updatedAt,
+      })),
       scheduledPosts: [...this.scheduledPosts.values()],
       events: this.events,
       autonomyByBusiness: [...this.autonomyByBusiness.entries()],
