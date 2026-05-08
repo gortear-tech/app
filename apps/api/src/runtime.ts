@@ -773,6 +773,7 @@ export class FbmaniacoRuntime {
       await this.selectPage(this.pages[0]!.pageId);
     }
 
+    this.syncBusinessTokenStatusesFromMeta();
     this.persistState();
     return { token: resolvedToken, status: this.bootstrapStatus(), pages: this.listPages() };
   }
@@ -971,8 +972,9 @@ export class FbmaniacoRuntime {
     const existingBusiness = [...this.businesses.values()].find((business) => business.facebookPageId === pageId);
     if (existingBusiness) {
       this.selectedBusinessId = existingBusiness.id;
+      this.syncBusinessTokenStatusesFromMeta();
       this.persistState();
-      return existingBusiness;
+      return this.businesses.get(existingBusiness.id) ?? existingBusiness;
     }
 
     const business: BusinessRecord = {
@@ -1006,6 +1008,9 @@ export class FbmaniacoRuntime {
 
   listBusinesses(): BusinessSummary[] {
     this.restoreStateFromDisk();
+    if (this.syncBusinessTokenStatusesFromMeta()) {
+      this.persistState();
+    }
     return [...this.businesses.values()].map((business) => ({
       id: business.id,
       name: business.name,
@@ -1086,6 +1091,41 @@ export class FbmaniacoRuntime {
     const created = createDefaultAutonomyState(business.autonomySettings);
     this.autonomyByBusiness.set(businessId, created);
     return created;
+  }
+
+  private syncBusinessTokenStatusesFromMeta(): boolean {
+    const facebookTokenStatus = this.metaToken?.status ?? null;
+    if (facebookTokenStatus !== "valido" && facebookTokenStatus !== "por_vencer") {
+      return false;
+    }
+
+    const now = new Date().toISOString();
+    const connectedPageIds = new Set(this.pages.map((page) => page.pageId));
+    let changed = false;
+
+    for (const business of this.businesses.values()) {
+      if (!connectedPageIds.has(business.facebookPageId) || business.tokenStatus === facebookTokenStatus) {
+        continue;
+      }
+
+      this.businesses.set(business.id, {
+        ...business,
+        tokenStatus: facebookTokenStatus,
+        updatedAt: now,
+      });
+      changed = true;
+    }
+
+    this.pages = this.pages.map((page) => {
+      if (page.pageAccessTokenStatus === facebookTokenStatus) {
+        return page;
+      }
+
+      changed = true;
+      return { ...page, pageAccessTokenStatus: facebookTokenStatus };
+    });
+
+    return changed;
   }
 
   private setAutonomyState(businessId: string, state: AutonomyState): void {
@@ -1183,6 +1223,9 @@ export class FbmaniacoRuntime {
 
   getDashboard(businessId: string): BusinessDashboard {
     this.restoreStateFromDisk();
+    if (this.syncBusinessTokenStatusesFromMeta()) {
+      this.persistState();
+    }
     const business = this.getBusiness(businessId);
     const memory = buildDeepMemory(this.events.filter((event) => event.negocioId === businessId));
     const report = generateWeeklyReport({
@@ -2404,6 +2447,10 @@ export class FbmaniacoRuntime {
           : null;
     if (!this.selectedPageId && this.selectedBusinessId) {
       this.selectedPageId = this.businesses.get(this.selectedBusinessId)?.facebookPageId ?? null;
+    }
+
+    if (this.syncBusinessTokenStatusesFromMeta()) {
+      stateNeedsPersist = true;
     }
 
     for (const business of this.businesses.values()) {
