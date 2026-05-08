@@ -121,7 +121,7 @@ export function createApiClient(baseUrl: string) {
         method: "POST",
       }),
     generateVariants: (businessId: string, batchId: string, variantsPerPhoto: number) =>
-      request<{ created: number; blockedReason?: string | null }>(`/businesses/${businessId}/batches/${batchId}/generate`, {
+      request<{ created: number; available?: number; blockedReason?: string | null }>(`/businesses/${businessId}/batches/${batchId}/generate`, {
         method: "POST",
         headers: jsonHeaders,
         body: JSON.stringify({ variantsPerPhoto }),

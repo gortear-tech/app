@@ -1611,41 +1611,44 @@ function BatchScreen(props: {
             ]}
             {...swipeResponder.panHandlers}
           >
-            {props.swipeCurrentVariant.imageUrl ? <Image source={{ uri: props.swipeCurrentVariant.imageUrl }} style={styles.swipeImage} /> : <View style={styles.swipeImageFallback} />}
-            <View style={styles.swipeGradient} />
-            <Animated.View style={[styles.swipeTint, styles.swipeTintApprove, { opacity: swipeApproveTint }]} />
-            <Animated.View style={[styles.swipeTint, styles.swipeTintReject, { opacity: swipeRejectTint }]} />
-            <View style={styles.swipeCaptionWrap}>
-              <View style={[styles.swipeCaptionCard, isTiny && styles.swipeCaptionCardCompact]}>
-                <View style={styles.swipeCaptionHeader}>
-                  <Text style={styles.swipeCaptionLabel}>Caption</Text>
-                  <Pressable onPress={() => setSwipeCaptionExpanded((current) => !current)} style={styles.swipeCaptionToggle}>
-                    <Text style={styles.swipeCaptionToggleText}>{swipeCaptionExpanded ? "Contraer" : "Ver más"}</Text>
-                  </Pressable>
-                </View>
-                {swipeCaptionExpanded ? (
-                  <TextInput
-                    value={selectedSwipeDraft}
-                    onChangeText={(text) =>
-                      props.setCaptionDrafts((current) => ({
-                        ...current,
-                        [props.swipeCurrentVariant!.id]: text,
-                      }))
-                    }
-                    multiline
-                    style={[styles.swipeCaptionInput, styles.swipeCaptionInputExpanded, isTiny && styles.swipeCaptionInputExpandedCompact]}
-                    placeholder="Escribe el caption"
-                    placeholderTextColor={theme.colors.muted}
-                    textAlignVertical="top"
-                  />
-                ) : (
-                  <Pressable onPress={() => setSwipeCaptionExpanded(true)} style={styles.swipeCaptionPreview}>
-                    <Text style={styles.swipeCaptionPreviewText} numberOfLines={3}>
-                      {selectedSwipeDraft || "Toca para expandir y editar el caption de esta variante."}
-                    </Text>
-                  </Pressable>
-                )}
+            <View style={styles.swipeMediaFrame}>
+              {props.swipeCurrentVariant.imageUrl ? (
+                <Image source={{ uri: props.swipeCurrentVariant.imageUrl }} style={styles.swipeImage} resizeMode="contain" />
+              ) : (
+                <View style={styles.swipeImageFallback} />
+              )}
+            </View>
+            <Animated.View pointerEvents="none" style={[styles.swipeTint, styles.swipeTintApprove, { opacity: swipeApproveTint }]} />
+            <Animated.View pointerEvents="none" style={[styles.swipeTint, styles.swipeTintReject, { opacity: swipeRejectTint }]} />
+            <View style={[styles.swipeCaptionCard, isTiny && styles.swipeCaptionCardCompact]}>
+              <View style={styles.swipeCaptionHeader}>
+                <Text style={styles.swipeCaptionLabel}>Caption</Text>
+                <Pressable onPress={() => setSwipeCaptionExpanded((current) => !current)} style={styles.swipeCaptionToggle}>
+                  <Text style={styles.swipeCaptionToggleText}>{swipeCaptionExpanded ? "Contraer" : "Ver más"}</Text>
+                </Pressable>
               </View>
+              {swipeCaptionExpanded ? (
+                <TextInput
+                  value={selectedSwipeDraft}
+                  onChangeText={(text) =>
+                    props.setCaptionDrafts((current) => ({
+                      ...current,
+                      [props.swipeCurrentVariant!.id]: text,
+                    }))
+                  }
+                  multiline
+                  style={[styles.swipeCaptionInput, styles.swipeCaptionInputExpanded, isTiny && styles.swipeCaptionInputExpandedCompact]}
+                  placeholder="Escribe el caption"
+                  placeholderTextColor={theme.colors.muted}
+                  textAlignVertical="top"
+                />
+              ) : (
+                <Pressable onPress={() => setSwipeCaptionExpanded(true)} style={styles.swipeCaptionPreview}>
+                  <Text style={styles.swipeCaptionPreviewText} numberOfLines={4}>
+                    {selectedSwipeDraft || "Toca para expandir y editar el caption de esta variante."}
+                  </Text>
+                </Pressable>
+              )}
             </View>
             <View style={[styles.swipeButtons, isTiny && styles.swipeButtonsCompact]}>
               <Pressable onPress={() => props.onRejectSwipe(props.swipeCurrentVariant!.id)} style={[styles.swipeReject, isTiny && styles.swipeRejectCompact]}>
@@ -3119,7 +3122,7 @@ export default function AppShell() {
       await api.estimateCost(activeBusinessId, currentBatchId, batchState.variantsPerPhoto);
       await api.confirmCost(activeBusinessId, currentBatchId);
       const result = await api.generateVariants(activeBusinessId, currentBatchId, batchState.variantsPerPhoto);
-      if (result.created === 0) {
+      if ((result.available ?? result.created) === 0) {
         setBatchStep("variants");
         setError(result.blockedReason ?? "No se pudieron generar las variantes");
         return;
@@ -5285,9 +5288,13 @@ const styles = StyleSheet.create({
     flex: 1,
     marginHorizontal: 14,
     marginBottom: 14,
-    borderRadius: 28,
+    borderRadius: 24,
     overflow: "hidden",
-    backgroundColor: theme.colors.surfaceAlt,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    padding: 12,
+    gap: 12,
   },
   swipeTint: {
     ...StyleSheet.absoluteFillObject,
@@ -5298,13 +5305,22 @@ const styles = StyleSheet.create({
   swipeTintReject: {
     backgroundColor: "rgba(239, 68, 68, 0.55)",
   },
+  swipeMediaFrame: {
+    width: "100%",
+    aspectRatio: 1,
+    borderRadius: 18,
+    overflow: "hidden",
+    backgroundColor: "#050505",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   swipeImage: {
-    ...StyleSheet.absoluteFillObject,
     width: "100%",
     height: "100%",
   },
   swipeImageFallback: {
-    ...StyleSheet.absoluteFillObject,
+    width: "100%",
+    height: "100%",
     backgroundColor: theme.colors.surfaceAlt,
   },
   swipeGradient: {
@@ -5320,10 +5336,12 @@ const styles = StyleSheet.create({
   swipeCaptionCard: {
     gap: 10,
     padding: 14,
-    borderRadius: 20,
-    backgroundColor: "rgba(0,0,0,0.56)",
+    borderRadius: 18,
+    backgroundColor: theme.colors.surfaceAlt,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
+    borderColor: theme.colors.border,
+    flex: 1,
+    minHeight: 132,
   },
   swipeCaptionCardCompact: {
     padding: 12,
@@ -5346,7 +5364,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
   },
   swipeCaptionToggleText: {
     color: theme.colors.text,
@@ -5354,8 +5374,9 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
   swipeCaptionPreview: {
-    minHeight: 72,
+    minHeight: 86,
     justifyContent: "center",
+    flex: 1,
   },
   swipeCaptionPreviewText: {
     color: theme.colors.text,
@@ -5377,17 +5398,11 @@ const styles = StyleSheet.create({
     minHeight: 104,
   },
   swipeButtons: {
-    position: "absolute",
-    left: 18,
-    right: 18,
-    bottom: 24,
     flexDirection: "row",
     justifyContent: "space-between",
   },
   swipeButtonsCompact: {
-    left: 14,
-    right: 14,
-    bottom: 18,
+    marginTop: -2,
   },
   swipeReject: {
     width: 56,

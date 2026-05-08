@@ -63,6 +63,7 @@ export const config = {
   metaGraphApiVersion: process.env.META_GRAPH_API_VERSION ?? "v23.0",
   metaDeviceLoginScopes: readList("META_DEVICE_LOGIN_SCOPES", ["pages_show_list", "pages_read_engagement", "pages_manage_posts"]),
   maxUploadBodyMb: readNumber("MAX_UPLOAD_BODY_MB", 75),
+  imageVariantBatchSize: Math.max(1, Math.min(2, readNumber("OPENAI_IMAGE_VARIANT_BATCH_SIZE", 2))),
   stateFilePath: resolveWorkspacePath(process.env.STATE_FILE_PATH ?? "apps/api/data/fbmaniaco-state.json"),
 };
 

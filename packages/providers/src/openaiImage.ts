@@ -10,8 +10,8 @@ const readNumber = (name: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const fallbackImageModels = ["gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"];
-const defaultImageTimeoutMs = readNumber("OPENAI_IMAGE_TIMEOUT_MS", 120000);
+const fallbackImageModels = ["gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"];
+const defaultImageTimeoutMs = readNumber("OPENAI_IMAGE_TIMEOUT_MS", 300000);
 
 const shouldFallbackToNextModel = (statusCode: number, message: string): boolean => {
   if (![400, 401, 403, 404].includes(statusCode)) {
@@ -32,20 +32,16 @@ const shouldFallbackToNextModel = (statusCode: number, message: string): boolean
   );
 };
 
-const readBase64Image = (payload: unknown): string | null => {
+const readBase64Images = (payload: unknown): string[] => {
   const record = payload as {
     data?: Array<{
       b64_json?: unknown;
     }>;
   };
 
-  for (const item of record.data ?? []) {
-    if (typeof item.b64_json === "string" && item.b64_json.trim()) {
-      return item.b64_json.trim();
-    }
-  }
-
-  return null;
+  return (record.data ?? [])
+    .map((item) => (typeof item.b64_json === "string" ? item.b64_json.trim() : ""))
+    .filter(Boolean);
 };
 
 const isAbortError = (error: unknown): boolean =>
@@ -78,7 +74,7 @@ const fetchWithTimeout = async (
 
 export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
   constructor(
-    private readonly model = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1.5",
+    private readonly model = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-2",
     private readonly size = process.env.OPENAI_IMAGE_SIZE ?? "1024x1024",
     private readonly timeoutMs = defaultImageTimeoutMs,
   ) {}
@@ -111,7 +107,8 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
     model: string;
     prompt: string;
     sourceBlob: Blob | null;
-  }): Promise<{ imageUrl: string }> {
+    count: number;
+  }): Promise<{ imageUrls: string[] }> {
     const apiKey = getApiKey();
     if (!apiKey) {
       throw new AppError({
@@ -126,6 +123,7 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
     form.set("model", input.model);
     form.set("prompt", input.prompt);
     form.set("size", this.size);
+    form.set("n", String(input.count));
 
     const endpoint = input.sourceBlob ? "https://api.openai.com/v1/images/edits" : "https://api.openai.com/v1/images/generations";
     const headers: Record<string, string> = {
@@ -149,10 +147,11 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
               model: input.model,
               prompt: input.prompt,
               size: this.size,
+              n: input.count,
             }),
       },
       this.timeoutMs,
-      "OpenAI tardó demasiado generando una imagen. Intenta de nuevo con menos fotos o fotos mas ligeras.",
+      "OpenAI tardo demasiado generando imagenes. Intenta de nuevo con menos fotos o fotos mas ligeras.",
     );
 
     if (!response.ok) {
@@ -162,13 +161,15 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
         statusCode: response.status,
         message: text || `OpenAI image generation failed (${response.status})`,
         userMessage: input.sourceBlob ? "No se pudo generar la variante con OpenAI." : "No se pudo generar la imagen con OpenAI.",
-        details: { model: input.model },
+        details: { model: input.model, count: input.count },
       });
     }
 
     const data = await response.json().catch(() => ({}));
-    const b64 = readBase64Image(data);
-    if (!b64) {
+    const imageUrls = readBase64Images(data)
+      .slice(0, input.count)
+      .map((b64) => `data:image/png;base64,${b64}`);
+    if (imageUrls.length === 0) {
       throw new AppError({
         code: "openai_image_invalid_response",
         statusCode: 502,
@@ -178,7 +179,7 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
       });
     }
 
-    return { imageUrl: `data:image/png;base64,${b64}` };
+    return { imageUrls };
   }
 
   async generateImage(input: {
@@ -186,9 +187,20 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
     styleId: string;
     sourceImageUrl?: string | null;
   }): Promise<{ imageUrl: string }> {
+    const images = await this.generateImages({ ...input, count: 1 });
+    return { imageUrl: images.imageUrls[0]! };
+  }
+
+  async generateImages(input: {
+    prompt: string;
+    styleId: string;
+    sourceImageUrl?: string | null;
+    count: number;
+  }): Promise<{ imageUrls: string[] }> {
     const sourceImageUrl = input.sourceImageUrl?.trim() ?? "";
     const sourceBlob = sourceImageUrl ? await this.fetchSourceBlob(sourceImageUrl) : null;
     const attemptedModels = this.resolveModelCandidates();
+    const count = Math.max(1, Math.min(10, Math.floor(input.count)));
     let lastError: AppError | null = null;
 
     for (const model of attemptedModels) {
@@ -197,6 +209,7 @@ export class OpenAIImageGenerationProvider implements ImageGenerationProvider {
           model,
           prompt: input.prompt,
           sourceBlob,
+          count,
         });
       } catch (error) {
         if (error instanceof AppError && error.code === "openai_image_generation_failed" && shouldFallbackToNextModel(error.statusCode, error.message)) {

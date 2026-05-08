@@ -27,6 +27,7 @@ export interface UpdateVariantCaptionRequest {
 
 export interface GenerateBatchVariantsResponse {
   created: number;
+  available?: number;
   blockedReason?: string | null;
 }
 

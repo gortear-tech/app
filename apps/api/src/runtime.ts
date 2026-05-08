@@ -226,6 +226,18 @@ const describeGenerationError = (error: unknown): string => {
   return "No se pudo generar esta variante.";
 };
 
+const buildFacebookSquareImagePrompt = (prompt: string, outputCount: number): string =>
+  [
+    prompt,
+    "",
+    "Formato obligatorio para Facebook feed:",
+    "- Salida cuadrada 1:1, ideal para post de Facebook.",
+    "- Mantener el producto o comida completo y visible; no recortar platos, empaques, texto importante ni bordes utiles.",
+    "- Centrar el sujeto con margen respirable y composicion lista para verse completa en una tarjeta cuadrada.",
+    "- No agregar texto nuevo, logos nuevos, marcas de agua ni marcos decorativos.",
+    outputCount > 1 ? `- Crear ${outputCount} variantes distintas pero coherentes entre si.` : "- Crear una variante pulida y lista para publicar.",
+  ].join("\n");
+
 const getMetaPublishError = (error: unknown): { code?: number; error_subcode?: number; message?: string } | null => {
   if (!(error instanceof AppError)) {
     return null;
@@ -1647,7 +1659,7 @@ export class FbmaniacoRuntime {
     return this.toBatchSummary(batch);
   }
 
-  async generateVariants(batchId: string, variantsPerPhoto: number): Promise<{ created: number; blockedReason?: string | null }> {
+  async generateVariants(batchId: string, variantsPerPhoto: number): Promise<{ created: number; available: number; blockedReason?: string | null }> {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
     const business = this.getBusiness(batch.businessId);
@@ -1688,7 +1700,7 @@ export class FbmaniacoRuntime {
     });
 
     if (decision.outcome === "bloqueado") {
-      return { created: 0, blockedReason: decision.reason };
+      return { created: 0, available: 0, blockedReason: decision.reason };
     }
 
     batch.status = "generando";
@@ -1703,90 +1715,141 @@ export class FbmaniacoRuntime {
       if (!photo || !photo.visionAnalysis || !photo.assignedStyle || !photo.editingPrompt) continue;
       const existingVariantsForPhoto = batch.variantIds
         .map((variantId) => this.variants.get(variantId))
-        .filter((variant): variant is VariantRecord => Boolean(variant && variant.photoId === photo.id && variant.status !== "fallida"));
-      for (let index = existingVariantsForPhoto.length; index < variantsPerPhoto; index += 1) {
+        .filter((variant): variant is VariantRecord =>
+          Boolean(variant && variant.photoId === photo.id && variant.status !== "fallida" && variant.status !== "eliminada"),
+        );
+      for (let index = existingVariantsForPhoto.length; index < variantsPerPhoto;) {
+        const outputCount = Math.min(config.imageVariantBatchSize, variantsPerPhoto - index);
         const plan = buildGenerationPlan({
           business: this.businessContextFor(business),
           analysis: photo.visionAnalysis,
           style: photo.assignedStyle,
           memory,
         });
-        const now = new Date().toISOString();
-        const variant: VariantRecord = {
-          id: randomUUID(),
-          batchId,
-          photoId,
-          styleId: photo.assignedStyle.styleId,
-          generationPlan: plan,
-          promptUsed: plan.promptFinal,
-          imageUrl: null,
-          caption: null,
-          status: "generando",
-          createdAt: now,
-          updatedAt: now,
-        };
-        this.variants.set(variant.id, variant);
-        batch.variantIds.push(variant.id);
+        const promptUsed = buildFacebookSquareImagePrompt(
+          `${plan.promptFinal}\nVariants: ${index + 1}-${index + outputCount} of ${variantsPerPhoto}.`,
+          outputCount,
+        );
+        const variantsToGenerate: VariantRecord[] = [];
+
+        for (let offset = 0; offset < outputCount; offset += 1) {
+          const now = new Date().toISOString();
+          const variant: VariantRecord = {
+            id: randomUUID(),
+            batchId,
+            photoId,
+            styleId: photo.assignedStyle.styleId,
+            generationPlan: plan,
+            promptUsed,
+            imageUrl: null,
+            caption: null,
+            status: "generando",
+            createdAt: now,
+            updatedAt: now,
+          };
+          variantsToGenerate.push(variant);
+          this.variants.set(variant.id, variant);
+          batch.variantIds.push(variant.id);
+        }
+
         batch.variantsCount = batch.variantIds.length;
         batch.lastActivityAt = new Date().toISOString();
         this.batches.set(batch.id, batch);
         this.persistState();
 
+        let generatedImages: string[];
         try {
-          const image = await this.imageGenerationProvider.generateImage({
-            prompt: `${plan.promptFinal}\nVariant: ${index + 1}/${variantsPerPhoto}`,
+          const imageBatch = await this.imageGenerationProvider.generateImages({
+            prompt: promptUsed,
             styleId: photo.assignedStyle.styleId,
             sourceImageUrl: photo.uploadUrl,
+            count: outputCount,
           });
-          let imageUrl = image.imageUrl;
-          try {
-            imageUrl = (await this.cloudMediaStore.uploadDataUrl(`variants/${variant.id}.png`, image.imageUrl)) ?? image.imageUrl;
-          } catch (error) {
-            console.warn("[fbmaniaco] failed to upload generated image to Supabase", error);
-          }
-          const caption = await this.captionGenerationProvider.generateCaption({
-            prompt: plan.promptFinal,
-            styleName: photo.assignedStyle.styleName,
-            subjectDescription: photo.visionAnalysis.subject.description,
-            businessTone: this.businessContextFor(business).tone,
-            facebookSeoKeywords: getBusinessFacebookSeoKeywords(business),
-            facebookSeoContext: getBusinessFacebookSeoContext(business),
-          });
-
-          variant.imageUrl = imageUrl;
-          variant.caption = caption.caption;
-          variant.status = "generada";
-          variant.updatedAt = new Date().toISOString();
-          this.variants.set(variant.id, variant);
-          created += 1;
-          this.recordEvent({
-            negocioId: batch.businessId,
-            type: "variante_generada",
-            occurredAt: new Date().toISOString(),
-            styleId: variant.styleId,
-            styleName: photo.assignedStyle.styleName,
-            photoType: photo.visionAnalysis.subject.type,
-            captionPattern: caption.caption,
-            score: 0,
-          });
+          generatedImages = imageBatch.imageUrls;
         } catch (error) {
-          variant.caption = describeGenerationError(error);
-          variant.status = "fallida";
-          variant.updatedAt = new Date().toISOString();
-          this.variants.set(variant.id, variant);
+          for (const variant of variantsToGenerate) {
+            variant.caption = describeGenerationError(error);
+            variant.status = "fallida";
+            variant.updatedAt = new Date().toISOString();
+            this.variants.set(variant.id, variant);
+          }
           this.persistState();
+          index += outputCount;
+          continue;
         }
+
+        for (const [offset, variant] of variantsToGenerate.entries()) {
+          const generatedImageUrl = generatedImages[offset];
+          try {
+            if (!generatedImageUrl) {
+              throw new AppError({
+                code: "openai_image_missing_variant",
+                statusCode: 502,
+                message: "OpenAI returned fewer images than requested",
+                userMessage: "OpenAI devolvio menos variantes de las solicitadas.",
+              });
+            }
+
+            let imageUrl = generatedImageUrl;
+            try {
+              imageUrl = (await this.cloudMediaStore.uploadDataUrl(`variants/${variant.id}.png`, generatedImageUrl)) ?? generatedImageUrl;
+            } catch (error) {
+              console.warn("[fbmaniaco] failed to upload generated image to Supabase", error);
+            }
+
+            const caption = await this.captionGenerationProvider.generateCaption({
+              prompt: plan.promptFinal,
+              styleName: photo.assignedStyle.styleName,
+              subjectDescription: photo.visionAnalysis.subject.description,
+              businessTone: this.businessContextFor(business).tone,
+              facebookSeoKeywords: getBusinessFacebookSeoKeywords(business),
+              facebookSeoContext: getBusinessFacebookSeoContext(business),
+            });
+
+            variant.imageUrl = imageUrl;
+            variant.caption = caption.caption;
+            variant.status = "generada";
+            variant.updatedAt = new Date().toISOString();
+            this.variants.set(variant.id, variant);
+            created += 1;
+            this.recordEvent({
+              negocioId: batch.businessId,
+              type: "variante_generada",
+              occurredAt: new Date().toISOString(),
+              styleId: variant.styleId,
+              styleName: photo.assignedStyle.styleName,
+              photoType: photo.visionAnalysis.subject.type,
+              captionPattern: caption.caption,
+              score: 0,
+            });
+          } catch (error) {
+            variant.caption = describeGenerationError(error);
+            variant.status = "fallida";
+            variant.updatedAt = new Date().toISOString();
+            this.variants.set(variant.id, variant);
+          }
+        }
+
+        this.persistState();
+        index += outputCount;
       }
     }
 
     batch.variantsCount = batch.variantIds.length;
     batch.variantsPerPhoto = variantsPerPhoto;
-    batch.status = created > 0 ? "generado_parcial" : "fallido";
+    const generatedTotal = batch.variantIds
+      .map((variantId) => this.variants.get(variantId))
+      .filter((variant): variant is VariantRecord => Boolean(variant && variant.status === "generada")).length;
+    batch.status = generatedTotal > 0 ? "generado_parcial" : "fallido";
     batch.lastActivityAt = new Date().toISOString();
     this.batches.set(batch.id, batch);
     this.persistState();
 
-    return { created, blockedReason: decision.outcome === "puede_continuar_swipe" ? "Requiere aprobacion del usuario" : null };
+    return {
+      created,
+      available: generatedTotal,
+      blockedReason: decision.outcome === "puede_continuar_swipe" ? "Requiere aprobacion del usuario" : null,
+    };
   }
 
   listVariants(batchId: string): GeneratedVariantSummary[] {

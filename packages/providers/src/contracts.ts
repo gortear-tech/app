@@ -53,6 +53,12 @@ export interface ImageGenerationProvider {
     styleId: string;
     sourceImageUrl?: string | null;
   }): Promise<{ imageUrl: string }>;
+  generateImages(input: {
+    prompt: string;
+    styleId: string;
+    sourceImageUrl?: string | null;
+    count: number;
+  }): Promise<{ imageUrls: string[] }>;
 }
 
 export interface CaptionGenerationProvider {

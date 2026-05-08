@@ -22,6 +22,17 @@ export class MockImageGenerationProvider implements ImageGenerationProvider {
 
     return { imageUrl: transparentPixelPng };
   }
+
+  async generateImages(input: {
+    prompt: string;
+    styleId: string;
+    sourceImageUrl?: string | null;
+    count: number;
+  }): Promise<{ imageUrls: string[] }> {
+    const count = Math.max(1, Math.floor(input.count));
+    const image = await this.generateImage(input);
+    return { imageUrls: Array.from({ length: count }, () => image.imageUrl) };
+  }
 }
 
 export class MockCaptionGenerationProvider implements CaptionGenerationProvider {
