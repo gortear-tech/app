@@ -53,6 +53,11 @@ export class OpenAICaptionGenerationProvider implements CaptionGenerationProvide
     businessTone: string;
     facebookSeoKeywords?: string[];
     facebookSeoContext?: string | null;
+    creativeAngle?: string | null;
+    visualDirection?: string | null;
+    variantIndex?: number | null;
+    totalVariants?: number | null;
+    avoidCaptions?: string[];
   }): Promise<{ caption: string }> {
     const apiKey = getApiKey();
     if (!apiKey) {
@@ -78,6 +83,18 @@ export class OpenAICaptionGenerationProvider implements CaptionGenerationProvide
     const customSeoContext = input.facebookSeoContext?.trim()
       ? [`Contexto SEO adicional del negocio: ${input.facebookSeoContext.trim()}`]
       : [];
+    const creativeLines = [
+      input.variantIndex && input.totalVariants
+        ? `Esta es la variante ${input.variantIndex} de ${input.totalVariants}; debe sentirse distinta de las otras.`
+        : "Haz que esta variante tenga un angulo creativo claro y distinto.",
+      input.creativeAngle?.trim() ? `Angulo de copy: ${input.creativeAngle.trim()}` : null,
+      input.visualDirection?.trim() ? `Direccion visual de la imagen: ${input.visualDirection.trim()}` : null,
+      "Evita empezar siempre con las mismas palabras. Alterna entre beneficio, antojo, ocasion, ingrediente principal, cercania local o llamado a la accion.",
+      "Evita frases repetidas como 'disfruta una propuesta', 'ideal para quienes buscan' y 'presentada con estilo' salvo que realmente sean la mejor opcion.",
+      input.avoidCaptions?.length
+        ? `No repitas estructura, palabras iniciales ni cierre de estos captions recientes: ${input.avoidCaptions.slice(-6).join(" | ")}`
+        : null,
+    ].filter((line): line is string => Boolean(line));
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -105,9 +122,10 @@ export class OpenAICaptionGenerationProvider implements CaptionGenerationProvide
                             `Estilo: ${input.styleName}.`,
                             `Descripcion del sujeto: ${input.subjectDescription}.`,
                             `Prompt base: ${input.prompt}.`,
+                            ...creativeLines,
                             ...seoLines,
                             ...customSeoContext,
-                            "Devuelve una sola frase o dos frases maximo, clara, comercial y natural para Facebook.",
+                            "Devuelve una o dos frases maximo, claras, comerciales y naturales para Facebook. Usa como maximo 2 hashtags, y solo si aportan descubrimiento.",
                           ].join("\n"),
                         },
               ],

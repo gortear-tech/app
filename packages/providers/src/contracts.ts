@@ -69,5 +69,10 @@ export interface CaptionGenerationProvider {
     businessTone: string;
     facebookSeoKeywords?: string[];
     facebookSeoContext?: string | null;
+    creativeAngle?: string | null;
+    visualDirection?: string | null;
+    variantIndex?: number | null;
+    totalVariants?: number | null;
+    avoidCaptions?: string[];
   }): Promise<{ caption: string }>;
 }

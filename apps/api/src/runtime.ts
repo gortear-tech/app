@@ -238,6 +238,47 @@ const buildFacebookSquareImagePrompt = (prompt: string, outputCount: number): st
     outputCount > 1 ? `- Crear ${outputCount} variantes distintas pero coherentes entre si.` : "- Crear una variante pulida y lista para publicar.",
   ].join("\n");
 
+const CLOSED_BATCH_STATUSES = new Set<BatchStatus>(["completado", "cancelado", "fallido", "abandonado"]);
+const DISABLED_BATCH_STATUSES = new Set<BatchStatus>(["cancelado", "fallido", "abandonado"]);
+
+const VARIANT_CREATIVE_DIRECTIONS = [
+  {
+    visual: "Hero shot premium: producto centrado, fondo limpio aspiracional, luz cuidada y margen amplio.",
+    copy: "Beneficio directo y apetitoso, con cierre de accion simple.",
+  },
+  {
+    visual: "Close-up de antojo: resaltar textura, frescura, brillo natural y detalles del platillo.",
+    copy: "Lenguaje sensorial centrado en sabor, textura y frescura.",
+  },
+  {
+    visual: "Ocasion social: composicion pensada para compartir, combo visible y ambiente cercano.",
+    copy: "Enfoque en momento de consumo: comida para compartir, pedir hoy o resolver el antojo.",
+  },
+  {
+    visual: "Descubrimiento local: imagen clara de menu/feed, producto completo y lectura rapida en Facebook.",
+    copy: "SEO local natural, nombrando producto y zona si encaja sin sonar forzado.",
+  },
+  {
+    visual: "Contraste editorial: fondo mas dramatico, sujeto limpio, colores con presencia y look publicitario.",
+    copy: "Gancho breve de curiosidad o novedad, sin prometer descuentos inexistentes.",
+  },
+  {
+    visual: "Estilo cotidiano premium: mantener realismo, mejorar orden, luz y apetito sin exagerar.",
+    copy: "Texto cercano y confiable, como recomendacion rapida de negocio local.",
+  },
+] as const;
+
+const includesNormalizedText = (items: readonly string[], haystack: string): boolean => {
+  const normalizedHaystack = normalizeStyleText(haystack);
+  return items.some((item) => {
+    const normalizedItem = normalizeStyleText(item);
+    return normalizedItem.length > 0 && (normalizedHaystack.includes(normalizedItem) || normalizedItem.includes(normalizedHaystack));
+  });
+};
+
+const variantCreativeDirectionFor = (photoIndex: number, variantIndex: number): (typeof VARIANT_CREATIVE_DIRECTIONS)[number] =>
+  VARIANT_CREATIVE_DIRECTIONS[(photoIndex + variantIndex) % VARIANT_CREATIVE_DIRECTIONS.length]!;
+
 const getMetaPublishError = (error: unknown): { code?: number; error_subcode?: number; message?: string } | null => {
   if (!(error instanceof AppError)) {
     return null;
@@ -1378,11 +1419,14 @@ export class FbmaniacoRuntime {
       score: 0,
     });
     this.batches.set(batch.id, batch);
+    this.persistState();
     return this.toBatchSummary(batch);
   }
 
   listBatches(businessId: string): BatchSummary[] {
-    return [...this.batches.values()].filter((batch) => batch.businessId === businessId).map((batch) => this.toBatchSummary(batch));
+    return [...this.batches.values()]
+      .filter((batch) => batch.businessId === businessId && batch.status !== "cancelado" && batch.status !== "abandonado")
+      .map((batch) => this.toBatchSummary(batch));
   }
 
   getBatch(batchId: string): BatchRecord {
@@ -1396,6 +1440,97 @@ export class FbmaniacoRuntime {
       });
     }
     return batch;
+  }
+
+  private assertBatchCanBeWorked(batch: BatchRecord): void {
+    if (!CLOSED_BATCH_STATUSES.has(batch.status)) {
+      return;
+    }
+
+    throw new AppError({
+      code: "batch_closed",
+      statusCode: 409,
+      message: `Batch is closed with status ${batch.status}`,
+      userMessage: "Este lote ya esta cerrado. Crea un lote nuevo para seguir trabajando.",
+    });
+  }
+
+  private assertBatchIsNotDisabled(batch: BatchRecord): void {
+    if (!DISABLED_BATCH_STATUSES.has(batch.status)) {
+      return;
+    }
+
+    throw new AppError({
+      code: "batch_closed",
+      statusCode: 409,
+      message: `Batch is disabled with status ${batch.status}`,
+      userMessage: "Este lote ya esta cerrado. Crea un lote nuevo para seguir trabajando.",
+    });
+  }
+
+  private selectDiverseVariantStyle(input: {
+    business: BusinessRecord;
+    photo: PhotoRecord;
+    batch: BatchRecord;
+    memory: DeepMemorySnapshot;
+    variantIndex: number;
+    photoIndex: number;
+  }): AssignedStyle {
+    if (!input.photo.assignedStyle || !input.photo.visionAnalysis) {
+      throw new AppError({
+        code: "photo_not_ready_for_style",
+        statusCode: 409,
+        message: "Photo is missing assigned style or analysis",
+        userMessage: "La foto aun no esta lista para generar variantes.",
+      });
+    }
+
+    if (input.photo.assignedStyle.manualOverride || this.visualStyles.length === 0) {
+      return input.photo.assignedStyle;
+    }
+
+    const usageByStyle = new Map<string, number>();
+    for (const variantId of input.batch.variantIds) {
+      const variant = this.variants.get(variantId);
+      if (!variant || variant.status === "fallida" || variant.status === "eliminada") continue;
+      usageByStyle.set(variant.styleId, (usageByStyle.get(variant.styleId) ?? 0) + 1);
+    }
+
+    const analysis = input.photo.visionAnalysis;
+    const businessText = [
+      input.business.name,
+      input.business.industry,
+      typeof input.business.metadata.pageName === "string" ? input.business.metadata.pageName : "",
+      Array.isArray(input.business.metadata.facebookSeoKeywords) ? input.business.metadata.facebookSeoKeywords.join(" ") : "",
+    ].join(" ");
+    const photoText = `${analysis.subject.type} ${analysis.subject.description} ${analysis.mood.description}`;
+    const hasSensitiveVisuals =
+      analysis.sensitiveElements.logoVisible ||
+      analysis.sensitiveElements.personVisible ||
+      analysis.sensitiveElements.priceVisible ||
+      analysis.sensitiveElements.textVisible;
+
+    const rankedStyles = this.visualStyles
+      .map((style, styleIndex) => {
+        let score = 0;
+        if (style.id === input.photo.assignedStyle?.styleId) score += input.variantIndex === 0 ? 28 : 4;
+        if (includesNormalizedText(style.recommendedIndustries, businessText)) score += 38;
+        if (includesNormalizedText(style.recommendedPhotoTypes, photoText)) score += 34;
+        if (style.intensity === "ligera" && hasSensitiveVisuals) score += 10;
+        if (style.intensity === "fuerte" && hasSensitiveVisuals) score -= 18;
+        score -= (usageByStyle.get(style.id) ?? 0) * 26;
+        score += ((input.photoIndex + input.variantIndex + styleIndex) % 11) / 100;
+        return { style, score };
+      })
+      .sort((left, right) => right.score - left.score);
+
+    const selected = rankedStyles[0]?.style ?? this.visualStyles[0]!;
+    return assignStyle({
+      business: this.businessContextFor(input.business),
+      analysis,
+      styles: [selected],
+      memory: input.memory,
+    });
   }
 
   getBatchDetail(batchId: string): BatchDetail {
@@ -1429,6 +1564,7 @@ export class FbmaniacoRuntime {
   reopenVariantApproval(batchId: string): BatchSummary {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const scheduledPosts = batch.scheduledPostIds
       .map((scheduledPostId) => this.scheduledPosts.get(scheduledPostId))
       .filter((post): post is ScheduledPostRecord => Boolean(post));
@@ -1483,7 +1619,8 @@ export class FbmaniacoRuntime {
   }
 
   async createUploadIntent(batchId: string, body: PreparePhotoUploadRequest): Promise<{ uploadUrl: string; storageKey: string }> {
-    this.getBatch(batchId);
+    const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const storageKey = `batches/${batchId}/${randomUUID()}-${body.fileName}`;
     const intent = await this.mediaStorage.generateSignedUploadUrl(storageKey);
     return {
@@ -1494,6 +1631,7 @@ export class FbmaniacoRuntime {
 
   async completeUpload(batchId: string, body: CompletePhotoUploadRequest): Promise<PhotoRecord> {
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     let cloudUploadUrl: string | null = null;
     try {
       cloudUploadUrl = await this.cloudMediaStore.uploadDataUrl(`photos/${body.uploadKey}`, body.imageDataUrl);
@@ -1578,6 +1716,7 @@ export class FbmaniacoRuntime {
 
   changePhotoStyle(batchId: string, photoId: string, styleId: string): PhotoRecord {
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const photo = this.photos.get(photoId);
     if (!photo || photo.batchId !== batch.id) {
       throw new AppError({
@@ -1634,12 +1773,14 @@ export class FbmaniacoRuntime {
       photoType: photo.visionAnalysis.subject.type,
       score: 0,
     });
+    this.persistState();
     return photo;
   }
 
   estimateCost(batchId: string, variantsPerPhoto: number): { estimatedCostUsd: number } {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const cost = Number((batch.photoIds.length * variantsPerPhoto * 0.35).toFixed(2));
     batch.estimatedCostUsd = cost;
     batch.variantsPerPhoto = variantsPerPhoto;
@@ -1651,6 +1792,7 @@ export class FbmaniacoRuntime {
 
   confirmCost(batchId: string): BatchSummary {
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     batch.confirmedCostUsd = batch.estimatedCostUsd ?? batch.confirmedCostUsd ?? 0;
     batch.status = "confirmado";
     batch.lastActivityAt = new Date().toISOString();
@@ -1662,6 +1804,7 @@ export class FbmaniacoRuntime {
   async generateVariants(batchId: string, variantsPerPhoto: number): Promise<{ created: number; available: number; blockedReason?: string | null }> {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const business = this.getBusiness(batch.businessId);
     const memory = buildDeepMemory(this.events.filter((event) => event.negocioId === batch.businessId));
     const autonomyState = this.autonomyStateForBusiness(batch.businessId);
@@ -1710,7 +1853,27 @@ export class FbmaniacoRuntime {
     this.persistState();
 
     let created = 0;
-    for (const photoId of batch.photoIds) {
+    const countGeneratedVariants = (): number =>
+      batch.variantIds
+        .map((variantId) => this.variants.get(variantId))
+        .filter((variant): variant is VariantRecord => Boolean(variant && variant.status === "generada")).length;
+    const finishEarlyIfClosed = (variant?: VariantRecord): { created: number; available: number; blockedReason: null } | null => {
+      if (!DISABLED_BATCH_STATUSES.has(batch.status)) {
+        return null;
+      }
+
+      if (variant && variant.status !== "publicada") {
+        variant.status = "eliminada";
+        variant.updatedAt = new Date().toISOString();
+        this.variants.set(variant.id, variant);
+      }
+      this.persistState();
+      return { created, available: countGeneratedVariants(), blockedReason: null };
+    };
+    for (const [photoIndex, photoId] of batch.photoIds.entries()) {
+      const closedResult = finishEarlyIfClosed();
+      if (closedResult) return closedResult;
+
       const photo = this.photos.get(photoId);
       if (!photo || !photo.visionAnalysis || !photo.assignedStyle || !photo.editingPrompt) continue;
       const existingVariantsForPhoto = batch.variantIds
@@ -1718,128 +1881,125 @@ export class FbmaniacoRuntime {
         .filter((variant): variant is VariantRecord =>
           Boolean(variant && variant.photoId === photo.id && variant.status !== "fallida" && variant.status !== "eliminada"),
         );
-      for (let index = existingVariantsForPhoto.length; index < variantsPerPhoto;) {
-        const outputCount = Math.min(config.imageVariantBatchSize, variantsPerPhoto - index);
+      for (let index = existingVariantsForPhoto.length; index < variantsPerPhoto; index += 1) {
+        const closedResult = finishEarlyIfClosed();
+        if (closedResult) return closedResult;
+
+        const creativeDirection = variantCreativeDirectionFor(photoIndex, index);
+        const selectedStyle = this.selectDiverseVariantStyle({
+          business,
+          photo,
+          batch,
+          memory,
+          variantIndex: index,
+          photoIndex,
+        });
         const plan = buildGenerationPlan({
           business: this.businessContextFor(business),
           analysis: photo.visionAnalysis,
-          style: photo.assignedStyle,
+          style: selectedStyle,
           memory,
         });
         const promptUsed = buildFacebookSquareImagePrompt(
-          `${plan.promptFinal}\nVariants: ${index + 1}-${index + outputCount} of ${variantsPerPhoto}.`,
-          outputCount,
+          [
+            plan.promptFinal,
+            `Variant: ${index + 1}/${variantsPerPhoto}.`,
+            `Creative visual direction: ${creativeDirection.visual}`,
+            "Make this variant visibly different from sibling variants for the same photo while preserving the real product.",
+          ].join("\n"),
+          1,
         );
-        const variantsToGenerate: VariantRecord[] = [];
-
-        for (let offset = 0; offset < outputCount; offset += 1) {
-          const now = new Date().toISOString();
-          const variant: VariantRecord = {
-            id: randomUUID(),
-            batchId,
-            photoId,
-            styleId: photo.assignedStyle.styleId,
-            generationPlan: plan,
-            promptUsed,
-            imageUrl: null,
-            caption: null,
-            status: "generando",
-            createdAt: now,
-            updatedAt: now,
-          };
-          variantsToGenerate.push(variant);
-          this.variants.set(variant.id, variant);
-          batch.variantIds.push(variant.id);
-        }
+        const now = new Date().toISOString();
+        const variant: VariantRecord = {
+          id: randomUUID(),
+          batchId,
+          photoId,
+          styleId: selectedStyle.styleId,
+          generationPlan: plan,
+          promptUsed,
+          imageUrl: null,
+          caption: null,
+          status: "generando",
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.variants.set(variant.id, variant);
+        batch.variantIds.push(variant.id);
 
         batch.variantsCount = batch.variantIds.length;
         batch.lastActivityAt = new Date().toISOString();
         this.batches.set(batch.id, batch);
         this.persistState();
 
-        let generatedImages: string[];
         try {
-          const imageBatch = await this.imageGenerationProvider.generateImages({
+          const image = await this.imageGenerationProvider.generateImage({
             prompt: promptUsed,
-            styleId: photo.assignedStyle.styleId,
+            styleId: selectedStyle.styleId,
             sourceImageUrl: photo.uploadUrl,
-            count: outputCount,
           });
-          generatedImages = imageBatch.imageUrls;
-        } catch (error) {
-          for (const variant of variantsToGenerate) {
-            variant.caption = describeGenerationError(error);
-            variant.status = "fallida";
-            variant.updatedAt = new Date().toISOString();
-            this.variants.set(variant.id, variant);
-          }
-          this.persistState();
-          index += outputCount;
-          continue;
-        }
+          const closedAfterImage = finishEarlyIfClosed(variant);
+          if (closedAfterImage) return closedAfterImage;
 
-        for (const [offset, variant] of variantsToGenerate.entries()) {
-          const generatedImageUrl = generatedImages[offset];
+          let imageUrl = image.imageUrl;
           try {
-            if (!generatedImageUrl) {
-              throw new AppError({
-                code: "openai_image_missing_variant",
-                statusCode: 502,
-                message: "OpenAI returned fewer images than requested",
-                userMessage: "OpenAI devolvio menos variantes de las solicitadas.",
-              });
-            }
-
-            let imageUrl = generatedImageUrl;
-            try {
-              imageUrl = (await this.cloudMediaStore.uploadDataUrl(`variants/${variant.id}.png`, generatedImageUrl)) ?? generatedImageUrl;
-            } catch (error) {
-              console.warn("[fbmaniaco] failed to upload generated image to Supabase", error);
-            }
-
-            const caption = await this.captionGenerationProvider.generateCaption({
-              prompt: plan.promptFinal,
-              styleName: photo.assignedStyle.styleName,
-              subjectDescription: photo.visionAnalysis.subject.description,
-              businessTone: this.businessContextFor(business).tone,
-              facebookSeoKeywords: getBusinessFacebookSeoKeywords(business),
-              facebookSeoContext: getBusinessFacebookSeoContext(business),
-            });
-
-            variant.imageUrl = imageUrl;
-            variant.caption = caption.caption;
-            variant.status = "generada";
-            variant.updatedAt = new Date().toISOString();
-            this.variants.set(variant.id, variant);
-            created += 1;
-            this.recordEvent({
-              negocioId: batch.businessId,
-              type: "variante_generada",
-              occurredAt: new Date().toISOString(),
-              styleId: variant.styleId,
-              styleName: photo.assignedStyle.styleName,
-              photoType: photo.visionAnalysis.subject.type,
-              captionPattern: caption.caption,
-              score: 0,
-            });
+            imageUrl = (await this.cloudMediaStore.uploadDataUrl(`variants/${variant.id}.png`, image.imageUrl)) ?? image.imageUrl;
           } catch (error) {
-            variant.caption = describeGenerationError(error);
-            variant.status = "fallida";
-            variant.updatedAt = new Date().toISOString();
-            this.variants.set(variant.id, variant);
+            console.warn("[fbmaniaco] failed to upload generated image to Supabase", error);
           }
+
+          const avoidCaptions = batch.variantIds
+            .map((variantId) => this.variants.get(variantId)?.caption?.trim() ?? "")
+            .filter(Boolean)
+            .slice(-8);
+          const caption = await this.captionGenerationProvider.generateCaption({
+            prompt: plan.promptFinal,
+            styleName: selectedStyle.styleName,
+            subjectDescription: photo.visionAnalysis.subject.description,
+            businessTone: this.businessContextFor(business).tone,
+            facebookSeoKeywords: getBusinessFacebookSeoKeywords(business),
+            facebookSeoContext: getBusinessFacebookSeoContext(business),
+            creativeAngle: creativeDirection.copy,
+            visualDirection: creativeDirection.visual,
+            variantIndex: index + 1,
+            totalVariants: variantsPerPhoto,
+            avoidCaptions,
+          });
+          const closedAfterCaption = finishEarlyIfClosed(variant);
+          if (closedAfterCaption) return closedAfterCaption;
+
+          variant.imageUrl = imageUrl;
+          variant.caption = caption.caption;
+          variant.status = "generada";
+          variant.updatedAt = new Date().toISOString();
+          this.variants.set(variant.id, variant);
+          created += 1;
+          this.recordEvent({
+            negocioId: batch.businessId,
+            type: "variante_generada",
+            occurredAt: new Date().toISOString(),
+            styleId: variant.styleId,
+            styleName: selectedStyle.styleName,
+            photoType: photo.visionAnalysis.subject.type,
+            captionPattern: caption.caption,
+            score: 0,
+          });
+        } catch (error) {
+          variant.caption = describeGenerationError(error);
+          variant.status = "fallida";
+          variant.updatedAt = new Date().toISOString();
+          this.variants.set(variant.id, variant);
         }
 
         this.persistState();
-        index += outputCount;
       }
     }
 
+    const closedResult = finishEarlyIfClosed();
+    if (closedResult) return closedResult;
+
     batch.variantsCount = batch.variantIds.length;
     batch.variantsPerPhoto = variantsPerPhoto;
-    const generatedTotal = batch.variantIds
-      .map((variantId) => this.variants.get(variantId))
-      .filter((variant): variant is VariantRecord => Boolean(variant && variant.status === "generada")).length;
+    const generatedTotal = countGeneratedVariants();
     batch.status = generatedTotal > 0 ? "generado_parcial" : "fallido";
     batch.lastActivityAt = new Date().toISOString();
     this.batches.set(batch.id, batch);
@@ -1872,6 +2032,7 @@ export class FbmaniacoRuntime {
   updateVariantCaption(batchId: string, variantId: string, input: UpdateVariantCaptionRequest): VariantRecord {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const variant = this.variants.get(variantId);
     if (!variant || variant.batchId !== batch.id) {
       throw new AppError({
@@ -1892,12 +2053,14 @@ export class FbmaniacoRuntime {
       captionPattern: input.caption,
       score: 0,
     });
+    this.persistState();
     return variant;
   }
 
   approveVariant(batchId: string, variantId: string): VariantRecord {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const variant = this.getVariant(variantId, batchId);
     variant.status = "aprobada";
     variant.updatedAt = new Date().toISOString();
@@ -1913,12 +2076,14 @@ export class FbmaniacoRuntime {
     });
     const state = this.autonomyStateForBusiness(batch.businessId);
     this.setAutonomyState(batch.businessId, recordApproval(state, "CAPTION_GENERATION", true));
+    this.persistState();
     return variant;
   }
 
   rejectVariant(batchId: string, variantId: string): VariantRecord {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const variant = this.getVariant(variantId, batchId);
     variant.status = "rechazada";
     variant.updatedAt = new Date().toISOString();
@@ -1934,12 +2099,14 @@ export class FbmaniacoRuntime {
     });
     const state = this.autonomyStateForBusiness(batch.businessId);
     this.setAutonomyState(batch.businessId, recordRejection(state, "CAPTION_GENERATION"));
+    this.persistState();
     return variant;
   }
 
   async confirmCalendar(batchId: string, periodDays: 7 | 14 | 30): Promise<ConfirmCalendarResponse> {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchCanBeWorked(batch);
     const business = this.getBusiness(batch.businessId);
     const photoRecords = batch.photoIds.map((photoId) => this.photos.get(photoId)).filter(Boolean) as PhotoRecord[];
     const scheduledVariantIds = new Set(
@@ -2145,6 +2312,7 @@ export class FbmaniacoRuntime {
   updateScheduledPost(batchId: string, scheduledPostId: string, input: UpdateScheduledPostRequest): ScheduledPostRecord {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchIsNotDisabled(batch);
     const scheduledPost = this.scheduledPosts.get(scheduledPostId);
     if (!scheduledPost || scheduledPost.batchId !== batch.id) {
       throw new AppError({
@@ -2171,6 +2339,7 @@ export class FbmaniacoRuntime {
   cancelScheduledPost(batchId: string, scheduledPostId: string): ScheduledPostRecord {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchIsNotDisabled(batch);
     const scheduledPost = this.scheduledPosts.get(scheduledPostId);
     if (!scheduledPost || scheduledPost.batchId !== batch.id) {
       throw new AppError({
@@ -2196,6 +2365,7 @@ export class FbmaniacoRuntime {
   async publishScheduledPost(batchId: string, scheduledPostId: string): Promise<ScheduledPostRecord> {
     this.restoreStateFromDisk();
     const batch = this.getBatch(batchId);
+    this.assertBatchIsNotDisabled(batch);
     const business = this.getBusiness(batch.businessId);
     const scheduledPost = this.scheduledPosts.get(scheduledPostId);
     if (!scheduledPost || scheduledPost.batchId !== batch.id) {
@@ -2286,6 +2456,7 @@ export class FbmaniacoRuntime {
         score: 0,
         scheduledFor: scheduledPost.scheduledFor,
       });
+      this.persistState();
       throw error;
     }
   }

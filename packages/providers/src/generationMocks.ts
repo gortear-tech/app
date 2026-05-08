@@ -43,11 +43,18 @@ export class MockCaptionGenerationProvider implements CaptionGenerationProvider 
     businessTone: string;
     facebookSeoKeywords?: string[];
     facebookSeoContext?: string | null;
+    creativeAngle?: string | null;
+    visualDirection?: string | null;
+    variantIndex?: number | null;
+    totalVariants?: number | null;
+    avoidCaptions?: string[];
   }): Promise<{ caption: string }> {
     const promptPreview = sanitizeFallbackText(input.prompt).slice(0, 80);
     const subjectPreview = sanitizeFallbackText(input.subjectDescription);
     const seoPreview = input.facebookSeoKeywords?.length ? ` SEO: ${input.facebookSeoKeywords.slice(0, 3).join(", ")}` : "";
-    const caption = `${input.businessTone} | ${input.styleName}: ${subjectPreview}. ${promptPreview}${seoPreview}`;
+    const anglePreview = input.creativeAngle ? ` ${sanitizeFallbackText(input.creativeAngle)}.` : "";
+    const variantPreview = input.variantIndex && input.totalVariants ? ` V${input.variantIndex}/${input.totalVariants}.` : "";
+    const caption = `${input.businessTone} | ${input.styleName}${variantPreview}: ${subjectPreview}.${anglePreview} ${promptPreview}${seoPreview}`;
     return { caption };
   }
 }
