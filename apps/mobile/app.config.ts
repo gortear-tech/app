@@ -50,14 +50,14 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     android: {
       ...(config.android ?? {}),
       package: "com.gabriel.fbmaniaco",
-      versionCode: 2,
+      versionCode: 3,
     },
     ios: {
       ...(config.ios ?? {}),
       bundleIdentifier: "com.gabriel.fbmaniaco",
     },
     scheme: "fbmaniaco",
-    version: "0.1.1",
+    version: "0.1.2",
     orientation: "portrait",
     userInterfaceStyle: "dark",
     platforms: ["ios", "android", "web"],
