@@ -18,7 +18,9 @@ const makeConfig = (path: string): ApiConfig => ({
   localDbPath: path,
   supabaseUrl: undefined,
   supabaseServiceRole: undefined,
+  supabaseMediaBucket: "business-media",
   databaseUrl: undefined,
+  publicApiUrl: undefined,
   metaAppId: undefined,
   metaAppSecret: undefined,
   metaRedirectUri: undefined,
@@ -213,7 +215,7 @@ describe("api bootstrap and tenancy", () => {
     await rm(path, { force: true });
   });
 
-  it("creates a batch and completes a local upload intent without leaking media", async () => {
+  it("creates a batch while API upload requires real storage", async () => {
     const path = join(tmpdir(), `fbmaniaco-api-batch-${Date.now()}.json`);
     const config = makeConfig(path);
     const store = new LocalDataStore(path);
@@ -267,15 +269,23 @@ describe("api bootstrap and tenancy", () => {
       headers: { authorization, "idempotency-key": "upload-intent-1" },
       payload: { originalFileName: "plato.jpg", contentType: "image/jpeg", fileSize: 1234 }
     });
-    expect(uploadIntent.statusCode).toBe(200);
-    expect(uploadIntent.json().upload.uploadUrl).toMatch(/^local:\/\/storage\//);
+    expect(uploadIntent.statusCode).toBe(409);
+    expect(uploadIntent.json().code).toBe("real_storage_required");
+    const storeIntent = await store.createUploadIntent({
+      workspaceId: (await store.listMemberships("user-batch"))[0]!.workspace.id,
+      businessId,
+      batchId,
+      originalFileName: "plato.jpg",
+      contentType: "image/jpeg",
+      fileSize: 1234
+    });
 
     const complete = await app.inject({
       method: "POST",
       url: `/businesses/${businessId}/batches/${batchId}/photos/complete-upload`,
       headers: { authorization, "idempotency-key": "complete-upload-1" },
       payload: {
-        storageKey: uploadIntent.json().uploadIntent.storageKey,
+        storageKey: storeIntent.storageKey,
         originalFileName: "plato.jpg",
         contentType: "image/jpeg",
         fileSize: 1234,
@@ -322,8 +332,8 @@ describe("api bootstrap and tenancy", () => {
       method: "GET",
       url: new URL(detail.json().photos[0].thumbnailUrl).pathname + new URL(detail.json().photos[0].thumbnailUrl).search
     });
-    expect(preview.statusCode).toBe(200);
-    expect(preview.headers["content-type"]).toContain("image/svg+xml");
+    expect(preview.statusCode).toBe(409);
+    expect(preview.json().code).toBe("real_media_required");
 
     const estimate = await app.inject({
       method: "POST",
@@ -529,7 +539,7 @@ describe("api bootstrap and tenancy", () => {
       url: `/businesses/${businessId}/batches/${batchId}/photos/complete-upload`,
       headers: { authorization, "idempotency-key": "complete-upload-1" },
       payload: {
-        storageKey: uploadIntent.json().uploadIntent.storageKey,
+        storageKey: storeIntent.storageKey,
         originalFileName: "plato.jpg",
         contentType: "image/jpeg",
         fileSize: 1234,

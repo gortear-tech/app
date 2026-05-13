@@ -22,18 +22,80 @@ import {
   WeeklyReportGenerateResponse,
   WeeklyReportResponse
 } from "@fbmaniaco/shared";
+import * as SecureStore from "expo-secure-store";
 import { getMobileConfig } from "../config";
 
 const SESSION_TOKEN_KEY = "fbmaniaco.sessionToken";
 let memorySessionToken: string | null = null;
 
+const canUseSecureStore = async () => {
+  try {
+    return await SecureStore.isAvailableAsync();
+  } catch {
+    return false;
+  }
+};
+
 export const getStoredSessionToken = async () => {
-  void SESSION_TOKEN_KEY;
+  if (await canUseSecureStore()) {
+    return SecureStore.getItemAsync(SESSION_TOKEN_KEY);
+  }
   return memorySessionToken;
 };
 
-export const storeDevelopmentSession = async (token: string) => {
+export const storeSessionToken = async (token: string) => {
   memorySessionToken = token;
+  if (await canUseSecureStore()) {
+    await SecureStore.setItemAsync(SESSION_TOKEN_KEY, token);
+  }
+};
+
+export const clearStoredSession = async () => {
+  memorySessionToken = null;
+  if (await canUseSecureStore()) {
+    await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
+  }
+};
+
+type SupabaseAuthResponse = {
+  access_token?: string;
+  user?: { id?: string; email?: string };
+  error?: string;
+  error_description?: string;
+  msg?: string;
+};
+
+const supabaseAuthRequest = async (path: string, body: Record<string, unknown>): Promise<SupabaseAuthResponse> => {
+  const { supabaseUrl, supabaseAnonKey } = getMobileConfig();
+  const response = await fetch(`${supabaseUrl.replace(/\/$/, "")}/auth/v1/${path}`, {
+    method: "POST",
+    headers: {
+      apikey: supabaseAnonKey,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const json = (await response.json()) as SupabaseAuthResponse;
+  if (!response.ok) {
+    throw new Error(json.error_description ?? json.msg ?? json.error ?? "No pudimos iniciar sesion.");
+  }
+  return json;
+};
+
+export const signInWithPassword = async (email: string, password: string) => {
+  const json = await supabaseAuthRequest("token?grant_type=password", { email: email.trim(), password });
+  if (!json.access_token) throw new Error("Supabase no regreso una sesion valida.");
+  await storeSessionToken(json.access_token);
+  return json;
+};
+
+export const signUpWithPassword = async (email: string, password: string) => {
+  const json = await supabaseAuthRequest("signup", { email: email.trim(), password });
+  if (!json.access_token) {
+    throw new Error("Cuenta creada. Confirma tu correo y despues inicia sesion.");
+  }
+  await storeSessionToken(json.access_token);
+  return json;
 };
 
 export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus> => {
@@ -178,9 +240,22 @@ export const getBatchDetail = async (token: string, businessId: string, batchId:
   return json as BatchDetail;
 };
 
-export const createMockPhotoUpload = async (token: string, businessId: string, batchId: string) => {
+export type PhotoUploadFile = {
+  uri: string;
+  name: string;
+  contentType: string;
+  fileSize?: number;
+  width?: number;
+  height?: number;
+};
+
+export const uploadPhoto = async (token: string, businessId: string, batchId: string, file: PhotoUploadFile) => {
   const { apiUrl } = getMobileConfig();
-  const fileName = `foto-demo-${Date.now()}.jpg`;
+  const fileName = file.name || `foto-${Date.now()}.jpg`;
+  const source = await fetch(file.uri);
+  if (!source.ok) throw new Error("No pudimos leer la foto seleccionada.");
+  const blob = await source.blob();
+  const fileSize = file.fileSize ?? blob.size;
   const intentResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/upload-intent`, {
     method: "POST",
     headers: {
@@ -189,10 +264,25 @@ export const createMockPhotoUpload = async (token: string, businessId: string, b
       "idempotency-key": idempotencyKey("upload-intent"),
       "x-request-id": `mobile-${Date.now()}`
     },
-    body: JSON.stringify({ originalFileName: fileName, contentType: "image/jpeg", fileSize: 2048 })
+    body: JSON.stringify({ originalFileName: fileName, contentType: file.contentType, fileSize })
   });
   const intentJson = await intentResponse.json();
   if (!intentResponse.ok) throw new Error(intentJson.userMessage ?? "No pudimos preparar la foto.");
+
+  const uploadBody = new FormData();
+  uploadBody.append("cacheControl", "3600");
+  uploadBody.append("", {
+    uri: file.uri,
+    name: fileName,
+    type: file.contentType
+  } as unknown as Blob);
+  const uploadResponse = await fetch(intentJson.upload.uploadUrl, {
+    method: intentJson.upload.method,
+    headers: intentJson.upload.headers ?? {},
+    body: uploadBody
+  });
+  if (!uploadResponse.ok) throw new Error("No pudimos subir la foto al almacenamiento.");
+
   const completeResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/complete-upload`, {
     method: "POST",
     headers: {
@@ -204,11 +294,10 @@ export const createMockPhotoUpload = async (token: string, businessId: string, b
     body: JSON.stringify({
       storageKey: intentJson.uploadIntent.storageKey,
       originalFileName: fileName,
-      contentType: "image/jpeg",
-      fileSize: 2048,
-      checksum: `dev-${Date.now()}`,
-      width: 1080,
-      height: 1080
+      contentType: file.contentType,
+      fileSize,
+      width: file.width,
+      height: file.height
     })
   });
   const completeJson = await completeResponse.json();

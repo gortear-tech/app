@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
+import { VisionAnalysisProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 describe("worker processor", () => {
@@ -25,6 +26,35 @@ describe("worker processor", () => {
   it("validates an uploaded photo through an analyze_photo job", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-photo-${Date.now()}.json`);
     const store = new LocalDataStore(path);
+    const previousPublicApiUrl = process.env.PUBLIC_API_URL;
+    process.env.PUBLIC_API_URL = "https://api.example.test";
+    const visionProvider: VisionAnalysisProvider = {
+      mode: "responses",
+      analyze: async (input) => ({
+        analysis: {
+          schemaVersion: "vision_analysis.v1",
+          promptVersion: input.promptVersion,
+          subject: { type: "food", description: "Plato fotografiado" },
+          composition: { framing: "centered", angle: "front", background: "simple", lighting: "natural" },
+          palette: { dominantColors: ["red"], temperature: "warm", saturation: "medium", contrast: "medium" },
+          sensitiveElements: {
+            personVisible: false,
+            priceVisible: false,
+            logoVisible: false,
+            promotionVisible: false,
+            textVisible: false,
+            notes: []
+          },
+          quality: { sharpness: "ok", exposure: "ok", noise: "low" },
+          mood: { temperature: "warm", keywords: ["antojo"], description: "Apetitoso" },
+          summary: "Foto lista para revision."
+        },
+        responseId: "resp_test",
+        model: "test-vision",
+        usage: null,
+        latencyMs: 1
+      })
+    };
     await store.upsertLocalUser({ userId: "u2", email: "u2@example.com" });
     const { workspace } = await store.ensureDefaultWorkspace("u2");
     await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "u2" });
@@ -62,7 +92,7 @@ describe("worker processor", () => {
       requestId: "test"
     });
 
-    const result = await processOneJob({ store, workerId: "photo-worker" });
+    const result = await processOneJob({ store, workerId: "photo-worker", visionProvider });
     const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 
     expect(result.processed).toBe(true);
@@ -191,6 +221,8 @@ describe("worker processor", () => {
     expect(evalResult.job?.id).toBe(evalRequest.job.id);
     expect(evaluations[0]?.status).toBe("failed");
     expect(evaluations[0]?.rolloutRecommendation).toBe("retain_baseline");
+    if (previousPublicApiUrl === undefined) delete process.env.PUBLIC_API_URL;
+    else process.env.PUBLIC_API_URL = previousPublicApiUrl;
     await rm(path, { force: true });
   });
 });

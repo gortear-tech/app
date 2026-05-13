@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import Fastify, { FastifyInstance, FastifyRequest } from "fastify";
 import { createHash } from "node:crypto";
+import { createClient } from "@supabase/supabase-js";
 import { createBillingProvider, createMetaProvider, loadMetaPagesFromUserAccessToken, MetaProvider } from "@fbmaniaco/providers";
 import {
   AppError,
@@ -71,6 +72,12 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       graphApiVersion: input.config.metaGraphApiVersion,
       requiredScopes: input.config.metaRequiredScopes
     });
+  const storageClient =
+    input.config.supabaseUrl && input.config.supabaseServiceRole
+      ? createClient(input.config.supabaseUrl, input.config.supabaseServiceRole, {
+          auth: { persistSession: false, autoRefreshToken: false }
+        })
+      : null;
   const app = Fastify({
     logger: {
       level: process.env.LOG_LEVEL ?? "info",
@@ -175,6 +182,19 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   const requestHash = (body: unknown) => createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
   const mediaToken = (assetId: string, expires: number) =>
     createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
+  const requireStorageClient = () => {
+    if (!storageClient) {
+      throw new AppError({
+        code: "storage_not_configured",
+        statusCode: 500,
+        message: "Supabase Storage is not configured",
+        userMessage: "El servidor no tiene almacenamiento real configurado.",
+        retryable: false,
+        action: "contact_support"
+      });
+    }
+    return storageClient;
+  };
   const previewUrl = (request: FastifyRequest, assetId: string | null | undefined) => {
     if (!assetId) return null;
     const expires = Math.floor(Date.now() / 1000) + 15 * 60;
@@ -305,7 +325,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       job.type === "analyze_photo"
         ? job.status === "succeeded"
           ? "Foto validada."
-          : "Foto en analisis local."
+          : "Analizando foto."
         : job.type === "generate_batch"
           ? job.status === "succeeded"
             ? "Generacion coordinada."
@@ -335,8 +355,8 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
                       ? "Evaluacion de captions lista."
                       : "Evaluando captions en segundo plano."
                   : job.status === "succeeded"
-                    ? "Job mock completado."
-                    : "Job mock en proceso.",
+                    ? "Trabajo completado."
+                    : "Trabajo en proceso.",
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   });
@@ -418,7 +438,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         });
       }
       const asset = await input.store.getMediaAsset({ assetId: params.assetId });
-      if (!asset || asset.kind === "original") {
+      if (!asset) {
         throw new AppError({
           code: "media_not_found",
           statusCode: 404,
@@ -428,9 +448,31 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           action: "refresh"
         });
       }
-      const label = asset.kind === "thumbnail" ? "Preview" : "Vision";
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" fill="#171c24"/><rect x="40" y="40" width="432" height="432" rx="28" fill="#233044"/><circle cx="176" cy="176" r="52" fill="#38bdf8"/><path d="M80 408l105-132 78 92 58-67 111 107H80z" fill="#94a3b8"/><text x="256" y="462" fill="#e2e8f0" font-family="Arial" font-size="28" text-anchor="middle">${label}</text></svg>`;
-      return reply.header("content-type", "image/svg+xml; charset=utf-8").send(svg);
+      if (input.config.dataStoreMode !== "supabase") {
+        throw new AppError({
+          code: "real_media_required",
+          statusCode: 409,
+          message: "Media preview requires Supabase Storage",
+          userMessage: "La vista previa necesita almacenamiento real.",
+          retryable: false,
+          action: "contact_support"
+        });
+      }
+      const { data, error } = await requireStorageClient()
+        .storage
+        .from(asset.bucket)
+        .createSignedUrl(asset.storageKey, 60 * 15);
+      if (error || !data?.signedUrl) {
+        throw new AppError({
+          code: "media_signed_url_failed",
+          statusCode: 502,
+          message: error?.message ?? "Could not create media signed URL",
+          userMessage: "No pudimos abrir la imagen real. Refresca e intenta de nuevo.",
+          retryable: true,
+          action: "retry"
+        });
+      }
+      return reply.redirect(data.signedUrl);
     }
   );
 
@@ -2212,13 +2254,37 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
             contentType: body.contentType,
             fileSize: body.fileSize
           });
+          if (input.config.dataStoreMode !== "supabase") {
+            throw new AppError({
+              code: "real_storage_required",
+              statusCode: 409,
+              message: "Photo uploads require Supabase Storage",
+              userMessage: "La subida de fotos necesita almacenamiento real.",
+              retryable: false,
+              action: "contact_support"
+            });
+          }
+          const signed = await requireStorageClient()
+            .storage
+            .from(uploadIntent.bucket)
+            .createSignedUploadUrl(uploadIntent.storageKey, { upsert: false });
+          if (signed.error || !signed.data?.signedUrl) {
+            throw new AppError({
+              code: "storage_upload_url_failed",
+              statusCode: 502,
+              message: signed.error?.message ?? "Could not create Supabase signed upload URL",
+              userMessage: "No pudimos preparar la subida real. Intenta de nuevo.",
+              retryable: true,
+              action: "retry"
+            });
+          }
           return {
             schemaVersion: "upload_intent.v1" as const,
             uploadIntent,
             upload: {
-              uploadUrl: `local://storage/${uploadIntent.bucket}/${encodeURIComponent(uploadIntent.storageKey)}`,
+              uploadUrl: signed.data.signedUrl,
               method: "PUT" as const,
-              headers: { "content-type": body.contentType },
+              headers: {},
               expiresAt: uploadIntent.expiresAt
             },
             requestId
@@ -2326,6 +2392,16 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       }
     },
     async (request) => {
+      if (input.config.appEnv !== "development" || !input.config.localAuthEnabled) {
+        throw new AppError({
+          code: "dev_endpoint_disabled",
+          statusCode: 403,
+          message: "Internal mock job endpoint is disabled",
+          userMessage: "Esta accion no esta disponible en este entorno.",
+          retryable: false,
+          action: "none"
+        });
+      }
       const body = request.body as { workspaceId: string; dedupeKey: string };
       const { actor } = await authenticateBearer({
         authorization: request.headers.authorization,
@@ -2349,7 +2425,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         status: job.status,
         workspaceId: job.workspaceId,
         progress: job.status === "succeeded" ? 100 : 0,
-        userMessage: "Job mock en cola.",
+        userMessage: "Trabajo en cola.",
         createdAt: job.createdAt,
         updatedAt: job.updatedAt
       };
@@ -2391,14 +2467,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         });
       }
       return {
-        id: job.id,
-        type: job.type,
-        status: job.status,
-        workspaceId: job.workspaceId,
-        progress: job.status === "succeeded" ? 100 : job.status === "running" ? 50 : 0,
-        userMessage: job.status === "succeeded" ? "Job mock completado." : "Job mock en proceso.",
-        createdAt: job.createdAt,
-        updatedAt: job.updatedAt
+        ...jobSummary(job)
       };
     }
   );

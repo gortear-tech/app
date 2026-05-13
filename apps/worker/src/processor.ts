@@ -13,16 +13,18 @@ const envFlag = (name: string, fallback: boolean) => {
   return ["1", "true", "yes"].includes(value.toLowerCase());
 };
 
-export const processOneJob = async (input: { store: DataStore; workerId: string }): Promise<WorkerResult> => {
+export const processOneJob = async (input: {
+  store: DataStore;
+  workerId: string;
+  visionProvider?: VisionAnalysisProvider;
+}): Promise<WorkerResult> => {
   const providerConfig: Parameters<typeof createVisionAnalysisProvider>[0] = {
     timeoutMs: Number(process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000")
   };
   if (process.env.OPENAI_API_KEY) providerConfig.apiKey = process.env.OPENAI_API_KEY;
   if (process.env.OPENAI_BASE_URL) providerConfig.baseUrl = process.env.OPENAI_BASE_URL;
   if (process.env.OPENAI_VISION_MODEL) providerConfig.visionModel = process.env.OPENAI_VISION_MODEL;
-  const visionProvider =
-    (input as { visionProvider?: VisionAnalysisProvider }).visionProvider ??
-    createVisionAnalysisProvider(providerConfig);
+  const visionProvider = input.visionProvider ?? createVisionAnalysisProvider(providerConfig);
   const job = await input.store.claimDueJob(input.workerId);
   if (!job) return { processed: false };
 
@@ -32,12 +34,15 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
         throw new Error("OpenAI vision is disabled by feature flag");
       }
       if (!job.photoId) throw new Error("analyze_photo job is missing photoId");
-      const operationKey = job.operationKey ?? `local:analyze_photo:${job.id}`;
+      if (visionProvider.mode !== "responses") {
+        throw new Error("OpenAI vision provider is not configured");
+      }
+      const operationKey = job.operationKey ?? `openai_vision:${job.id}`;
       await input.store.upsertExternalOperation({
         operationKey,
         workspaceId: job.workspaceId,
         jobId: job.id,
-        provider: "local",
+        provider: "openai",
         operation: "analyze_photo",
         status: "started"
       });
@@ -46,7 +51,8 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
       const imageUrl =
         typeof job.payload.imageUrl === "string" && /^https?:\/\//.test(job.payload.imageUrl)
           ? job.payload.imageUrl
-          : "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIj48cmVjdCB3aWR0aD0iNTEyIiBoZWlnaHQ9IjUxMiIgZmlsbD0iIzE3MWMyNCIvPjx0ZXh0IHg9IjI1NiIgeT0iMjU2IiBmaWxsPSIjZTJlOGYwIiBmb250LXNpemU9IjI4IiBmb250LWZhbWlseT0iQXJpYWwiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkZCbWFuaWFjbyBWaXNpb248L3RleHQ+PC9zdmc+";
+          : null;
+      if (!imageUrl) throw new Error("analyze_photo job is missing real imageUrl");
       const promptVersion = "vision-analysis-v1";
       const vision = await visionProvider.analyze({
         imageUrl,
@@ -63,7 +69,7 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
         workspaceId: job.workspaceId,
         jobId: job.id,
         operationKey,
-        provider: visionProvider.mode === "responses" ? "openai" : "mock",
+        provider: "openai",
         model: vision.model,
         modelProfileId: "vision-default-v1",
         promptTemplateId: "photo-vision-analysis",
@@ -100,7 +106,7 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
         operationKey,
         workspaceId: job.workspaceId,
         jobId: job.id,
-        provider: "local",
+        provider: "openai",
         operation: "analyze_photo",
         status: "succeeded"
       });
@@ -125,16 +131,13 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
       }
 
       if (job.type === "generate_variant") {
-        if (!envFlag("FEATURE_OPENAI_IMAGE_GENERATION", true)) {
-          throw new Error("OpenAI image generation is disabled by feature flag");
-        }
         if (!job.variantId) throw new Error("generate_variant job is missing variantId");
-        const operationKey = job.operationKey ?? `openai_image:${job.variantId}`;
+        const operationKey = job.operationKey ?? `source_photo_variant:${job.variantId}`;
         await input.store.upsertExternalOperation({
           operationKey,
           workspaceId: job.workspaceId,
           jobId: job.id,
-          provider: "mock",
+          provider: "internal",
           operation: "generate_variant",
           status: "started"
         });
@@ -155,7 +158,7 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
           operationKey,
           workspaceId: job.workspaceId,
           jobId: job.id,
-          provider: "mock",
+          provider: "internal",
           operation: "generate_variant",
           status: "succeeded"
         });
@@ -255,7 +258,10 @@ export const processOneJob = async (input: { store: DataStore; workerId: string 
       throw new Error(`Unsupported job type in this phase: ${job.type}`);
     }
 
-    const operationKey = job.operationKey ?? `local:mock:${job.id}`;
+    if (process.env.APP_ENV === "production") {
+      throw new Error("mock_job is disabled in production");
+    }
+    const operationKey = job.operationKey ?? `development:mock:${job.id}`;
     await input.store.upsertExternalOperation({
       operationKey,
       workspaceId: job.workspaceId,

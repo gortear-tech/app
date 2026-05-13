@@ -1540,6 +1540,7 @@ export class LocalDataStore implements DataStore {
       payload: {
         photoId: photo.id,
         batchId: input.batchId,
+        imageUrl: publicMediaUrl(originalAsset.id),
         contentType: input.contentType,
         fileSize: input.fileSize,
         requestId: input.requestId

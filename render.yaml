@@ -21,11 +21,15 @@ services:
         value: supabase
       - key: ALLOW_LOCAL_DATASTORE
         value: "false"
+      - key: LOCAL_AUTH_ENABLED
+        value: "false"
       - key: REQUIRE_WORKER_HEARTBEAT
         value: "true"
       - key: FEATURE_META_PUBLISHING
         sync: false
       - key: PUBLIC_API_URL
+        sync: false
+      - key: SUPABASE_MEDIA_BUCKET
         sync: false
       - key: META_APP_ID
         sync: false
@@ -37,8 +41,6 @@ services:
         value: v23.0
       - key: META_REQUIRED_SCOPES
         value: pages_show_list,pages_read_engagement,pages_manage_posts
-      - key: META_TEST_USER_ACCESS_TOKEN
-        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_VISION_MODEL
@@ -76,6 +78,8 @@ services:
         value: supabase
       - key: ALLOW_LOCAL_DATASTORE
         value: "false"
+      - key: LOCAL_AUTH_ENABLED
+        value: "false"
       - key: WORKER_POLL_INTERVAL_MS
         value: "5000"
       - key: WORKER_HEARTBEAT_INTERVAL_MS
@@ -83,6 +87,8 @@ services:
       - key: FEATURE_META_PUBLISHING
         sync: false
       - key: PUBLIC_API_URL
+        sync: false
+      - key: SUPABASE_MEDIA_BUCKET
         sync: false
       - key: META_GRAPH_API_VERSION
         value: v23.0

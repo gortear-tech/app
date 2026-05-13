@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
+import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
 import { useMemo, useState } from "react";
 import {
@@ -21,7 +22,7 @@ import {
   confirmCalendar,
   connectMeta,
   createBatch,
-  createMockPhotoUpload,
+  clearStoredSession,
   estimateBatchCost,
   generateBatchVariants,
   generateWeeklyReport,
@@ -39,9 +40,11 @@ import {
   rejectVariant,
   runCaptionEval,
   selectMetaPage,
-  storeDevelopmentSession,
+  signInWithPassword,
+  signUpWithPassword,
   updateBusinessAutonomy,
-  updateVariantCaption
+  updateVariantCaption,
+  uploadPhoto
 } from "./src/api/client";
 import { getMobileConfig } from "./src/config";
 
@@ -52,6 +55,8 @@ function BootScreen() {
   const config = getMobileConfig();
   const [tab, setTab] = useState<TabKey>("today");
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
   const token = tokenQuery.data ?? "";
@@ -129,18 +134,25 @@ function BootScreen() {
       await queryClient.invalidateQueries({ queryKey: ["pages"] });
     }
   });
-  const startFacebook = useMutation({
-    mutationFn: async () => {
-      const sessionToken = "dev:mobile-user:mobile@example.com";
-      await storeDevelopmentSession(sessionToken);
-      const result = await connectMeta(sessionToken);
-      if (result.authorizationUrl) await Linking.openURL(result.authorizationUrl);
-      return result;
-    },
+  const signIn = useMutation({
+    mutationFn: async () => signInWithPassword(email, password),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["session-token"] });
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-      await queryClient.invalidateQueries({ queryKey: ["pages"] });
+    }
+  });
+  const signUp = useMutation({
+    mutationFn: async () => signUpWithPassword(email, password),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["session-token"] });
+      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+    }
+  });
+  const signOut = useMutation({
+    mutationFn: clearStoredSession,
+    onSuccess: async () => {
+      queryClient.clear();
+      await queryClient.invalidateQueries({ queryKey: ["session-token"] });
     }
   });
   const selectPage = useMutation({
@@ -151,8 +163,29 @@ function BootScreen() {
     }
   });
   const startBatch = useMutation({ mutationFn: async () => createBatch(token, selectedBusinessId ?? ""), onSuccess: invalidateWork });
-  const uploadMock = useMutation({
-    mutationFn: async () => createMockPhotoUpload(token, selectedBusinessId ?? "", activeBatch.data?.id ?? ""),
+  const uploadSelectedPhoto = useMutation({
+    mutationFn: async () => {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) throw new Error("Necesitamos permiso para elegir fotos.");
+      const selection = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.95,
+        allowsMultipleSelection: false
+      });
+      if (selection.canceled || !selection.assets[0]) throw new Error("No se eligio ninguna foto.");
+      const asset = selection.assets[0];
+      const upload = {
+        uri: asset.uri,
+        name: asset.fileName ?? `foto-${Date.now()}.jpg`,
+        contentType: asset.mimeType ?? "image/jpeg",
+        width: asset.width,
+        height: asset.height
+      };
+      return uploadPhoto(token, selectedBusinessId ?? "", activeBatch.data?.id ?? "", {
+        ...upload,
+        ...(asset.fileSize === undefined ? {} : { fileSize: asset.fileSize })
+      });
+    },
     onSuccess: invalidateWork
   });
   const generateVariants = useMutation({
@@ -240,7 +273,9 @@ function BootScreen() {
 
   const visibleError =
     bootstrap.error ??
-    startFacebook.error ??
+    signIn.error ??
+    signUp.error ??
+    signOut.error ??
     connect.error ??
     pages.error ??
     selectPage.error ??
@@ -252,7 +287,7 @@ function BootScreen() {
     businessDetail.error ??
     billing.error ??
     startBatch.error ??
-    uploadMock.error ??
+    uploadSelectedPhoto.error ??
     generateVariants.error ??
     saveCaption.error ??
     approve.error ??
@@ -286,18 +321,46 @@ function BootScreen() {
           : "Revisar progreso";
 
   const renderOnboarding = () => {
-    if (config.appEnv === "development" && !bootstrap.data?.authenticated) {
+    if (!bootstrap.data?.authenticated) {
       return (
         <Screen>
           <Hero
-            title="Conecta Facebook"
+            title="Inicia sesion"
             eyebrow="Inicio"
-            body="Abriremos Facebook para elegir tu pagina. Si el servidor esta en modo demo, continuaremos con una pagina de prueba."
+            body="Usa tu cuenta para conectar paginas de Facebook, subir fotos y preparar publicaciones reales."
+          />
+          <Panel title="Cuenta">
+            <TextInput
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="correo"
+              placeholderTextColor={palette.muted}
+              style={styles.textInput}
+              value={email}
+              onChangeText={setEmail}
+            />
+            <TextInput
+              secureTextEntry
+              placeholder="contrasena"
+              placeholderTextColor={palette.muted}
+              style={styles.textInput}
+              value={password}
+              onChangeText={setPassword}
+            />
+          </Panel>
+          <ActionPair
+            primaryLabel={signIn.isPending ? "Entrando..." : "Entrar"}
+            primaryDisabled={signIn.isPending || signUp.isPending || !email || password.length < 6}
+            onPrimary={() => signIn.mutate()}
+            secondaryLabel={signUp.isPending ? "Creando..." : "Crear cuenta"}
+            secondaryDisabled={signIn.isPending || signUp.isPending || !email || password.length < 6}
+            onSecondary={() => signUp.mutate()}
           />
           <Button
-            label={startFacebook.isPending ? "Abriendo Facebook..." : "Conectar con Facebook"}
-            disabled={startFacebook.isPending}
-            onPress={() => startFacebook.mutate()}
+            label="Actualizar sesion"
+            variant="secondary"
+            disabled={tokenQuery.isFetching}
+            onPress={() => queryClient.invalidateQueries({ queryKey: ["session-token"] })}
           />
         </Screen>
       );
@@ -387,12 +450,12 @@ function BootScreen() {
         primaryLabel={startBatch.isPending ? "Creando..." : "Crear lote"}
         primaryDisabled={startBatch.isPending || !selectedBusinessId}
         onPrimary={() => startBatch.mutate()}
-        secondaryLabel={uploadMock.isPending ? "Subiendo..." : "Foto demo"}
-        secondaryDisabled={!activeBatch.data || uploadMock.isPending}
-        onSecondary={() => uploadMock.mutate()}
+        secondaryLabel={uploadSelectedPhoto.isPending ? "Subiendo..." : "Subir foto"}
+        secondaryDisabled={!activeBatch.data || uploadSelectedPhoto.isPending}
+        onSecondary={() => uploadSelectedPhoto.mutate()}
       />
       <Panel title="Fotos">
-        {photos.length === 0 ? <EmptyState title="Aun no hay fotos" body="Agrega una foto demo para validar el flujo de aprobacion." /> : null}
+        {photos.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube una foto real para preparar la publicacion." /> : null}
         {photos.map((photo) => (
           <View key={photo.id} style={styles.mediaRow}>
             <Image source={{ uri: photo.thumbnailUrl ?? undefined }} style={styles.thumbnail} />
@@ -405,7 +468,7 @@ function BootScreen() {
         ))}
       </Panel>
       {photos.some((photo) => photo.status === "validada") && variants.length === 0 ? (
-        <Button label={generateVariants.isPending ? "Preparando..." : "Generar variante"} disabled={generateVariants.isPending} onPress={() => generateVariants.mutate()} />
+        <Button label={generateVariants.isPending ? "Preparando..." : "Preparar publicacion"} disabled={generateVariants.isPending} onPress={() => generateVariants.mutate()} />
       ) : null}
       {generated.map((variant, index) => (
         <Panel key={variant.id} title={variant.assignedStyle?.styleName ?? "Variante"} eyebrow={`${index + 1} de ${generated.length}`}>
@@ -467,6 +530,7 @@ function BootScreen() {
           {(businessDetail.data?.autonomy.blockingReasons ?? ["explicit_opt_in_required"]).slice(0, 3).map((reason: string) => (
             <Text key={reason} style={styles.muted}>{reason}</Text>
           ))}
+          <Button label={signOut.isPending ? "Saliendo..." : "Cerrar sesion"} variant="secondary" disabled={signOut.isPending} onPress={() => signOut.mutate()} />
         </Panel>
         <Panel title="Paginas de Facebook">
           {(pages.data ?? []).length === 0 ? (
@@ -514,7 +578,7 @@ function BootScreen() {
           <Button label={resetAutonomy.isPending ? "Reseteando..." : "Resetear autonomia"} variant="secondary" disabled={resetAutonomy.isPending} onPress={() => resetAutonomy.mutate()} />
         </Panel>
         <Panel title="Evaluaciones IA">
-          <Text style={styles.muted}>Las pruebas de captions corren como job y no bloquean aprobaciones en vivo.</Text>
+          <Text style={styles.muted}>Las evaluaciones de captions corren como job y no bloquean aprobaciones en vivo.</Text>
           <Button label={captionEval.isPending ? "Encolando..." : "Ejecutar eval de captions"} disabled={captionEval.isPending} onPress={() => captionEval.mutate()} />
         </Panel>
       </Screen>
@@ -766,6 +830,16 @@ const styles = StyleSheet.create({
     backgroundColor: palette.panel
   },
   panelTitle: { color: palette.text, fontSize: 17, fontWeight: "900" },
+  textInput: {
+    minHeight: 48,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#334155",
+    color: palette.text,
+    backgroundColor: palette.bg,
+    paddingHorizontal: 12,
+    fontSize: 14
+  },
   rowCard: {
     minHeight: 74,
     flexDirection: "row",

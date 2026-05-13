@@ -66,7 +66,7 @@ const publicMediaUrl = (assetId: string) => {
   const expires = Math.floor(Date.now() / 1000) + 15 * 60;
   return `${baseUrl.replace(/\/$/, "")}/media/assets/${assetId}/preview?expires=${expires}&token=${mediaPreviewToken(assetId, expires)}`;
 };
-const MEDIA_BUCKET = "business-media";
+const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
@@ -1782,6 +1782,7 @@ export class SupabaseDataStoreCore {
           JSON.stringify({
             photoId,
             batchId: input.batchId,
+            imageUrl: publicMediaUrl(originalAssetId),
             contentType: input.contentType,
             fileSize: input.fileSize,
             requestId: input.requestId
@@ -1832,17 +1833,12 @@ export class SupabaseDataStoreCore {
       const photoResult = await client.query("select * from public.photos where id = $1 for update", [input.photoId]);
       const photo = photoResult.rows[0];
       if (!photo) throw new Error(`Photo not found: ${input.photoId}`);
-      const timestamp = now();
-      const thumbKey = `${photo.workspace_id}/${photo.business_id}/${photo.batch_id}/derived/${photo.id}-thumb.jpg`;
-      const visionKey = `${photo.workspace_id}/${photo.business_id}/${photo.batch_id}/derived/${photo.id}-vision.jpg`;
-      const thumbnail = await this.ensureDerivedMediaAsset(client, photo, "thumbnail", thumbKey, timestamp);
-      const visionInput = await this.ensureDerivedMediaAsset(client, photo, "vision_input", visionKey, timestamp);
       const updated = await client.query(
         `update public.photos
          set status = 'validada', thumbnail_asset_id = $2, vision_input_asset_id = $3,
              vision_analysis = $4::jsonb, updated_at = now()
          where id = $1 returning *`,
-        [photo.id, thumbnail.id, visionInput.id, JSON.stringify(input.analysis)]
+        [photo.id, photo.original_asset_id, photo.original_asset_id, JSON.stringify(input.analysis)]
       );
       await client.query(
         "update public.batches set status = 'pendiente_confirmacion', last_activity_at = now(), updated_at = now() where id = $1",
@@ -2269,6 +2265,16 @@ export class SupabaseDataStoreCore {
           action: "retry"
         });
       }
+      if (!photo.originalAssetId) {
+        throw new AppError({
+          code: "source_media_missing",
+          statusCode: 409,
+          message: "Validated photo is missing its original media asset",
+          userMessage: "La foto no tiene archivo original disponible para publicar.",
+          retryable: false,
+          action: "refresh"
+        });
+      }
       const style = this.assignStyle(current.variantIndex);
       const promptVersion = "generation-plan-v1";
       const plan = this.generationPlan(style, promptVersion);
@@ -2288,27 +2294,10 @@ export class SupabaseDataStoreCore {
         seoTermsUsed: ["Facebook", "negocio local"],
         warnings: []
       };
-      const assetResult = await client.query(
-        `insert into public.media_assets
-         (id, workspace_id, business_id, batch_id, photo_id, variant_id, kind, bucket, storage_key, mime_type, file_size, is_public, created_at)
-         values ($1, $2, $3, $4, $5, $6, 'generated', $7, $8, 'image/jpeg', 0, false, now())
-         returning *`,
-        [
-          randomUUID(),
-          current.workspaceId,
-          current.businessId,
-          current.batchId,
-          current.photoId,
-          current.id,
-          MEDIA_BUCKET,
-          `${current.workspaceId}/${current.businessId}/${current.batchId}/generated/${current.id}.jpg`
-        ]
-      );
-      const asset = toMediaAsset(assetResult.rows[0]);
       const updated = await client.query(
         `update public.variants
          set style_id = $2, assigned_style = $3::jsonb, generation_plan = $4::jsonb, quality_check = $5::jsonb,
-             caption_result = $6::jsonb, model_profile_id = 'image-generation-local-v1',
+             caption_result = $6::jsonb, model_profile_id = 'source-photo-publish-v1',
              prompt_template_id = 'photo-variant-generation', prompt_version = $7,
              quality_check_id = $8, quality_status = $9, quality_score = $10,
              quality_warnings = $11::jsonb, generated_asset_id = $12, caption = $13,
@@ -2326,7 +2315,7 @@ export class SupabaseDataStoreCore {
           quality.status,
           quality.score,
           JSON.stringify(quality.warnings),
-          asset.id,
+          photo.originalAssetId,
           caption
         ]
       );
@@ -2339,7 +2328,7 @@ export class SupabaseDataStoreCore {
          where id = $1`,
         [current.batchId]
       );
-      await this.consumeVariantReservation(client, toVariant(updated.rows[0]), input.jobId, asset.id);
+      await this.consumeVariantReservation(client, toVariant(updated.rows[0]), input.jobId, photo.originalAssetId);
       await client.query(
         `insert into public.outbox_events
          (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
@@ -2395,26 +2384,14 @@ export class SupabaseDataStoreCore {
       await client.query("begin");
       let publishableAssetId = variant.publishableAssetId ?? null;
       if (variant.generatedAssetId && !publishableAssetId) {
-        const generated = await client.query("select * from public.media_assets where id = $1", [variant.generatedAssetId]);
-        const publishable = await client.query(
-          `insert into public.media_assets
-           (id, workspace_id, business_id, batch_id, photo_id, variant_id, kind, bucket, storage_key, mime_type, file_size, is_public, created_at)
-           values ($1, $2, $3, $4, $5, $6, 'publishable', $7, $8, $9, $10, true, now())
-           returning *`,
-          [
-            randomUUID(),
-            variant.workspaceId,
-            variant.businessId,
-            variant.batchId,
-            variant.photoId,
-            variant.id,
-            MEDIA_BUCKET,
-            `${variant.workspaceId}/${variant.businessId}/${variant.batchId}/publishable/${variant.id}.jpg`,
-            generated.rows[0]?.mime_type ?? "image/jpeg",
-            generated.rows[0]?.file_size ?? 0
-          ]
+        const generated = await client.query(
+          "select id from public.media_assets where id = $1 and workspace_id = $2 and business_id = $3",
+          [variant.generatedAssetId, variant.workspaceId, variant.businessId]
         );
-        publishableAssetId = publishable.rows[0].id;
+        if (!generated.rows[0]) {
+          throw this.variantStateError("variant_media_missing", "La imagen de la variante no esta disponible para publicar.");
+        }
+        publishableAssetId = generated.rows[0].id;
       }
       const result = await client.query(
         "update public.variants set status = 'aprobada', publishable_asset_id = $2, updated_at = now() where id = $1 returning *",
@@ -2626,10 +2603,11 @@ export class SupabaseDataStoreCore {
     }
     const variant = await this.requireVariant(post.workspaceId, post.businessId, post.batchId, post.variantId);
     if (!variant.publishableAssetId) return await this.failScheduledPost(post.id, "missing_publishable_media");
-    const asset = await this.pool.query("select * from public.media_assets where id = $1 and kind = 'publishable'", [
-      variant.publishableAssetId
-    ]);
-    if (!asset.rows[0]?.is_public) return await this.failScheduledPost(post.id, "media_not_publicable");
+    const asset = await this.pool.query(
+      "select * from public.media_assets where id = $1 and workspace_id = $2 and business_id = $3",
+      [variant.publishableAssetId, post.workspaceId, post.businessId]
+    );
+    if (!asset.rows[0]) return await this.failScheduledPost(post.id, "media_not_available");
     const operationKey = `meta_publish:${post.id}`;
     await this.upsertExternalOperation({
       operationKey,
@@ -2645,41 +2623,56 @@ export class SupabaseDataStoreCore {
     );
     const page = pageResult.rows[0] as { meta_page_id?: string; encrypted_page_access_token?: string | null } | undefined;
     const pageAccessToken = decodeServerToken(page?.encrypted_page_access_token);
-    let facebookPostId = `mock_${post.pageId}_${post.id}`;
-    let remotePostType: "photo" | "feed" = "photo";
-    let remotePostUrl = `https://facebook.example/posts/${facebookPostId}`;
     let remoteTraceId: string | null = null;
-    if (pageAccessToken && page?.meta_page_id && !page.meta_page_id.startsWith("mock-")) {
-      try {
-        const publishImageUrl = publicMediaUrl(String(asset.rows[0].id)) ?? (post.imageUrl && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null);
-        const publishResult = await publishFacebookPagePost({
-          graphApiVersion: post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0",
-          pageId: page.meta_page_id,
-          pageAccessToken,
-          caption: post.caption ?? "",
-          imageUrl: publishImageUrl
-        });
-        facebookPostId = publishResult.facebookPostId;
-        remotePostType = publishResult.remotePostType;
-        remotePostUrl = publishResult.remotePostUrl;
-        remoteTraceId = publishResult.providerTraceId ?? null;
-      } catch (error) {
-        await this.pool.query(
-          `update public.scheduled_posts
-           set status = 'fallida', remote_status = 'incierto', remote_error_code = $2, updated_at = now()
-           where id = $1`,
-          [post.id, error instanceof AppError ? error.code : "meta_publish_failed"]
-        );
-        await this.upsertExternalOperation({
-          operationKey,
-          workspaceId: post.workspaceId,
-          jobId: job.id,
-          provider: "meta",
-          operation: "publish_post",
-          status: "failed"
-        });
-        throw error;
-      }
+    if (!pageAccessToken || !page?.meta_page_id || page.meta_page_id.startsWith("mock-")) {
+      await this.upsertExternalOperation({
+        operationKey,
+        workspaceId: post.workspaceId,
+        jobId: job.id,
+        provider: "meta",
+        operation: "publish_post",
+        status: "failed"
+      });
+      return await this.failScheduledPost(post.id, "missing_meta_page_token");
+    }
+    const publishImageUrl = publicMediaUrl(String(asset.rows[0].id)) ?? (post.imageUrl && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null);
+    if (!publishImageUrl) {
+      await this.upsertExternalOperation({
+        operationKey,
+        workspaceId: post.workspaceId,
+        jobId: job.id,
+        provider: "meta",
+        operation: "publish_post",
+        status: "failed"
+      });
+      return await this.failScheduledPost(post.id, "missing_public_media_url");
+    }
+    let publishResult: Awaited<ReturnType<typeof publishFacebookPagePost>>;
+    try {
+      publishResult = await publishFacebookPagePost({
+        graphApiVersion: post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0",
+        pageId: page.meta_page_id,
+        pageAccessToken,
+        caption: post.caption ?? "",
+        imageUrl: publishImageUrl
+      });
+      remoteTraceId = publishResult.providerTraceId ?? null;
+    } catch (error) {
+      await this.pool.query(
+        `update public.scheduled_posts
+         set status = 'fallida', remote_status = 'incierto', remote_error_code = $2, updated_at = now()
+         where id = $1`,
+        [post.id, error instanceof AppError ? error.code : "meta_publish_failed"]
+      );
+      await this.upsertExternalOperation({
+        operationKey,
+        workspaceId: post.workspaceId,
+        jobId: job.id,
+        provider: "meta",
+        operation: "publish_post",
+        status: "failed"
+      });
+      throw error;
     }
     const result = await this.pool.query(
       `update public.scheduled_posts
@@ -2690,11 +2683,11 @@ export class SupabaseDataStoreCore {
        where id = $1 returning *`,
       [
         post.id,
-        facebookPostId,
-        remotePostType,
-        remotePostUrl,
+        publishResult.facebookPostId,
+        publishResult.remotePostType,
+        publishResult.remotePostUrl,
         input.publishNow ? "publish_now" : post.deliveryMode,
-        `local://public/${asset.rows[0].bucket}/${asset.rows[0].storage_key}`,
+        publishImageUrl,
         remoteTraceId,
         input.publishNow ? 0 : 1
       ]
@@ -2704,7 +2697,7 @@ export class SupabaseDataStoreCore {
       operationKey,
       workspaceId: post.workspaceId,
       jobId: job.id,
-      provider: pageAccessToken ? "meta" : "meta_mock",
+      provider: "meta",
       operation: "publish_post",
       status: "succeeded"
     });
@@ -2714,7 +2707,7 @@ export class SupabaseDataStoreCore {
       aggregateId: post.id,
       workspaceId: post.workspaceId,
       businessId: post.businessId,
-      payload: { facebookPostId, jobId: job.id }
+      payload: { facebookPostId: publishResult.facebookPostId, jobId: job.id }
     });
     return toScheduledPost(result.rows[0]);
   }

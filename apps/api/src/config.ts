@@ -16,7 +16,9 @@ export type ApiConfig = {
   localDbPath: string;
   supabaseUrl: string | undefined;
   supabaseServiceRole: string | undefined;
+  supabaseMediaBucket: string;
   databaseUrl: string | undefined;
+  publicApiUrl: string | undefined;
   metaAppId: string | undefined;
   metaAppSecret: string | undefined;
   metaRedirectUri: string | undefined;
@@ -87,6 +89,20 @@ export const loadConfig = (): ApiConfig => {
     | "local"
     | "supabase";
   const allowLocalDataStore = toBool(process.env.ALLOW_LOCAL_DATASTORE, appEnv === "development");
+  const databaseUrl = process.env.DATABASE_URL || undefined;
+  const supabaseUrl = process.env.SUPABASE_URL || undefined;
+  const supabaseServiceRole = process.env.SUPABASE_SERVICE_ROLE || undefined;
+  const publicApiUrl = process.env.PUBLIC_API_URL || process.env.API_PUBLIC_URL || undefined;
+  const metaAppId = process.env.META_APP_ID || undefined;
+  const metaAppSecret = process.env.META_APP_SECRET || undefined;
+  const metaRedirectUri = process.env.META_REDIRECT_URI || undefined;
+  const openaiApiKey = process.env.OPENAI_API_KEY || undefined;
+  const productionTestTokens = [
+    "META_TEST_USER_ACCESS_TOKEN",
+    "META_BOOTSTRAP_TOKEN",
+    "META_USER_ACCESS_TOKEN",
+    "META_ACCESS_TOKEN"
+  ].filter((key) => Boolean(process.env[key]));
 
   if (appEnv === "production" && localAuthEnabled) {
     throw new AppError({
@@ -97,6 +113,33 @@ export const loadConfig = (): ApiConfig => {
       retryable: false,
       action: "contact_support"
     });
+  }
+  if (appEnv === "production") {
+    const missing = [
+      dataStoreMode !== "supabase" ? "DATA_STORE_MODE=supabase" : null,
+      allowLocalDataStore ? "ALLOW_LOCAL_DATASTORE=false" : null,
+      databaseUrl ? null : "DATABASE_URL",
+      supabaseUrl ? null : "SUPABASE_URL",
+      supabaseServiceRole ? null : "SUPABASE_SERVICE_ROLE",
+      publicApiUrl?.startsWith("https://") ? null : "PUBLIC_API_URL=https://...",
+      metaAppId ? null : "META_APP_ID",
+      metaAppSecret ? null : "META_APP_SECRET",
+      metaRedirectUri ? null : "META_REDIRECT_URI",
+      openaiApiKey ? null : "OPENAI_API_KEY",
+      productionTestTokens.length === 0 ? null : `remove:${productionTestTokens.join(",")}`
+    ].filter((item): item is string => Boolean(item));
+
+    if (missing.length > 0) {
+      throw new AppError({
+        code: "invalid_config",
+        statusCode: 500,
+        message: `Production config is incomplete: ${missing.join(", ")}`,
+        userMessage: "El servidor no esta listo para operar con servicios reales.",
+        retryable: false,
+        action: "contact_support",
+        details: { missing }
+      });
+    }
   }
 
   return {
@@ -109,12 +152,14 @@ export const loadConfig = (): ApiConfig => {
     corsOrigin: process.env.CORS_ORIGIN ?? "*",
     localAuthEnabled,
     localDbPath: process.env.LOCAL_DB_PATH ?? defaultLocalDbPath(),
-    supabaseUrl: process.env.SUPABASE_URL || undefined,
-    supabaseServiceRole: process.env.SUPABASE_SERVICE_ROLE || undefined,
-    databaseUrl: process.env.DATABASE_URL || undefined,
-    metaAppId: process.env.META_APP_ID || undefined,
-    metaAppSecret: process.env.META_APP_SECRET || undefined,
-    metaRedirectUri: process.env.META_REDIRECT_URI || undefined,
+    supabaseUrl,
+    supabaseServiceRole,
+    supabaseMediaBucket: process.env.SUPABASE_MEDIA_BUCKET ?? "business-media",
+    databaseUrl,
+    publicApiUrl,
+    metaAppId,
+    metaAppSecret,
+    metaRedirectUri,
     metaGraphApiVersion: process.env.META_GRAPH_API_VERSION ?? "v23.0",
     metaRequiredScopes: (process.env.META_REQUIRED_SCOPES ?? "pages_show_list,pages_read_engagement,pages_manage_posts")
       .split(",")
@@ -126,7 +171,7 @@ export const loadConfig = (): ApiConfig => {
       process.env.META_USER_ACCESS_TOKEN ||
       process.env.META_ACCESS_TOKEN ||
       undefined,
-    openaiApiKey: process.env.OPENAI_API_KEY || undefined,
+    openaiApiKey,
     openaiBaseUrl: process.env.OPENAI_BASE_URL || undefined,
     openaiVisionModel: process.env.OPENAI_VISION_MODEL ?? "gpt-5.5",
     openaiVisionTimeoutMs: Number(process.env.OPENAI_IMAGE_TIMEOUT_MS ?? process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000"),
@@ -146,9 +191,10 @@ export const loadConfig = (): ApiConfig => {
 export const readinessFromConfig = (config: ApiConfig) => {
   const hasSupabasePair = Boolean(config.supabaseUrl && config.supabaseServiceRole);
   const canUseLocal = config.dataStoreMode === "local" && config.allowLocalDataStore && config.localAuthEnabled;
+  const canUseSupabase = config.dataStoreMode === "supabase" && Boolean(config.databaseUrl && hasSupabasePair);
   return {
-    config: canUseLocal || hasSupabasePair,
-    db: config.dataStoreMode === "supabase" ? Boolean(config.databaseUrl || hasSupabasePair) : canUseLocal,
-    queue: config.dataStoreMode === "supabase" ? Boolean(config.databaseUrl || hasSupabasePair) : canUseLocal
+    config: canUseLocal || canUseSupabase,
+    db: config.dataStoreMode === "supabase" ? Boolean(config.databaseUrl) : canUseLocal,
+    queue: config.dataStoreMode === "supabase" ? Boolean(config.databaseUrl) : canUseLocal
   };
 };
