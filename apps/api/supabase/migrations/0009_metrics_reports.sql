@@ -81,7 +81,7 @@ create table public.post_metric_snapshots (
   provider text not null check (provider in ('fbmaniaco', 'meta')),
   canonical_metric text not null,
   provider_metric_name text,
-  window text not null check (window in ('24h', '72h', '7d', 'lifetime')),
+  metric_window text not null check (metric_window in ('24h', '72h', '7d', 'lifetime')),
   value numeric not null,
   collected_at timestamptz not null default now(),
   observed_until timestamptz not null,
@@ -91,10 +91,10 @@ create table public.post_metric_snapshots (
 );
 
 create index post_metric_snapshots_post_window_idx
-  on public.post_metric_snapshots (scheduled_post_id, window, collected_at);
+  on public.post_metric_snapshots (scheduled_post_id, metric_window, collected_at);
 
 create index post_metric_snapshots_business_metric_idx
-  on public.post_metric_snapshots (business_id, canonical_metric, window, collected_at);
+  on public.post_metric_snapshots (business_id, canonical_metric, metric_window, collected_at);
 
 create table public.performance_summaries (
   id text primary key default gen_random_uuid()::text,

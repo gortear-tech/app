@@ -424,7 +424,7 @@ const toPostMetricSnapshot = (row: Record<string, any>): PostMetricSnapshot => {
     metricDefinitionId: row.metric_definition_id,
     provider: row.provider,
     canonicalMetric: row.canonical_metric,
-    window: row.window,
+    window: row.metric_window,
     value: Number(row.value),
     collectedAt: new Date(row.collected_at).toISOString(),
     observedUntil: new Date(row.observed_until).toISOString(),
@@ -3466,7 +3466,7 @@ export class SupabaseDataStoreCore {
     const result = await this.pool.query(
       `insert into public.post_metric_snapshots
        (id, workspace_id, business_id, scheduled_post_id, facebook_post_id, metric_definition_id,
-        provider, canonical_metric, provider_metric_name, window, value, collected_at, observed_until,
+        provider, canonical_metric, provider_metric_name, metric_window, value, collected_at, observed_until,
         collection_status, source_version, raw_ref)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'ok', 'fbmaniaco-local-metrics-v1', null)
        returning *`,
