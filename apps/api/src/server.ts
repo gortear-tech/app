@@ -444,6 +444,25 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   });
+  const legalContactEmail = process.env.LEGAL_CONTACT_EMAIL ?? "soporte@fbmaniaco.app";
+  const legalPage = (title: string, body: string) => `<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${title}</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; background: #f8fafc; color: #0f172a; }
+      main { max-width: 760px; margin: 0 auto; padding: 40px 20px; line-height: 1.65; }
+      h1 { font-size: 32px; margin: 0 0 16px; }
+      h2 { font-size: 20px; margin: 28px 0 8px; }
+      p, li { color: #334155; }
+    </style>
+  </head>
+  <body>
+    <main>${body}</main>
+  </body>
+</html>`;
 
   app.get(
     "/health",
@@ -456,6 +475,54 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     },
     async () => ({ ok: true, service: "api", environment: input.config.appEnv, release: input.config.release })
   );
+
+  app.get("/legal/privacy", async (_request, reply) => {
+    return reply.type("text/html; charset=utf-8").send(
+      legalPage(
+        "Politica de privacidad de FBmaniaco",
+        `<h1>Politica de privacidad de FBmaniaco</h1>
+        <p>FBmaniaco ayuda a administrar contenido para paginas de Facebook conectadas por el usuario. Solo usamos los datos necesarios para autenticar la cuenta, listar paginas autorizadas, preparar contenido, programar publicaciones y mostrar resultados operativos dentro de la aplicacion.</p>
+        <h2>Datos que tratamos</h2>
+        <p>Podemos almacenar identificadores de usuario, workspace, paginas de Facebook autorizadas, permisos concedidos, imagenes subidas por el usuario, textos generados o editados, estados de jobs y registros tecnicos necesarios para seguridad y soporte.</p>
+        <h2>Uso de datos de Meta</h2>
+        <p>Los datos recibidos desde Meta Graph API se usan unicamente para conectar paginas autorizadas, validar permisos, publicar contenido aprobado por el usuario y consultar resultados relacionados con esas paginas. No vendemos datos ni los compartimos con terceros para publicidad.</p>
+        <h2>Conservacion y eliminacion</h2>
+        <p>El usuario puede solicitar eliminacion de datos escribiendo a ${legalContactEmail}. Tambien puede desconectar FBmaniaco desde la configuracion de Facebook o Meta.</p>
+        <h2>Contacto</h2>
+        <p>Para privacidad, soporte o eliminacion de datos: ${legalContactEmail}.</p>`
+      )
+    );
+  });
+
+  app.get("/legal/terms", async (_request, reply) => {
+    return reply.type("text/html; charset=utf-8").send(
+      legalPage(
+        "Condiciones de servicio de FBmaniaco",
+        `<h1>Condiciones de servicio de FBmaniaco</h1>
+        <p>FBmaniaco es una herramienta para organizar, generar, revisar, programar y publicar contenido en paginas de Facebook autorizadas por el usuario.</p>
+        <h2>Responsabilidad del usuario</h2>
+        <p>El usuario es responsable del contenido que sube, aprueba y publica, asi como de contar con permisos suficientes sobre las paginas conectadas.</p>
+        <h2>Publicacion y automatizacion</h2>
+        <p>Las acciones sensibles, incluyendo publicacion en Facebook, requieren autorizacion del usuario y permisos validos de Meta. FBmaniaco puede procesar tareas en segundo plano para evitar bloqueos de la aplicacion.</p>
+        <h2>Disponibilidad</h2>
+        <p>El servicio puede cambiar durante el piloto privado. Trabajamos para mantener disponibilidad, seguridad y trazabilidad de las acciones importantes.</p>
+        <h2>Contacto</h2>
+        <p>Para soporte: ${legalContactEmail}.</p>`
+      )
+    );
+  });
+
+  app.get("/legal/data-deletion", async (_request, reply) => {
+    return reply.type("text/html; charset=utf-8").send(
+      legalPage(
+        "Eliminacion de datos de FBmaniaco",
+        `<h1>Eliminacion de datos de FBmaniaco</h1>
+        <p>Para solicitar la eliminacion de datos asociados a FBmaniaco, envia un correo a ${legalContactEmail} con el asunto "Eliminar datos FBmaniaco".</p>
+        <p>Incluye el correo o cuenta con la que usas la aplicacion y, si aplica, el nombre de la pagina de Facebook conectada. Procesaremos la solicitud y eliminaremos o anonimizaremos los datos operativos que no debamos conservar por seguridad, auditoria o cumplimiento.</p>
+        <p>Tambien puedes revocar el acceso desde Facebook o Meta en la seccion de apps y sitios web conectados.</p>`
+      )
+    );
+  });
 
   app.get(
     "/ready",
