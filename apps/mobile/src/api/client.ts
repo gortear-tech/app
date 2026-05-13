@@ -14,6 +14,7 @@ import {
   MetricsCollectResponse,
   MetaConnectResponse,
   MetaPage,
+  MobileAuthSessionResponse,
   PerformanceResponse,
   ScheduledPost,
   ScheduledPostMutationResponse,
@@ -25,8 +26,20 @@ import {
 import * as SecureStore from "expo-secure-store";
 import { getMobileConfig } from "../config";
 
-const SESSION_TOKEN_KEY = "fbmaniaco.sessionToken";
-let memorySessionToken: string | null = null;
+const LEGACY_SESSION_TOKEN_KEY = "fbmaniaco.sessionToken";
+const SESSION_KEY = "fbmaniaco.authSession.v1";
+const REFRESH_WINDOW_SECONDS = 90;
+
+type StoredAuthSession = {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  tokenType?: string;
+  userId?: string;
+  email?: string;
+};
+
+let memorySession: StoredAuthSession | null = null;
 
 const canUseSecureStore = async () => {
   try {
@@ -37,65 +50,113 @@ const canUseSecureStore = async () => {
 };
 
 export const getStoredSessionToken = async () => {
-  if (await canUseSecureStore()) {
-    return SecureStore.getItemAsync(SESSION_TOKEN_KEY);
+  const session = await getStoredSession();
+  if (!session?.accessToken) return null;
+  if (session.refreshToken && session.expiresAt && session.expiresAt - Math.floor(Date.now() / 1000) <= REFRESH_WINDOW_SECONDS) {
+    try {
+      const refreshed = await refreshStoredSession(session.refreshToken);
+      return refreshed.accessToken;
+    } catch {
+      await clearStoredSession();
+      return null;
+    }
   }
-  return memorySessionToken;
+  return session.accessToken;
 };
 
-export const storeSessionToken = async (token: string) => {
-  memorySessionToken = token;
+const getStoredSession = async (): Promise<StoredAuthSession | null> => {
+  if (memorySession?.accessToken) return memorySession;
   if (await canUseSecureStore()) {
-    await SecureStore.setItemAsync(SESSION_TOKEN_KEY, token);
+    const raw = await SecureStore.getItemAsync(SESSION_KEY);
+    if (raw) {
+      try {
+        memorySession = JSON.parse(raw) as StoredAuthSession;
+        return memorySession;
+      } catch {
+        await SecureStore.deleteItemAsync(SESSION_KEY);
+      }
+    }
+    const legacyToken = await SecureStore.getItemAsync(LEGACY_SESSION_TOKEN_KEY);
+    if (legacyToken) {
+      memorySession = { accessToken: legacyToken };
+      return memorySession;
+    }
+  }
+  return memorySession;
+};
+
+const storeSession = async (session: StoredAuthSession) => {
+  memorySession = session;
+  if (await canUseSecureStore()) {
+    await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(session));
+    await SecureStore.deleteItemAsync(LEGACY_SESSION_TOKEN_KEY);
   }
 };
 
 export const clearStoredSession = async () => {
-  memorySessionToken = null;
+  memorySession = null;
   if (await canUseSecureStore()) {
-    await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
+    await SecureStore.deleteItemAsync(SESSION_KEY);
+    await SecureStore.deleteItemAsync(LEGACY_SESSION_TOKEN_KEY);
   }
 };
 
-type SupabaseAuthResponse = {
-  access_token?: string;
-  user?: { id?: string; email?: string };
-  error?: string;
-  error_description?: string;
-  msg?: string;
-};
-
-const supabaseAuthRequest = async (path: string, body: Record<string, unknown>): Promise<SupabaseAuthResponse> => {
-  const { supabaseUrl, supabaseAnonKey } = getMobileConfig();
-  const response = await fetch(`${supabaseUrl.replace(/\/$/, "")}/auth/v1/${path}`, {
+const mobileAuthRequest = async (path: "anonymous" | "refresh", body: Record<string, unknown>): Promise<MobileAuthSessionResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const response = await fetch(`${apiUrl}/auth/mobile/${path}`, {
     method: "POST",
     headers: {
-      apikey: supabaseAnonKey,
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify(body)
   });
-  const json = (await response.json()) as SupabaseAuthResponse;
+  const json = await response.json();
   if (!response.ok) {
-    throw new Error(json.error_description ?? json.msg ?? json.error ?? "No pudimos iniciar sesion.");
+    throw new Error(json.userMessage ?? json.error_description ?? json.msg ?? json.error ?? "No pudimos iniciar sesion.");
   }
-  return json;
+  return json as MobileAuthSessionResponse;
 };
 
-export const signInWithPassword = async (email: string, password: string) => {
-  const json = await supabaseAuthRequest("token?grant_type=password", { email: email.trim(), password });
-  if (!json.access_token) throw new Error("Supabase no regreso una sesion valida.");
-  await storeSessionToken(json.access_token);
-  return json;
+const sessionFromApiResponse = (json: MobileAuthSessionResponse): StoredAuthSession => {
+  if (!json.accessToken) throw new Error("Supabase no regreso una sesion valida.");
+  const session: StoredAuthSession = {
+    accessToken: json.accessToken,
+    ...(json.refreshToken ? { refreshToken: json.refreshToken } : {}),
+    ...(json.expiresAt ? { expiresAt: json.expiresAt } : {}),
+    ...(json.tokenType ? { tokenType: json.tokenType } : {}),
+    ...(json.user?.id ? { userId: json.user.id } : {}),
+    ...(json.user?.email ? { email: json.user.email } : {})
+  };
+  return session;
 };
 
-export const signUpWithPassword = async (email: string, password: string) => {
-  const json = await supabaseAuthRequest("signup", { email: email.trim(), password });
-  if (!json.access_token) {
-    throw new Error("Cuenta creada. Confirma tu correo y despues inicia sesion.");
+const refreshStoredSession = async (refreshToken: string) => {
+  const json = await mobileAuthRequest("refresh", { refreshToken });
+  const session = sessionFromApiResponse(json);
+  await storeSession(session);
+  return session;
+};
+
+export const startAnonymousSession = async () => {
+  const json = await mobileAuthRequest("anonymous", {});
+  const session = sessionFromApiResponse(json);
+  await storeSession(session);
+  return session;
+};
+
+export const ensureSessionForMeta = async () => {
+  try {
+    const token = await getStoredSessionToken();
+    if (token) {
+      await getBootstrapStatus(token);
+      return token;
+    }
+  } catch {
+    await clearStoredSession();
   }
-  await storeSessionToken(json.access_token);
-  return json;
+  const session = await startAnonymousSession();
+  return session.accessToken;
 };
 
 export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus> => {

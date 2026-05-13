@@ -1,7 +1,7 @@
 import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import Fastify, { FastifyInstance, FastifyRequest } from "fastify";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { createBillingProvider, createMetaProvider, loadMetaPagesFromUserAccessToken, MetaProvider } from "@fbmaniaco/providers";
 import {
@@ -36,6 +36,7 @@ import {
   MetaConnectResponseSchema,
   MetaPagesResponseSchema,
   MetricsCollectResponseSchema,
+  MobileAuthSessionResponseSchema,
   PLAN_ENTITLEMENTS,
   PerformanceResponseSchema,
   PlansResponseSchema,
@@ -182,6 +183,19 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   const requestHash = (body: unknown) => createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
   const mediaToken = (assetId: string, expires: number) =>
     createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
+  const requireSupabaseClient = () => {
+    if (!storageClient) {
+      throw new AppError({
+        code: "supabase_auth_not_configured",
+        statusCode: 500,
+        message: "Supabase Auth is not configured",
+        userMessage: "El servidor no tiene autenticacion real configurada.",
+        retryable: false,
+        action: "contact_support"
+      });
+    }
+    return storageClient;
+  };
   const requireStorageClient = () => {
     if (!storageClient) {
       throw new AppError({
@@ -194,6 +208,76 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       });
     }
     return storageClient;
+  };
+  const mobileSessionResponse = (
+    session: { access_token?: string; refresh_token?: string; expires_at?: number; token_type?: string } | null | undefined,
+    user: { id?: string; email?: string } | null | undefined,
+    requestId: string
+  ) => {
+    if (!session?.access_token) {
+      throw new AppError({
+        code: "mobile_session_failed",
+        statusCode: 502,
+        message: "Supabase did not return a mobile auth session",
+        userMessage: "No pudimos crear una sesion segura. Intenta de nuevo.",
+        retryable: true,
+        action: "retry"
+      });
+    }
+    return {
+      schemaVersion: "mobile_auth_session.v1" as const,
+      accessToken: session.access_token,
+      ...(session.refresh_token ? { refreshToken: session.refresh_token } : {}),
+      ...(session.expires_at ? { expiresAt: session.expires_at } : {}),
+      ...(session.token_type ? { tokenType: session.token_type } : {}),
+      ...(user ? { user: { ...(user.id ? { id: user.id } : {}), ...(user.email ? { email: user.email } : {}) } } : {}),
+      requestId
+    };
+  };
+  const mobileAuthFailure = (error: { message?: string | undefined; code?: string | undefined } | null | undefined) => {
+    if (error?.code === "anonymous_provider_disabled" || error?.message?.toLowerCase().includes("anonymous")) {
+      throw new AppError({
+        code: "anonymous_auth_disabled",
+        statusCode: 409,
+        message: error?.message ?? "Anonymous auth is disabled",
+        userMessage: "Supabase necesita tener activo el inicio anonimo para abrir Facebook sin pedir correo.",
+        retryable: false,
+        action: "contact_support"
+      });
+    }
+    throw new AppError({
+      code: "mobile_session_failed",
+      statusCode: 502,
+      message: error?.message ?? "Could not create or refresh mobile auth session",
+      userMessage: "No pudimos crear una sesion segura. Intenta de nuevo.",
+      retryable: true,
+      action: "retry"
+    });
+  };
+  const createControlledMobileSession = async (requestId: string) => {
+    const supabase = requireSupabaseClient();
+    const createdAt = new Date().toISOString();
+    const email = `device-${randomUUID()}@sessions.fbmaniaco.local`;
+    const password = `${randomBytes(32).toString("base64url")}aA1!`;
+    const created = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        source: "fbmaniaco_mobile",
+        authMode: "controlled_device",
+        createdAt
+      }
+    });
+    if (created.error || !created.data.user) mobileAuthFailure(created.error);
+    const session = await supabase.auth.signInWithPassword({ email, password });
+    if (session.error || !session.data.session) {
+      if (created.data.user?.id) {
+        await supabase.auth.admin.deleteUser(created.data.user.id).catch(() => undefined);
+      }
+      mobileAuthFailure(session.error);
+    }
+    return mobileSessionResponse(session.data.session, session.data.user, requestId);
   };
   const previewUrl = (request: FastifyRequest, assetId: string | null | undefined) => {
     if (!assetId) return null;
@@ -399,6 +483,63 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   app.get("/openapi.json", async (_request, reply) => {
     return reply.send(app.swagger());
   });
+
+  app.post(
+    "/auth/mobile/anonymous",
+    {
+      schema: {
+        response: {
+          200: MobileAuthSessionResponseSchema,
+          409: AppErrorResponseSchema,
+          502: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const { data, error } = await requireSupabaseClient().auth.signInAnonymously({
+        options: {
+          data: {
+            source: "fbmaniaco_mobile",
+            createdAt: new Date().toISOString()
+          }
+        }
+      });
+      if (error?.code === "anonymous_provider_disabled" || error?.message?.toLowerCase().includes("anonymous")) {
+        return createControlledMobileSession(requestId);
+      }
+      if (error) mobileAuthFailure(error);
+      return mobileSessionResponse(data.session, data.user, requestId);
+    }
+  );
+
+  app.post(
+    "/auth/mobile/refresh",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["refreshToken"],
+          properties: {
+            refreshToken: { type: "string", minLength: 16 }
+          },
+          additionalProperties: false
+        },
+        response: {
+          200: MobileAuthSessionResponseSchema,
+          400: AppErrorResponseSchema,
+          502: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = request.body as { refreshToken: string };
+      const { data, error } = await requireSupabaseClient().auth.refreshSession({ refresh_token: body.refreshToken });
+      if (error) mobileAuthFailure(error);
+      return mobileSessionResponse(data.session, data.user, requestId);
+    }
+  );
 
   app.get(
     "/media/assets/:assetId/preview",

@@ -28,4 +28,13 @@ describe("mobile config", () => {
 
     expect(getMobileConfig().apiUrl).toBe("http://localhost:4000");
   });
+
+  it("does not require Supabase public keys in the mobile build", () => {
+    process.env.EXPO_PUBLIC_APP_ENV = "production";
+    process.env.EXPO_PUBLIC_API_URL = "https://api.example.com";
+    delete process.env.EXPO_PUBLIC_SUPABASE_URL;
+    delete process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+    expect(getMobileConfig().apiUrl).toBe("https://api.example.com");
+  });
 });

@@ -41,15 +41,24 @@ export const authenticateBearer = async (input: {
     auth: { persistSession: false, autoRefreshToken: false }
   });
   const result = await supabase.auth.getUser(raw);
-  if (result.error || !result.data.user?.id || !result.data.user.email) {
+  if (result.error || !result.data.user?.id) {
     throw unauthorizedError();
   }
 
-  const actor = { userId: result.data.user.id, email: result.data.user.email };
+  const email = result.data.user.email || `${result.data.user.id}@anon.fbmaniaco.local`;
+  const displayName =
+    typeof result.data.user.user_metadata?.name === "string"
+      ? result.data.user.user_metadata.name
+      : typeof result.data.user.user_metadata?.full_name === "string"
+        ? result.data.user.user_metadata.full_name
+        : result.data.user.is_anonymous
+          ? "Usuario FBmaniaco"
+          : undefined;
+  const actor = { userId: result.data.user.id, email };
   const user = await input.store.upsertLocalUser({
     userId: actor.userId,
     email: actor.email,
-    displayName: result.data.user.user_metadata?.name
+    ...(displayName ? { displayName } : {})
   });
   return { actor, user };
 };

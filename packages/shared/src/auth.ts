@@ -86,7 +86,23 @@ export const BootstrapStatusSchema = Type.Object({
   requestId: Type.String()
 });
 
+export const MobileAuthSessionResponseSchema = Type.Object({
+  schemaVersion: Type.Literal("mobile_auth_session.v1"),
+  accessToken: Type.String(),
+  refreshToken: Type.Optional(Type.String()),
+  expiresAt: Type.Optional(Type.Number()),
+  tokenType: Type.Optional(Type.String()),
+  user: Type.Optional(
+    Type.Object({
+      id: Type.Optional(Type.String()),
+      email: Type.Optional(Type.String())
+    })
+  ),
+  requestId: Type.String()
+});
+
 export type User = Static<typeof UserSchema>;
 export type Workspace = Static<typeof WorkspaceSchema>;
 export type WorkspaceMember = Static<typeof WorkspaceMemberSchema>;
 export type BootstrapStatus = Static<typeof BootstrapStatusSchema>;
+export type MobileAuthSessionResponse = Static<typeof MobileAuthSessionResponseSchema>;

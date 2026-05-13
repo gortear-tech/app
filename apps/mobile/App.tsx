@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
   Image,
   Linking,
   Pressable,
@@ -23,6 +24,7 @@ import {
   connectMeta,
   createBatch,
   clearStoredSession,
+  ensureSessionForMeta,
   estimateBatchCost,
   generateBatchVariants,
   generateWeeklyReport,
@@ -40,8 +42,6 @@ import {
   rejectVariant,
   runCaptionEval,
   selectMetaPage,
-  signInWithPassword,
-  signUpWithPassword,
   updateBusinessAutonomy,
   updateVariantCaption,
   uploadPhoto
@@ -53,10 +53,8 @@ type TabKey = "today" | "create" | "calendar" | "business";
 
 function BootScreen() {
   const config = getMobileConfig();
-  const [tab, setTab] = useState<TabKey>("today");
+  const [tab, setTab] = useState<TabKey>("business");
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
   const token = tokenQuery.data ?? "";
@@ -116,6 +114,16 @@ function BootScreen() {
     )
   });
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      void queryClient.invalidateQueries({ queryKey: ["session-token"] });
+      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      void queryClient.invalidateQueries({ queryKey: ["pages"] });
+    });
+    return () => subscription.remove();
+  }, []);
+
   const invalidateWork = async () => {
     await queryClient.invalidateQueries({ queryKey: ["active-batch"] });
     await queryClient.invalidateQueries({ queryKey: ["batch-detail"] });
@@ -127,25 +135,15 @@ function BootScreen() {
   };
 
   const connect = useMutation({
-    mutationFn: async () => connectMeta(token),
+    mutationFn: async () => {
+      const sessionToken = await ensureSessionForMeta();
+      queryClient.setQueryData(["session-token"], sessionToken);
+      return connectMeta(sessionToken);
+    },
     onSuccess: async (result) => {
       if (result.authorizationUrl) await Linking.openURL(result.authorizationUrl);
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       await queryClient.invalidateQueries({ queryKey: ["pages"] });
-    }
-  });
-  const signIn = useMutation({
-    mutationFn: async () => signInWithPassword(email, password),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["session-token"] });
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-    }
-  });
-  const signUp = useMutation({
-    mutationFn: async () => signUpWithPassword(email, password),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["session-token"] });
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
     }
   });
   const signOut = useMutation({
@@ -267,14 +265,14 @@ function BootScreen() {
   const stateText = useMemo(() => {
     if (bootstrap.isLoading) return "Revisando conexion inicial...";
     if (bootstrap.isError) return "No pudimos conectar con FBmaniaco.";
-    if (!bootstrap.data?.authenticated) return "Sesion no iniciada.";
-    return `Sesion activa: ${bootstrap.data.user?.email ?? "usuario"}`;
+    if (!bootstrap.data?.authenticated) return "Conecta Facebook para empezar.";
+    if (bootstrap.data.nextStep === "connect_meta" || bootstrap.data.nextStep === "recover_meta") return "Sesion segura lista.";
+    if (bootstrap.data.nextStep === "select_page") return "Facebook conectado: elige pagina.";
+    return `Pagina activa: ${bootstrap.data.workspace?.name ?? "FBmaniaco"}`;
   }, [bootstrap.data, bootstrap.isError, bootstrap.isLoading]);
 
   const visibleError =
     bootstrap.error ??
-    signIn.error ??
-    signUp.error ??
     signOut.error ??
     connect.error ??
     pages.error ??
@@ -325,42 +323,14 @@ function BootScreen() {
       return (
         <Screen>
           <Hero
-            title="Inicia sesion"
+            title="Conecta Facebook"
             eyebrow="Inicio"
-            body="Usa tu cuenta para conectar paginas de Facebook, subir fotos y preparar publicaciones reales."
-          />
-          <Panel title="Cuenta">
-            <TextInput
-              autoCapitalize="none"
-              keyboardType="email-address"
-              placeholder="correo"
-              placeholderTextColor={palette.muted}
-              style={styles.textInput}
-              value={email}
-              onChangeText={setEmail}
-            />
-            <TextInput
-              secureTextEntry
-              placeholder="contrasena"
-              placeholderTextColor={palette.muted}
-              style={styles.textInput}
-              value={password}
-              onChangeText={setPassword}
-            />
-          </Panel>
-          <ActionPair
-            primaryLabel={signIn.isPending ? "Entrando..." : "Entrar"}
-            primaryDisabled={signIn.isPending || signUp.isPending || !email || password.length < 6}
-            onPrimary={() => signIn.mutate()}
-            secondaryLabel={signUp.isPending ? "Creando..." : "Crear cuenta"}
-            secondaryDisabled={signIn.isPending || signUp.isPending || !email || password.length < 6}
-            onSecondary={() => signUp.mutate()}
+            body="Abriremos Meta para autorizar tus paginas. FBmaniaco mantiene una sesion segura en este telefono para volver directo despues."
           />
           <Button
-            label="Actualizar sesion"
-            variant="secondary"
-            disabled={tokenQuery.isFetching}
-            onPress={() => queryClient.invalidateQueries({ queryKey: ["session-token"] })}
+            label={connect.isPending ? "Abriendo Facebook..." : "Continuar con Facebook"}
+            disabled={connect.isPending || tokenQuery.isFetching}
+            onPress={() => connect.mutate()}
           />
         </Screen>
       );
@@ -610,7 +580,9 @@ function BootScreen() {
             {bootstrap.isLoading ? <ActivityIndicator color={palette.cyan} /> : null}
             <View style={styles.flex}>
               <Text style={styles.statusText}>{stateText}</Text>
-              <Text style={styles.muted} numberOfLines={1}>API: {config.apiUrl}</Text>
+              <Text style={styles.muted} numberOfLines={1}>
+                {config.appEnv === "development" ? `API: ${config.apiUrl}` : "Lista para trabajar con tus paginas."}
+              </Text>
             </View>
           </View>
           {visibleError ? <Alert message={visibleError instanceof Error ? visibleError.message : "No pudimos continuar."} tone="critical" /> : null}
