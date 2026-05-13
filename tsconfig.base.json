@@ -1,25 +1,17 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM"],
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "allowJs": false,
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
-    "noEmit": true,
-    "resolveJsonModule": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "jsx": "react-jsx",
-    "baseUrl": ".",
-    "paths": {
-      "@fbmaniaco/shared": ["packages/shared/src/index.ts"],
-      "@fbmaniaco/shared/*": ["packages/shared/src/*"],
-      "@fbmaniaco/providers": ["packages/providers/src/index.ts"],
-      "@fbmaniaco/providers/*": ["packages/providers/src/*"],
-      "@fbmaniaco/motor-perron": ["packages/motor-perron/src/index.ts"],
-      "@fbmaniaco/motor-perron/*": ["packages/motor-perron/src/*"]
-    }
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
   }
 }

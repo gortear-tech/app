@@ -1,45 +1,102 @@
 services:
   - type: web
     name: fbmaniaco-api
-    runtime: docker
-    plan: free
+    runtime: node
+    plan: starter
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm --filter @fbmaniaco/api start
     healthCheckPath: /health
     envVars:
-      - key: HOST
-        value: 0.0.0.0
-      - key: NODE_ENV
-        value: production
-      - key: STATE_FILE_PATH
-        value: /var/data/fbmaniaco-state.json
-      - key: OPENAI_API_KEY
+      - key: APP_ENV
         sync: false
-      - key: OPENAI_VISION_MODEL
-        value: gpt-4o
-      - key: OPENAI_IMAGE_MODEL
-        value: gpt-image-2
-      - key: OPENAI_IMAGE_SIZE
-        value: 1024x1024
-      - key: OPENAI_IMAGE_VARIANT_BATCH_SIZE
-        value: "2"
-      - key: OPENAI_IMAGE_TIMEOUT_MS
-        value: "300000"
-      - key: OPENAI_CAPTION_MODEL
-        value: gpt-5.4-mini
-      - key: META_APP_ID
-        sync: false
-      - key: META_APP_SECRET
-        sync: false
-      - key: META_BOOTSTRAP_TOKEN
-        sync: false
-      - key: META_DEVICE_LOGIN_SCOPES
-        value: pages_show_list,pages_read_engagement,pages_manage_posts
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE
         sync: false
-      - key: SUPABASE_STATE_BUCKET
-        value: fbmaniaco-runtime
-      - key: SUPABASE_STATE_OBJECT
-        value: runtime-state.json
-      - key: SUPABASE_MEDIA_BUCKET
-        value: fbmaniaco-media
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_RELEASE
+        sync: false
+      - key: DATA_STORE_MODE
+        value: supabase
+      - key: ALLOW_LOCAL_DATASTORE
+        value: "false"
+      - key: REQUIRE_WORKER_HEARTBEAT
+        value: "true"
+      - key: FEATURE_META_PUBLISHING
+        sync: false
+      - key: PUBLIC_API_URL
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_REDIRECT_URI
+        sync: false
+      - key: META_GRAPH_API_VERSION
+        value: v23.0
+      - key: META_REQUIRED_SCOPES
+        value: pages_show_list,pages_read_engagement,pages_manage_posts
+      - key: META_TEST_USER_ACCESS_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_VISION_MODEL
+        sync: false
+      - key: FEATURE_OPENAI_VISION
+        sync: false
+      - key: FEATURE_OPENAI_IMAGE_GENERATION
+        sync: false
+      - key: FEATURE_REMOTE_SCHEDULE
+        value: "false"
+      - key: FEATURE_AUTONOMY
+        value: "false"
+      - key: SENTRY_DSN
+        sync: false
+      - key: BILLING_WEBHOOK_SECRET
+        sync: false
+  - type: worker
+    name: fbmaniaco-worker
+    runtime: node
+    plan: starter
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm --filter @fbmaniaco/worker start
+    envVars:
+      - key: APP_ENV
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_RELEASE
+        sync: false
+      - key: DATA_STORE_MODE
+        value: supabase
+      - key: ALLOW_LOCAL_DATASTORE
+        value: "false"
+      - key: WORKER_POLL_INTERVAL_MS
+        value: "5000"
+      - key: WORKER_HEARTBEAT_INTERVAL_MS
+        value: "30000"
+      - key: FEATURE_META_PUBLISHING
+        sync: false
+      - key: PUBLIC_API_URL
+        sync: false
+      - key: META_GRAPH_API_VERSION
+        value: v23.0
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_VISION_MODEL
+        sync: false
+      - key: FEATURE_OPENAI_VISION
+        sync: false
+      - key: FEATURE_OPENAI_IMAGE_GENERATION
+        sync: false
+      - key: FEATURE_REMOTE_SCHEDULE
+        value: "false"
+      - key: FEATURE_AUTONOMY
+        value: "false"
+      - key: SENTRY_DSN
+        sync: false

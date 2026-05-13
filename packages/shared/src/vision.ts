@@ -1,94 +1,66 @@
-import type { DisclosurePolicy } from "./states";
+import { Static, Type } from "@sinclair/typebox";
 
-export type VisionSubjectType =
-  | "producto"
-  | "persona"
-  | "comida"
-  | "lugar"
-  | "animal"
-  | "objeto";
+export const VisionAnalysisSchema = Type.Object({
+  schemaVersion: Type.Literal("vision_analysis.v1"),
+  promptVersion: Type.String(),
+  subject: Type.Object({
+    type: Type.Union([Type.Literal("product"), Type.Literal("person"), Type.Literal("space"), Type.Literal("food"), Type.Literal("unknown")]),
+    description: Type.String()
+  }),
+  composition: Type.Object({
+    framing: Type.String(),
+    angle: Type.Optional(Type.String()),
+    background: Type.String(),
+    lighting: Type.String()
+  }),
+  palette: Type.Object({
+    dominantColors: Type.Array(Type.String()),
+    temperature: Type.Union([Type.Literal("warm"), Type.Literal("neutral"), Type.Literal("cool"), Type.Literal("unknown")]),
+    saturation: Type.String(),
+    contrast: Type.String()
+  }),
+  sensitiveElements: Type.Object({
+    personVisible: Type.Boolean(),
+    priceVisible: Type.Boolean(),
+    logoVisible: Type.Boolean(),
+    promotionVisible: Type.Boolean(),
+    textVisible: Type.Boolean(),
+    notes: Type.Array(Type.String())
+  }),
+  quality: Type.Object({
+    sharpness: Type.String(),
+    exposure: Type.String(),
+    noise: Type.String()
+  }),
+  mood: Type.Object({
+    temperature: Type.String(),
+    keywords: Type.Array(Type.String()),
+    description: Type.String()
+  }),
+  summary: Type.String()
+});
 
-export type VisionFraming = "primer_plano" | "plano_medio" | "plano_general" | "detalle" | "cenital";
-export type VisionAngle = "frontal" | "picado" | "contrapicado" | "lateral" | "cenital";
-export type VisionBackgroundType = "limpio" | "natural" | "urbano" | "interior" | "exterior" | "abstracto";
-export type VisionLighting = "natural" | "artificial" | "mixta" | "baja_luz" | "contraluz";
-export type VisionMoodTemperature = "calida" | "neutra" | "fria" | "vibrante" | "oscura";
+export const ModelProfileSchema = Type.Object({
+  id: Type.String(),
+  task: Type.Union([Type.Literal("vision"), Type.Literal("caption"), Type.Literal("generation_plan"), Type.Literal("image_generation")]),
+  provider: Type.Literal("openai"),
+  primaryModel: Type.String(),
+  fallbackModel: Type.Optional(Type.String()),
+  reasoningEffort: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")])),
+  textVerbosity: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")])),
+  schemaVersion: Type.String(),
+  timeoutMs: Type.Number()
+});
 
-export interface VisionAnalysisSubject {
-  type: VisionSubjectType;
-  description: string;
-  hasPerson: boolean;
-}
+export const PromptTemplateSchema = Type.Object({
+  id: Type.String(),
+  task: Type.String(),
+  promptVersion: Type.String(),
+  stableInstructions: Type.String(),
+  schemaVersion: Type.String(),
+  status: Type.Union([Type.Literal("draft"), Type.Literal("canary"), Type.Literal("active"), Type.Literal("retired")])
+});
 
-export interface VisionAnalysisComposition {
-  framing: VisionFraming;
-  angle: VisionAngle;
-  backgroundType: VisionBackgroundType;
-  backgroundDescription: string;
-  lighting: VisionLighting;
-}
-
-export interface VisionAnalysisPalette {
-  dominantColors: string[];
-  temperature: VisionMoodTemperature;
-  saturation: number;
-  contrast: number;
-}
-
-export interface VisionAnalysisSensitiveElements {
-  priceVisible: boolean;
-  logoVisible: boolean;
-  personVisible: boolean;
-  promotionVisible: boolean;
-  textVisible: boolean;
-  notes: string[];
-}
-
-export interface VisionAnalysisTechnicalQuality {
-  sharpness: number;
-  exposure: number;
-  noise: number;
-}
-
-export interface VisionAnalysisMood {
-  temperature: VisionMoodTemperature;
-  keywords: string[];
-  description: string;
-}
-
-export interface VisionAnalysisResult {
-  subject: VisionAnalysisSubject;
-  composition: VisionAnalysisComposition;
-  palette: VisionAnalysisPalette;
-  sensitiveElements: VisionAnalysisSensitiveElements;
-  technicalQuality: VisionAnalysisTechnicalQuality;
-  mood: VisionAnalysisMood;
-  summary: string;
-}
-
-export interface AssignedStyle {
-  styleId: string;
-  styleName: string;
-  intensity: "ligera" | "media" | "fuerte";
-  contrast: number;
-  saturation: number;
-  warmth: number;
-  sharpness: number;
-  lowConfidence: boolean;
-  manualOverride: boolean;
-}
-
-export interface GenerationPlan {
-  puedeGenerar: boolean;
-  motivo: string;
-  sujetoPrincipal: string;
-  preservar: string[];
-  permitido: string[];
-  prohibido: string[];
-  riesgo: string[];
-  nivelRiesgo: "riesgo_bajo" | "riesgo_medio" | "riesgo_alto";
-  divulgacionIa: DisclosurePolicy;
-  promptFinal: string;
-  promptVersion: string;
-  planVersion: string;
-}
+export type VisionAnalysis = Static<typeof VisionAnalysisSchema>;
+export type ModelProfile = Static<typeof ModelProfileSchema>;
+export type PromptTemplate = Static<typeof PromptTemplateSchema>;

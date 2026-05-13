@@ -1,112 +1,117 @@
-export const USER_STATUSES = ["activo", "bloqueado", "eliminado"] as const;
-export type UserStatus = (typeof USER_STATUSES)[number];
+import { Type } from "@sinclair/typebox";
 
-export const FACEBOOK_TOKEN_STATUSES = [
-  "valido",
-  "por_vencer",
-  "expirado",
-  "requiere_reconexion",
-  "error_permiso",
-  "error_desconocido",
-] as const;
-export type FacebookTokenStatus = (typeof FACEBOOK_TOKEN_STATUSES)[number];
+export const WorkspaceStatus = Type.Union([
+  Type.Literal("activo"),
+  Type.Literal("pausado"),
+  Type.Literal("eliminado")
+]);
 
-export const BATCH_STATUSES = [
-  "pending_upload",
-  "pendiente_confirmacion",
-  "confirmado",
-  "generando",
-  "generado_parcial",
-  "completado",
-  "fallido",
-  "cancelado",
-  "abandonado",
-] as const;
-export type BatchStatus = (typeof BATCH_STATUSES)[number];
+export const BillingStatus = Type.Union([
+  Type.Literal("trial"),
+  Type.Literal("active"),
+  Type.Literal("past_due"),
+  Type.Literal("paused"),
+  Type.Literal("cancelled")
+]);
 
-export const PHOTO_STATUSES = [
-  "subida",
-  "analizando",
-  "validada",
-  "optimizada",
-  "clasificada",
-  "descartada",
-  "usada",
-  "eliminada",
-] as const;
-export type PhotoStatus = (typeof PHOTO_STATUSES)[number];
+export const WorkspaceRole = Type.Union([
+  Type.Literal("owner"),
+  Type.Literal("admin"),
+  Type.Literal("operator"),
+  Type.Literal("viewer")
+]);
 
-export const VARIANT_STATUSES = [
-  "pendiente",
-  "generando",
-  "generada",
-  "fallida",
-  "aprobada",
-  "rechazada",
-  "programada",
-  "publicada",
-  "eliminada",
-] as const;
-export type VariantStatus = (typeof VARIANT_STATUSES)[number];
+export const MemberStatus = Type.Union([
+  Type.Literal("active"),
+  Type.Literal("invited"),
+  Type.Literal("disabled")
+]);
 
-export const SCHEDULED_POST_STATUSES = [
-  "pendiente",
-  "programada",
-  "publicacion_en_proceso",
-  "publicada",
-  "estado_incierto",
-  "fallida",
-  "pausada_por_token",
-  "cancelada",
-] as const;
-export type ScheduledPostStatus = (typeof SCHEDULED_POST_STATUSES)[number];
+export const BatchStatus = Type.Union([
+  Type.Literal("pending_upload"),
+  Type.Literal("pendiente_confirmacion"),
+  Type.Literal("confirmado"),
+  Type.Literal("generando"),
+  Type.Literal("generado_parcial"),
+  Type.Literal("completado"),
+  Type.Literal("cancelado"),
+  Type.Literal("abandonado"),
+  Type.Literal("ready_to_generate"),
+  Type.Literal("generating"),
+  Type.Literal("ready_for_review"),
+  Type.Literal("scheduled"),
+  Type.Literal("completed"),
+  Type.Literal("cancelled"),
+  Type.Literal("abandoned")
+]);
 
-export const AI_TASK_TYPES = [
-  "style_assignment",
-  "variant_count",
-  "scheduling",
-  "caption_generation",
-  "facebook_publish",
-  "batch_generation",
-] as const;
-export type AiTaskType = (typeof AI_TASK_TYPES)[number];
+export const PhotoStatus = Type.Union([
+  Type.Literal("uploading"),
+  Type.Literal("uploaded"),
+  Type.Literal("analyzing"),
+  Type.Literal("validated"),
+  Type.Literal("validada"),
+  Type.Literal("eliminada"),
+  Type.Literal("rejected"),
+  Type.Literal("failed")
+]);
 
-export const ACTION_TYPES = [
-  "STYLE_ASSIGNMENT",
-  "VARIANT_COUNT",
-  "SCHEDULING",
-  "CAPTION_GENERATION",
-  "FACEBOOK_PUBLISH",
-] as const;
-export type ActionType = (typeof ACTION_TYPES)[number];
+export const VariantStatus = Type.Union([
+  Type.Literal("pendiente"),
+  Type.Literal("generando"),
+  Type.Literal("generada"),
+  Type.Literal("aprobada"),
+  Type.Literal("rechazada"),
+  Type.Literal("bloqueada_por_calidad"),
+  Type.Literal("fallida"),
+  Type.Literal("programada"),
+  Type.Literal("publicada"),
+  Type.Literal("eliminada"),
+  Type.Literal("queued"),
+  Type.Literal("generating"),
+  Type.Literal("generated"),
+  Type.Literal("approved"),
+  Type.Literal("rejected"),
+  Type.Literal("blocked"),
+  Type.Literal("failed")
+]);
 
-export const CONFIDENCE_LEVELS = ["baja", "media", "alta"] as const;
-export type ConfidenceLevel = (typeof CONFIDENCE_LEVELS)[number];
+export const ScheduledPostStatus = Type.Union([
+  Type.Literal("pendiente"),
+  Type.Literal("programada"),
+  Type.Literal("publicacion_en_proceso"),
+  Type.Literal("publicada"),
+  Type.Literal("fallida"),
+  Type.Literal("cancelada"),
+  Type.Literal("draft"),
+  Type.Literal("scheduled"),
+  Type.Literal("publishing"),
+  Type.Literal("published"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled"),
+  Type.Literal("estado_incierto"),
+  Type.Literal("pausada_por_token"),
+  Type.Literal("needs_user_action")
+]);
 
-export const RISK_LEVELS = ["riesgo_bajo", "riesgo_medio", "riesgo_alto"] as const;
-export type RiskLevel = (typeof RISK_LEVELS)[number];
+export const JobStatus = Type.Union([
+  Type.Literal("queued"),
+  Type.Literal("running"),
+  Type.Literal("succeeded"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled"),
+  Type.Literal("blocked"),
+  Type.Literal("needs_user_action"),
+  Type.Literal("ambiguous")
+]);
 
-export const BUSINESS_LEARNING_EVENT_TYPES = [
-  "variante_generada",
-  "variante_aprobada",
-  "variante_rechazada",
-  "estilo_cambiado_por_usuario",
-  "caption_editado_por_usuario",
-  "post_publicado",
-  "post_fallido",
-  "metricas_recolectadas",
-  "accion_aprobada_en_swipe_autonomia",
-  "accion_rechazada_en_swipe_autonomia",
-  "batch_abandoned",
-] as const;
-export type BusinessLearningEventType = (typeof BUSINESS_LEARNING_EVENT_TYPES)[number];
-
-export const VISUAL_STYLE_INTENSITIES = ["ligera", "media", "fuerte"] as const;
-export type VisualStyleIntensity = (typeof VISUAL_STYLE_INTENSITIES)[number];
-
-export const DISCLOSURE_POLICIES = [
-  "no_requerida",
-  "recomendada",
-  "obligatoria",
-] as const;
-export type DisclosurePolicy = (typeof DISCLOSURE_POLICIES)[number];
+export type WorkspaceRole = "owner" | "admin" | "operator" | "viewer";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "blocked"
+  | "needs_user_action"
+  | "ambiguous";

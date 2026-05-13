@@ -3,17 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./src/main.ts",
-  "dependencies": {
-    "@fbmaniaco/motor-perron": "workspace:*",
-    "@fbmaniaco/providers": "workspace:*",
-    "@fbmaniaco/shared": "workspace:*",
-    "bullmq": "^5.0.0",
-    "ioredis": "^5.0.0"
-  },
+  "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "smoke": "tsx src/smoke.ts"
+  },
+  "dependencies": {
+    "@fbmaniaco/api": "workspace:*",
+    "@fbmaniaco/providers": "workspace:*",
+    "@fbmaniaco/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }

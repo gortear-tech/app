@@ -17,9 +17,12 @@ buildscript {
     dependencies {
         classpath('com.android.tools.build:gradle')
         classpath('com.facebook.react:react-native-gradle-plugin')
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
+        classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')
     }
 }
+
+ext.kotlinVersion = findProperty('android.kotlinVersion') ?: '1.9.25'
+ext.kspVersion = findProperty('android.kspVersion') ?: '1.9.25-1.0.20'
 
 apply plugin: "com.facebook.react.rootproject"
 
@@ -37,5 +40,14 @@ allprojects {
         google()
         mavenCentral()
         maven { url 'https://www.jitpack.io' }
+    }
+}
+
+subprojects {
+    tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+        kotlinOptions.freeCompilerArgs += [
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:suppressKotlinVersionCompatibilityCheck=true"
+        ]
     }
 }
