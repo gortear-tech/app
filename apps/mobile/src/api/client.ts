@@ -177,7 +177,7 @@ export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus
 
 const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-export const connectMeta = async (token: string, flow: "oauth" | "facebook_login" = "oauth"): Promise<MetaConnectResponse> => {
+export const connectMeta = async (token: string, flow: "oauth" | "device_login" = "oauth"): Promise<MetaConnectResponse> => {
   const { apiUrl } = getMobileConfig();
   const response = await fetch(`${apiUrl}/auth/meta/connect`, {
     method: "POST",
@@ -191,23 +191,6 @@ export const connectMeta = async (token: string, flow: "oauth" | "facebook_login
   });
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos conectar Facebook.");
-  return json as MetaConnectResponse;
-};
-
-export const completeMetaManualCallback = async (token: string, callbackUrl: string): Promise<MetaConnectResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/auth/meta/manual-callback`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey("meta-manual-callback"),
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({ callbackUrl })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos completar la conexion con Facebook.");
   return json as MetaConnectResponse;
 };
 

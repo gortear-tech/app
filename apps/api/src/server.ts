@@ -70,6 +70,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       appId: input.config.metaAppId,
       appSecret: input.config.metaAppSecret,
       redirectUri: input.config.metaRedirectUri,
+      loginConfigurationId: input.config.metaLoginConfigurationId,
       graphApiVersion: input.config.metaGraphApiVersion,
       requiredScopes: input.config.metaRequiredScopes
     });
@@ -181,7 +182,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   };
 
   const requestHash = (body: unknown) => createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
-  const facebookLoginSuccessRedirectUri = "https://www.facebook.com/connect/login_success.html";
+  const mobileMetaConnectedUrl = "fbmaniaco://meta-connected";
   const mediaToken = (assetId: string, expires: number) =>
     createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
   const requireSupabaseClient = () => {
@@ -387,6 +388,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         appId: input.config.metaAppId,
         appSecret: input.config.metaAppSecret,
         redirectUri: input.config.metaRedirectUri,
+        loginConfigurationId: input.config.metaLoginConfigurationId,
         graphApiVersion: input.config.metaGraphApiVersion,
         requiredScopes: input.config.metaRequiredScopes
       },
@@ -711,7 +713,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         body: {
           type: "object",
           properties: {
-            flow: { type: "string", enum: ["oauth", "facebook_login", "device_login"] }
+            flow: { type: "string", enum: ["oauth", "device_login"] }
           },
           additionalProperties: false
         },
@@ -725,7 +727,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     },
     async (request) => {
       const requestId = String(request.headers["x-request-id"]);
-      const body = (request.body ?? {}) as { flow?: "oauth" | "facebook_login" | "device_login" };
+      const body = (request.body ?? {}) as { flow?: "oauth" | "device_login" };
       const { actor, user } = await authenticateRequest(request);
       const { workspace } = await input.store.ensureDefaultWorkspace(actor.userId);
       return runIdempotent({
@@ -743,11 +745,9 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
             JSON.stringify({ workspaceId: workspace.id, actorId: actor.userId, requestId }),
             "utf8"
           ).toString("base64url");
-          const redirectUri = body.flow === "facebook_login" ? facebookLoginSuccessRedirectUri : undefined;
-          const authorizationInput = redirectUri ? { state, redirectUri } : { state };
           const shouldCompleteServerSide =
             input.config.appEnv !== "production" && (Boolean(input.config.metaTestUserAccessToken) || metaProvider.mode === "mock");
-          const authorizationUrl = shouldCompleteServerSide ? undefined : metaProvider.buildAuthorizationUrl(authorizationInput);
+          const authorizationUrl = shouldCompleteServerSide ? undefined : metaProvider.buildAuthorizationUrl({ state });
           if (input.config.appEnv !== "production" && input.config.metaTestUserAccessToken) {
             await syncMetaTestPages(workspace.id, actor.userId);
           } else if (metaProvider.mode === "mock") {
@@ -773,125 +773,18 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     }
   );
 
-  app.post(
-    "/auth/meta/manual-callback",
-    {
-      schema: {
-        security: [{ bearerAuth: [] }],
-        body: {
-          type: "object",
-          required: ["callbackUrl"],
-          properties: {
-            callbackUrl: { type: "string" }
-          },
-          additionalProperties: false
-        },
-        response: {
-          200: MetaConnectResponseSchema,
-          400: AppErrorResponseSchema,
-          401: AppErrorResponseSchema,
-          403: AppErrorResponseSchema
-        }
-      }
-    },
-    async (request) => {
-      const requestId = String(request.headers["x-request-id"]);
-      const body = request.body as { callbackUrl: string };
-      const { actor, user } = await authenticateRequest(request);
-      let callbackUrl: URL;
-      try {
-        callbackUrl = new URL(body.callbackUrl);
-      } catch {
-        throw new AppError({
-          code: "invalid_meta_callback_url",
-          statusCode: 400,
-          message: "Invalid Meta callback URL",
-          userMessage: "Pega el enlace completo que Facebook muestra al terminar.",
-          retryable: false,
-          action: "retry"
-        });
-      }
-      const code = callbackUrl.searchParams.get("code");
-      const state = callbackUrl.searchParams.get("state");
-      if (!code || !state) {
-        throw new AppError({
-          code: "invalid_meta_callback_url",
-          statusCode: 400,
-          message: "Meta callback URL is missing code or state",
-          userMessage: "Ese enlace no trae la autorizacion de Facebook. Copia el enlace final despues de aceptar permisos.",
-          retryable: false,
-          action: "retry"
-        });
-      }
-      let decodedState: { workspaceId: string; actorId: string };
-      try {
-        decodedState = JSON.parse(Buffer.from(state, "base64url").toString("utf8")) as {
-          workspaceId: string;
-          actorId: string;
-        };
-      } catch {
-        throw new AppError({
-          code: "invalid_meta_state",
-          statusCode: 400,
-          message: "Meta OAuth state is invalid",
-          userMessage: "La autorizacion de Facebook no coincide con esta sesion. Intenta reconectar.",
-          retryable: false,
-          action: "reconnect"
-        });
-      }
-      if (decodedState.actorId !== actor.userId) {
-        throw new AppError({
-          code: "invalid_meta_state",
-          statusCode: 403,
-          message: "Meta OAuth state does not match actor",
-          userMessage: "La autorizacion de Facebook no coincide con tu sesion. Intenta reconectar.",
-          retryable: false,
-          action: "reconnect"
-        });
-      }
-      await input.store.assertWorkspaceRole({
-        userId: actor.userId,
-        workspaceId: decodedState.workspaceId,
-        allowedRoles: ["owner", "admin"]
-      });
-      return runIdempotent({
-        request,
-        workspaceId: decodedState.workspaceId,
-        actorId: actor.userId,
-        routeKey: "/auth/meta/manual-callback",
-        handler: async () => {
-          const result = await metaProvider.completeOAuth({
-            code,
-            state,
-            redirectUri: facebookLoginSuccessRedirectUri
-          });
-          await input.store.upsertMetaAuthorization({
-            workspaceId: decodedState.workspaceId,
-            actorId: actor.userId,
-            authorization: result.authorization,
-            pages: result.pages
-          });
-          return {
-            schemaVersion: "meta_connect.v1" as const,
-            bootstrap: await buildBootstrap(actor, user, requestId),
-            pages: await input.store.listMetaPages(decodedState.workspaceId),
-            requestId
-          };
-        }
-      });
-    }
-  );
-
   app.get(
     "/auth/meta/callback",
     {
       schema: {
         querystring: {
           type: "object",
-          required: ["code", "state"],
           properties: {
             code: { type: "string" },
-            state: { type: "string" }
+            state: { type: "string" },
+            error: { type: "string" },
+            error_code: { type: "string" },
+            error_reason: { type: "string" }
           },
           additionalProperties: true
         },
@@ -902,43 +795,37 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       }
     },
     async (request, reply) => {
-      const query = request.query as { code: string; state: string };
-      const decodedState = JSON.parse(Buffer.from(query.state, "base64url").toString("utf8")) as {
-        workspaceId: string;
-        actorId: string;
-      };
+      const query = request.query as { code?: string; state?: string; error?: string };
+      if (query.error || !query.code || !query.state) {
+        return reply.redirect(`${mobileMetaConnectedUrl}?status=error&reason=meta`);
+      }
+      let decodedState: { workspaceId: string; actorId: string };
+      try {
+        decodedState = JSON.parse(Buffer.from(query.state, "base64url").toString("utf8")) as {
+          workspaceId: string;
+          actorId: string;
+        };
+      } catch {
+        return reply.redirect(`${mobileMetaConnectedUrl}?status=error&reason=state`);
+      }
       await input.store.assertWorkspaceRole({
         userId: decodedState.actorId,
         workspaceId: decodedState.workspaceId,
         allowedRoles: ["owner", "admin"]
       });
-      const result = await metaProvider.completeOAuth({ code: query.code, state: query.state });
+      let result: Awaited<ReturnType<MetaProvider["completeOAuth"]>>;
+      try {
+        result = await metaProvider.completeOAuth({ code: query.code, state: query.state });
+      } catch {
+        return reply.redirect(`${mobileMetaConnectedUrl}?status=error&reason=exchange`);
+      }
       await input.store.upsertMetaAuthorization({
         workspaceId: decodedState.workspaceId,
         actorId: decodedState.actorId,
         authorization: result.authorization,
         pages: result.pages
       });
-      return reply.type("text/html; charset=utf-8").send(`<!doctype html>
-<html lang="es">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Facebook conectado</title>
-    <style>
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #0f1217; color: #f8fafc; }
-      main { max-width: 480px; padding: 32px; }
-      h1 { font-size: 28px; margin: 0 0 12px; }
-      p { color: #aeb7c2; line-height: 1.5; margin: 0; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>Facebook quedó conectado</h1>
-      <p>Vuelve a FBmaniaco y actualiza la pantalla para elegir tu página.</p>
-    </main>
-  </body>
-</html>`);
+      return reply.redirect(`${mobileMetaConnectedUrl}?status=success`);
     }
   );
 
@@ -1133,6 +1020,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
               appId: input.config.metaAppId,
               appSecret: input.config.metaAppSecret,
               redirectUri: input.config.metaRedirectUri,
+              loginConfigurationId: input.config.metaLoginConfigurationId,
               graphApiVersion: input.config.metaGraphApiVersion,
               requiredScopes: input.config.metaRequiredScopes
             },

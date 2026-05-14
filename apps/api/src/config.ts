@@ -22,6 +22,7 @@ export type ApiConfig = {
   metaAppId: string | undefined;
   metaAppSecret: string | undefined;
   metaRedirectUri: string | undefined;
+  metaLoginConfigurationId: string | undefined;
   metaGraphApiVersion: string;
   metaRequiredScopes: string[];
   metaTestUserAccessToken: string | undefined;
@@ -96,6 +97,8 @@ export const loadConfig = (): ApiConfig => {
   const metaAppId = process.env.META_APP_ID || undefined;
   const metaAppSecret = process.env.META_APP_SECRET || undefined;
   const metaRedirectUri = process.env.META_REDIRECT_URI || undefined;
+  const metaLoginConfigurationId =
+    process.env.META_LOGIN_CONFIGURATION_ID || process.env.META_CONFIG_ID || process.env.FACEBOOK_LOGIN_CONFIG_ID || undefined;
   const openaiApiKey = process.env.OPENAI_API_KEY || undefined;
   const productionTestTokens = [
     "META_TEST_USER_ACCESS_TOKEN",
@@ -160,6 +163,7 @@ export const loadConfig = (): ApiConfig => {
     metaAppId,
     metaAppSecret,
     metaRedirectUri,
+    metaLoginConfigurationId,
     metaGraphApiVersion: process.env.META_GRAPH_API_VERSION ?? "v23.0",
     metaRequiredScopes: (process.env.META_REQUIRED_SCOPES ?? "pages_show_list,pages_read_engagement,pages_manage_posts")
       .split(",")

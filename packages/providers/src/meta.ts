@@ -40,6 +40,7 @@ export type MetaProviderConfig = {
   appId: string | undefined;
   appSecret: string | undefined;
   redirectUri: string | undefined;
+  loginConfigurationId?: string | undefined;
   graphApiVersion: string;
   requiredScopes: string[];
 };
@@ -48,6 +49,7 @@ type GraphMetaProviderConfig = {
   appId: string;
   appSecret: string;
   redirectUri: string;
+  loginConfigurationId?: string | undefined;
   graphApiVersion: string;
   requiredScopes: string[];
 };
@@ -58,6 +60,7 @@ export const createMetaProvider = (config: MetaProviderConfig): MetaProvider => 
       appId: config.appId,
       appSecret: config.appSecret,
       redirectUri: config.redirectUri,
+      loginConfigurationId: config.loginConfigurationId,
       graphApiVersion: config.graphApiVersion,
       requiredScopes: config.requiredScopes
     });
@@ -158,7 +161,12 @@ class GraphMetaProvider implements MetaProvider {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("auth_type", "rerequest");
     url.searchParams.set("state", input.state);
-    url.searchParams.set("scope", this.config.requiredScopes.join(","));
+    if (this.config.loginConfigurationId) {
+      url.searchParams.set("config_id", this.config.loginConfigurationId);
+      url.searchParams.set("override_default_response_type", "true");
+    } else {
+      url.searchParams.set("scope", this.config.requiredScopes.join(","));
+    }
     return url.toString();
   }
 

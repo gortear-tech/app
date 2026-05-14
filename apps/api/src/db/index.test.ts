@@ -19,6 +19,7 @@ const makeConfig = (overrides: Partial<ApiConfig> = {}): ApiConfig => ({
   metaAppId: undefined,
   metaAppSecret: undefined,
   metaRedirectUri: undefined,
+  metaLoginConfigurationId: undefined,
   metaGraphApiVersion: "v23.0",
   metaRequiredScopes: ["pages_show_list", "pages_read_engagement", "pages_manage_posts"],
   metaTestUserAccessToken: undefined,

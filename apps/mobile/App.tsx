@@ -19,7 +19,6 @@ import {
   approveVariant,
   cancelScheduledPost,
   collectMetrics,
-  completeMetaManualCallback,
   confirmBatchCost,
   confirmCalendar,
   connectMeta,
@@ -56,7 +55,7 @@ function BootScreen() {
   const config = getMobileConfig();
   const [tab, setTab] = useState<TabKey>("business");
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
-  const [manualCallbackUrl, setManualCallbackUrl] = useState("");
+  const [metaReturnMessage, setMetaReturnMessage] = useState<string | null>(null);
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
   const token = tokenQuery.data ?? "";
@@ -126,6 +125,24 @@ function BootScreen() {
     return () => subscription.remove();
   }, []);
 
+  useEffect(() => {
+    const handleMetaReturn = (url: string | null) => {
+      if (!url?.startsWith("fbmaniaco://meta-connected")) return;
+      const succeeded = url.includes("status=success");
+      setMetaReturnMessage(
+        succeeded
+          ? "Facebook conectado. Actualizando tus paginas..."
+          : "Facebook no completo la autorizacion. Intenta conectar otra vez."
+      );
+      void queryClient.invalidateQueries({ queryKey: ["session-token"] });
+      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      void queryClient.invalidateQueries({ queryKey: ["pages"] });
+    };
+    void Linking.getInitialURL().then(handleMetaReturn);
+    const subscription = Linking.addEventListener("url", (event) => handleMetaReturn(event.url));
+    return () => subscription.remove();
+  }, []);
+
   const invalidateWork = async () => {
     await queryClient.invalidateQueries({ queryKey: ["active-batch"] });
     await queryClient.invalidateQueries({ queryKey: ["batch-detail"] });
@@ -140,18 +157,10 @@ function BootScreen() {
     mutationFn: async () => {
       const sessionToken = await ensureSessionForMeta();
       queryClient.setQueryData(["session-token"], sessionToken);
-      return connectMeta(sessionToken, "facebook_login");
+      return connectMeta(sessionToken);
     },
     onSuccess: async (result) => {
       if (result.authorizationUrl) await Linking.openURL(result.authorizationUrl);
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-      await queryClient.invalidateQueries({ queryKey: ["pages"] });
-    }
-  });
-  const completeManualMeta = useMutation({
-    mutationFn: async () => completeMetaManualCallback(token, manualCallbackUrl.trim()),
-    onSuccess: async () => {
-      setManualCallbackUrl("");
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       await queryClient.invalidateQueries({ queryKey: ["pages"] });
     }
@@ -285,7 +294,6 @@ function BootScreen() {
     bootstrap.error ??
     signOut.error ??
     connect.error ??
-    completeManualMeta.error ??
     pages.error ??
     selectPage.error ??
     activeBatch.error ??
@@ -343,22 +351,7 @@ function BootScreen() {
             disabled={connect.isPending || tokenQuery.isFetching}
             onPress={() => connect.mutate()}
           />
-          <Text style={styles.muted}>Al terminar en Facebook, copia el enlace final y pegalo aqui.</Text>
-          <TextInput
-            style={styles.textInput}
-            value={manualCallbackUrl}
-            onChangeText={setManualCallbackUrl}
-            placeholder="https://www.facebook.com/connect/login_success.html?code=..."
-            placeholderTextColor={palette.muted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <Button
-            label={completeManualMeta.isPending ? "Completando..." : "Completar conexion"}
-            variant="secondary"
-            disabled={completeManualMeta.isPending || !manualCallbackUrl.trim()}
-            onPress={() => completeManualMeta.mutate()}
-          />
+          {metaReturnMessage ? <Text style={styles.muted}>{metaReturnMessage}</Text> : null}
         </Screen>
       );
     }
@@ -372,22 +365,7 @@ function BootScreen() {
             body="FBmaniaco usa Meta para leer paginas y publicar solo cuando tu lo confirmas."
           />
           <Button label={connect.isPending ? "Conectando..." : "Conectar con Facebook"} disabled={connect.isPending} onPress={() => connect.mutate()} />
-          <Text style={styles.muted}>Al terminar en Facebook, copia el enlace final y pegalo aqui.</Text>
-          <TextInput
-            style={styles.textInput}
-            value={manualCallbackUrl}
-            onChangeText={setManualCallbackUrl}
-            placeholder="https://www.facebook.com/connect/login_success.html?code=..."
-            placeholderTextColor={palette.muted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <Button
-            label={completeManualMeta.isPending ? "Completando..." : "Completar conexion"}
-            variant="secondary"
-            disabled={completeManualMeta.isPending || !manualCallbackUrl.trim()}
-            onPress={() => completeManualMeta.mutate()}
-          />
+          {metaReturnMessage ? <Text style={styles.muted}>{metaReturnMessage}</Text> : null}
         </Screen>
       );
     }
