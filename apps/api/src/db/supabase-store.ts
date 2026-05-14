@@ -225,6 +225,7 @@ const toMetaPage = (row: Record<string, any>): MetaPage => ({
   metaPageId: row.meta_page_id,
   pageName: row.page_name,
   coverPhotoUrl: row.cover_photo_url ?? null,
+  profilePhotoUrl: row.profile_photo_url ?? null,
   category: row.category ?? null,
   tasks: json(row.tasks, []),
   isGranted: row.is_granted,
@@ -1352,7 +1353,8 @@ export class SupabaseDataStoreCore {
         {
           metaPageId: "mock-page-1",
           pageName: "FBmaniaco Demo",
-          coverPhotoUrl: null,
+          coverPhotoUrl: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=1200",
+          profilePhotoUrl: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?w=320",
           category: "Facebook Page",
           tasks: ["CREATE_CONTENT", "MODERATE", "ADVERTISE"],
           isGranted: true,
@@ -1364,7 +1366,8 @@ export class SupabaseDataStoreCore {
         {
           metaPageId: "mock-page-2",
           pageName: "Pagina sin permiso completo",
-          coverPhotoUrl: null,
+          coverPhotoUrl: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=1200",
+          profilePhotoUrl: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=320",
           category: "Facebook Page",
           tasks: ["MODERATE"],
           isGranted: true,
@@ -1440,9 +1443,9 @@ export class SupabaseDataStoreCore {
         await client.query(
           `insert into public.facebook_pages
            (id, workspace_id, meta_authorization_id, meta_page_id, page_name, page_access_token_status,
-            encrypted_page_access_token, page_access_token_key_id, cover_photo_url, category, tasks, is_granted,
+            encrypted_page_access_token, page_access_token_key_id, cover_photo_url, profile_photo_url, category, tasks, is_granted,
             can_publish, granted_scopes, declined_scopes, created_at, updated_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14::jsonb, $15::jsonb, now(), now())
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb, $16::jsonb, now(), now())
            on conflict (workspace_id, meta_page_id) do update
            set meta_authorization_id = excluded.meta_authorization_id,
                page_name = excluded.page_name,
@@ -1450,6 +1453,7 @@ export class SupabaseDataStoreCore {
                encrypted_page_access_token = excluded.encrypted_page_access_token,
                page_access_token_key_id = excluded.page_access_token_key_id,
                cover_photo_url = excluded.cover_photo_url,
+               profile_photo_url = excluded.profile_photo_url,
                category = excluded.category,
                tasks = excluded.tasks,
                is_granted = excluded.is_granted,
@@ -1467,6 +1471,7 @@ export class SupabaseDataStoreCore {
             encryptedPageAccessToken,
             pageAccessTokenKeyId,
             page.coverPhotoUrl ?? null,
+            page.profilePhotoUrl ?? null,
             page.category ?? null,
             JSON.stringify(page.tasks),
             page.isGranted,

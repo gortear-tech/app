@@ -27,6 +27,7 @@ export const MetaPageSchema = Type.Object({
   metaPageId: Type.String(),
   pageName: Type.String(),
   coverPhotoUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  profilePhotoUrl: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   category: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   tasks: Type.Array(Type.String()),
   isGranted: Type.Boolean(),

@@ -120,7 +120,8 @@ class MockMetaProvider implements MetaProvider {
         {
           metaPageId: "mock-page-1",
           pageName: "FBmaniaco Demo",
-          coverPhotoUrl: null,
+          coverPhotoUrl: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=1200",
+          profilePhotoUrl: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?w=320",
           category: "Facebook Page",
           tasks: ["CREATE_CONTENT", "MODERATE", "ADVERTISE"],
           isGranted: true,
@@ -132,7 +133,8 @@ class MockMetaProvider implements MetaProvider {
         {
           metaPageId: "mock-page-2",
           pageName: "Pagina sin permiso completo",
-          coverPhotoUrl: null,
+          coverPhotoUrl: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=1200",
+          profilePhotoUrl: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=320",
           category: "Facebook Page",
           tasks: ["MODERATE"],
           isGranted: true,
@@ -332,13 +334,22 @@ const loadPages = async (input: {
   const accounts = await fetchJson<{
     data?: Array<{
       id: string;
-    name: string;
-    category?: string;
-    tasks?: string[];
-    access_token?: string;
+      name: string;
+      category?: string;
+      tasks?: string[];
+      access_token?: string;
+      cover?: {
+        source?: string | null;
+      };
+      picture?: {
+        data?: {
+          url?: string | null;
+          is_silhouette?: boolean;
+        };
+      };
     }>;
   }>(`https://graph.facebook.com/${input.graphApiVersion}/me/accounts`, {
-    fields: "id,name,category,tasks,access_token",
+    fields: "id,name,category,tasks,access_token,cover{source},picture.type(large){url,is_silhouette}",
     access_token: input.accessToken
   });
 
@@ -350,7 +361,8 @@ const loadPages = async (input: {
     return {
       metaPageId: page.id,
       pageName: page.name,
-      coverPhotoUrl: null,
+      coverPhotoUrl: page.cover?.source ?? null,
+      profilePhotoUrl: page.picture?.data?.is_silhouette ? null : (page.picture?.data?.url ?? null),
       category: page.category ?? null,
       tasks,
       isGranted,

@@ -57,8 +57,7 @@ export const getStoredSessionToken = async () => {
       const refreshed = await refreshStoredSession(session.refreshToken);
       return refreshed.accessToken;
     } catch {
-      await clearStoredSession();
-      return null;
+      return session.accessToken;
     }
   }
   return session.accessToken;
@@ -153,7 +152,8 @@ export const ensureSessionForMeta = async () => {
       return token;
     }
   } catch {
-    await clearStoredSession();
+    const token = await getStoredSessionToken();
+    if (token) return token;
   }
   const session = await startAnonymousSession();
   return session.accessToken;

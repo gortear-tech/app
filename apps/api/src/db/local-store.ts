@@ -1166,7 +1166,8 @@ export class LocalDataStore implements DataStore {
         {
           metaPageId: "mock-page-1",
           pageName: "FBmaniaco Demo",
-          coverPhotoUrl: null,
+          coverPhotoUrl: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=1200",
+          profilePhotoUrl: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?w=320",
           category: "Facebook Page",
           tasks: ["CREATE_CONTENT", "MODERATE", "ADVERTISE"],
           isGranted: true,
@@ -1178,7 +1179,8 @@ export class LocalDataStore implements DataStore {
         {
           metaPageId: "mock-page-2",
           pageName: "Pagina sin permiso completo",
-          coverPhotoUrl: null,
+          coverPhotoUrl: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=1200",
+          profilePhotoUrl: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=320",
           category: "Facebook Page",
           tasks: ["MODERATE"],
           isGranted: true,

@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
+import type { MetaPage } from "@fbmaniaco/shared";
 import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
 import * as WebBrowser from "expo-web-browser";
@@ -387,22 +388,18 @@ function BootScreen() {
     if (bootstrap.data?.nextStep === "select_page") {
       return (
         <Screen>
-          <Hero title="Elige tu pagina" eyebrow="Negocio" body="Selecciona la pagina donde vas a preparar publicaciones." />
-          {(pages.data ?? []).map((page) => (
-            <Pressable
-              key={page.id}
-              style={[styles.rowCard, !page.canPublish ? styles.disabled : null]}
-              disabled={!page.canPublish || selectPage.isPending}
-              onPress={() => selectPage.mutate(page.id)}
-            >
-              <View style={styles.flex}>
-                <Text style={styles.rowTitle}>{page.pageName}</Text>
-                <Text style={styles.muted}>{page.canPublish ? "Lista para publicar" : "Necesita permisos o reconexion"}</Text>
-              </View>
-              <Pill label={page.pageAccessTokenStatus} tone={page.canPublish ? "good" : "warn"} />
-            </Pressable>
-          ))}
           {pages.isLoading ? <ActivityIndicator color={palette.cyan} /> : null}
+          {!pages.isLoading && (pages.data ?? []).length === 0 ? (
+            <EmptyState title="No encontramos paginas" body="Revisa permisos de Facebook y vuelve a conectar." />
+          ) : null}
+          {(pages.data ?? []).map((page) => (
+            <PageCard
+              key={page.id}
+              page={page}
+              disabled={selectPage.isPending}
+              onPress={() => selectPage.mutate(page.id)}
+            />
+          ))}
         </Screen>
       );
     }
@@ -542,20 +539,13 @@ function BootScreen() {
             <Text style={styles.muted}>Conecta Facebook para ver tus paginas.</Text>
           ) : null}
           {(pages.data ?? []).map((page) => (
-            <Pressable
+            <PageCard
               key={page.id}
-              style={[styles.rowCard, !page.canPublish || selectPage.isPending ? styles.disabled : null]}
-              disabled={!page.canPublish || selectPage.isPending}
+              page={page}
+              selected={page.isSelected}
+              disabled={selectPage.isPending}
               onPress={() => selectPage.mutate(page.id)}
-            >
-              <View style={styles.flex}>
-                <Text style={styles.rowTitle}>{page.pageName}</Text>
-                <Text style={styles.muted}>
-                  {page.isSelected ? "Pagina activa" : page.canPublish ? "Tocar para usar esta pagina" : "Faltan permisos de publicacion"}
-                </Text>
-              </View>
-              <Pill label={page.isSelected ? "activa" : page.pageAccessTokenStatus} tone={page.canPublish ? "good" : "warn"} />
-            </Pressable>
+            />
           ))}
           <Button label={connect.isPending ? "Conectando..." : "Reconectar Facebook"} variant="secondary" disabled={connect.isPending} onPress={() => connect.mutate()} />
         </Panel>
@@ -659,6 +649,46 @@ function EmptyState({ title, body }: { title: string; body: string }) {
       <Text style={styles.rowTitle}>{title}</Text>
       <Text style={styles.muted}>{body}</Text>
     </View>
+  );
+}
+
+function PageCard({
+  page,
+  onPress,
+  disabled,
+  selected
+}: {
+  page: MetaPage;
+  onPress: () => void;
+  disabled?: boolean | undefined;
+  selected?: boolean | undefined;
+}) {
+  return (
+    <Pressable
+      style={[
+        styles.pageCard,
+        selected ? styles.pageCardSelected : null,
+        !page.canPublish || disabled ? styles.disabled : null
+      ]}
+      disabled={!page.canPublish || disabled}
+      onPress={onPress}
+    >
+      {page.coverPhotoUrl ? (
+        <Image source={{ uri: page.coverPhotoUrl }} style={styles.pageCover} />
+      ) : (
+        <View style={[styles.pageCover, styles.pageCoverPlaceholder]} />
+      )}
+      <View style={styles.pageCardBody}>
+        {page.profilePhotoUrl ? (
+          <Image source={{ uri: page.profilePhotoUrl }} style={styles.pageAvatar} />
+        ) : (
+          <View style={styles.pageAvatarPlaceholder}>
+            <Text style={styles.pageAvatarText}>{page.pageName.slice(0, 1).toUpperCase()}</Text>
+          </View>
+        )}
+        <Text style={styles.pageName} numberOfLines={2}>{page.pageName}</Text>
+      </View>
+    </Pressable>
   );
 }
 
@@ -859,6 +889,46 @@ const styles = StyleSheet.create({
     backgroundColor: palette.panel
   },
   rowTitle: { color: palette.text, fontSize: 14, fontWeight: "900" },
+  pageCard: {
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: 8,
+    backgroundColor: palette.panel
+  },
+  pageCardSelected: { borderColor: palette.cyan },
+  pageCover: {
+    width: "100%",
+    aspectRatio: 2.65,
+    backgroundColor: "#233044"
+  },
+  pageCoverPlaceholder: { backgroundColor: "#233044" },
+  pageCardBody: {
+    minHeight: 72,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 13,
+    paddingVertical: 11
+  },
+  pageAvatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 2,
+    borderColor: palette.panel,
+    backgroundColor: "#233044"
+  },
+  pageAvatarPlaceholder: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#233044"
+  },
+  pageAvatarText: { color: palette.text, fontSize: 20, fontWeight: "900" },
+  pageName: { flex: 1, color: palette.text, fontSize: 18, fontWeight: "900", lineHeight: 22 },
   disabled: { opacity: 0.55 },
   progressTrack: { height: 8, borderRadius: 4, overflow: "hidden", backgroundColor: "#2d3745" },
   progressFill: { height: 8, borderRadius: 4, backgroundColor: palette.cyan },
