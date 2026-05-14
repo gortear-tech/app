@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo, useState } from "react";
+import * as WebBrowser from "expo-web-browser";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
@@ -49,6 +50,7 @@ import {
 import { getMobileConfig } from "./src/config";
 
 const queryClient = new QueryClient();
+WebBrowser.maybeCompleteAuthSession();
 type TabKey = "today" | "create" | "calendar" | "business";
 
 function BootScreen() {
@@ -58,6 +60,19 @@ function BootScreen() {
   const [metaReturnMessage, setMetaReturnMessage] = useState<string | null>(null);
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
+
+  const handleMetaReturn = useCallback((url: string | null) => {
+    if (!url?.startsWith("fbmaniaco://meta-connected")) return;
+    const succeeded = url.includes("status=success");
+    setMetaReturnMessage(
+      succeeded
+        ? "Facebook conectado. Actualizando tus paginas..."
+        : "Facebook no completo la autorizacion. Intenta conectar otra vez."
+    );
+    void queryClient.invalidateQueries({ queryKey: ["session-token"] });
+    void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+    void queryClient.invalidateQueries({ queryKey: ["pages"] });
+  }, []);
   const token = tokenQuery.data ?? "";
   const bootstrap = useQuery({
     queryKey: ["bootstrap"],
@@ -126,22 +141,10 @@ function BootScreen() {
   }, []);
 
   useEffect(() => {
-    const handleMetaReturn = (url: string | null) => {
-      if (!url?.startsWith("fbmaniaco://meta-connected")) return;
-      const succeeded = url.includes("status=success");
-      setMetaReturnMessage(
-        succeeded
-          ? "Facebook conectado. Actualizando tus paginas..."
-          : "Facebook no completo la autorizacion. Intenta conectar otra vez."
-      );
-      void queryClient.invalidateQueries({ queryKey: ["session-token"] });
-      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-      void queryClient.invalidateQueries({ queryKey: ["pages"] });
-    };
     void Linking.getInitialURL().then(handleMetaReturn);
     const subscription = Linking.addEventListener("url", (event) => handleMetaReturn(event.url));
     return () => subscription.remove();
-  }, []);
+  }, [handleMetaReturn]);
 
   const invalidateWork = async () => {
     await queryClient.invalidateQueries({ queryKey: ["active-batch"] });
@@ -160,7 +163,18 @@ function BootScreen() {
       return connectMeta(sessionToken);
     },
     onSuccess: async (result) => {
-      if (result.authorizationUrl) await Linking.openURL(result.authorizationUrl);
+      if (result.authorizationUrl) {
+        try {
+          const authResult = await WebBrowser.openAuthSessionAsync(result.authorizationUrl, "fbmaniaco://meta-connected");
+          if (authResult.type === "success") {
+            handleMetaReturn(authResult.url);
+          } else if (authResult.type === "cancel" || authResult.type === "dismiss") {
+            setMetaReturnMessage("Facebook se cerro antes de terminar la autorizacion.");
+          }
+        } catch {
+          await Linking.openURL(result.authorizationUrl);
+        }
+      }
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       await queryClient.invalidateQueries({ queryKey: ["pages"] });
     }
