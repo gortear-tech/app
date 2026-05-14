@@ -24,8 +24,8 @@ export type CompleteAuthorizationResult = {
 
 export type MetaProvider = {
   mode: "mock" | "graph";
-  buildAuthorizationUrl(input: { state: string }): string;
-  completeOAuth(input: { code: string; state: string }): Promise<CompleteAuthorizationResult>;
+  buildAuthorizationUrl(input: { state: string; redirectUri?: string }): string;
+  completeOAuth(input: { code: string; state: string; redirectUri?: string }): Promise<CompleteAuthorizationResult>;
   refreshAuthorization(): Promise<CompleteAuthorizationResult>;
 };
 
@@ -151,10 +151,10 @@ class GraphMetaProvider implements MetaProvider {
     this.config = config;
   }
 
-  buildAuthorizationUrl(input: { state: string }) {
+  buildAuthorizationUrl(input: { state: string; redirectUri?: string }) {
     const url = new URL("https://www.facebook.com/dialog/oauth");
     url.searchParams.set("client_id", this.config.appId);
-    url.searchParams.set("redirect_uri", this.config.redirectUri);
+    url.searchParams.set("redirect_uri", input.redirectUri ?? this.config.redirectUri);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("auth_type", "rerequest");
     url.searchParams.set("state", input.state);
@@ -162,13 +162,13 @@ class GraphMetaProvider implements MetaProvider {
     return url.toString();
   }
 
-  async completeOAuth(input: { code: string }): Promise<CompleteAuthorizationResult> {
+  async completeOAuth(input: { code: string; redirectUri?: string }): Promise<CompleteAuthorizationResult> {
     const shortLived = await this.fetchJson<{ access_token?: string; error?: unknown }>(
       `https://graph.facebook.com/${this.config.graphApiVersion}/oauth/access_token`,
       {
         client_id: this.config.appId,
         client_secret: this.config.appSecret,
-        redirect_uri: this.config.redirectUri,
+        redirect_uri: input.redirectUri ?? this.config.redirectUri,
         code: input.code
       }
     );

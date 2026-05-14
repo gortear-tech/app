@@ -19,6 +19,7 @@ import {
   approveVariant,
   cancelScheduledPost,
   collectMetrics,
+  completeMetaManualCallback,
   confirmBatchCost,
   confirmCalendar,
   connectMeta,
@@ -55,6 +56,7 @@ function BootScreen() {
   const config = getMobileConfig();
   const [tab, setTab] = useState<TabKey>("business");
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
+  const [manualCallbackUrl, setManualCallbackUrl] = useState("");
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
   const token = tokenQuery.data ?? "";
@@ -138,10 +140,18 @@ function BootScreen() {
     mutationFn: async () => {
       const sessionToken = await ensureSessionForMeta();
       queryClient.setQueryData(["session-token"], sessionToken);
-      return connectMeta(sessionToken);
+      return connectMeta(sessionToken, "facebook_login");
     },
     onSuccess: async (result) => {
       if (result.authorizationUrl) await Linking.openURL(result.authorizationUrl);
+      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      await queryClient.invalidateQueries({ queryKey: ["pages"] });
+    }
+  });
+  const completeManualMeta = useMutation({
+    mutationFn: async () => completeMetaManualCallback(token, manualCallbackUrl.trim()),
+    onSuccess: async () => {
+      setManualCallbackUrl("");
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       await queryClient.invalidateQueries({ queryKey: ["pages"] });
     }
@@ -275,6 +285,7 @@ function BootScreen() {
     bootstrap.error ??
     signOut.error ??
     connect.error ??
+    completeManualMeta.error ??
     pages.error ??
     selectPage.error ??
     activeBatch.error ??
@@ -332,6 +343,22 @@ function BootScreen() {
             disabled={connect.isPending || tokenQuery.isFetching}
             onPress={() => connect.mutate()}
           />
+          <Text style={styles.muted}>Al terminar en Facebook, copia el enlace final y pegalo aqui.</Text>
+          <TextInput
+            style={styles.textInput}
+            value={manualCallbackUrl}
+            onChangeText={setManualCallbackUrl}
+            placeholder="https://www.facebook.com/connect/login_success.html?code=..."
+            placeholderTextColor={palette.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Button
+            label={completeManualMeta.isPending ? "Completando..." : "Completar conexion"}
+            variant="secondary"
+            disabled={completeManualMeta.isPending || !manualCallbackUrl.trim()}
+            onPress={() => completeManualMeta.mutate()}
+          />
         </Screen>
       );
     }
@@ -345,6 +372,22 @@ function BootScreen() {
             body="FBmaniaco usa Meta para leer paginas y publicar solo cuando tu lo confirmas."
           />
           <Button label={connect.isPending ? "Conectando..." : "Conectar con Facebook"} disabled={connect.isPending} onPress={() => connect.mutate()} />
+          <Text style={styles.muted}>Al terminar en Facebook, copia el enlace final y pegalo aqui.</Text>
+          <TextInput
+            style={styles.textInput}
+            value={manualCallbackUrl}
+            onChangeText={setManualCallbackUrl}
+            placeholder="https://www.facebook.com/connect/login_success.html?code=..."
+            placeholderTextColor={palette.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <Button
+            label={completeManualMeta.isPending ? "Completando..." : "Completar conexion"}
+            variant="secondary"
+            disabled={completeManualMeta.isPending || !manualCallbackUrl.trim()}
+            onPress={() => completeManualMeta.mutate()}
+          />
         </Screen>
       );
     }

@@ -215,6 +215,82 @@ describe("api bootstrap and tenancy", () => {
     await rm(path, { force: true });
   });
 
+  it("completes the Facebook login success URL fallback", async () => {
+    const path = join(tmpdir(), `fbmaniaco-api-facebook-login-${Date.now()}.json`);
+    const config = makeConfig(path);
+    const store = new LocalDataStore(path);
+    let completeRedirectUri: string | undefined;
+    const fakeProvider: MetaProvider = {
+      mode: "graph",
+      buildAuthorizationUrl: ({ state, redirectUri }) => {
+        const url = new URL("https://www.facebook.com/dialog/oauth");
+        url.searchParams.set("state", state);
+        if (redirectUri) url.searchParams.set("redirect_uri", redirectUri);
+        return url.toString();
+      },
+      completeOAuth: async (input) => {
+        completeRedirectUri = input.redirectUri;
+        return {
+          authorization: {
+            status: "valid",
+            grantedScopes: ["pages_show_list", "pages_read_engagement", "pages_manage_posts"],
+            declinedScopes: [],
+            missingRequiredScopes: [],
+            grantedPageIds: ["real-page-1"],
+            graphApiVersion: "v23.0",
+            tokenStatus: "valido",
+            appMode: "unknown",
+            appReviewStatus: "unknown"
+          },
+          pages: [
+            {
+              metaPageId: "real-page-1",
+              pageName: "Pagina Real Normalizada",
+              coverPhotoUrl: null,
+              category: "Restaurant",
+              tasks: ["CREATE_CONTENT"],
+              isGranted: true,
+              canPublish: true,
+              pageAccessTokenStatus: "valido",
+              grantedScopes: ["pages_show_list", "pages_read_engagement", "pages_manage_posts"],
+              declinedScopes: []
+            }
+          ]
+        };
+      },
+      refreshAuthorization: async () => {
+        throw new Error("not used");
+      }
+    };
+    const app = await buildServer({ config, store, metaProvider: fakeProvider });
+    const authorization = "Bearer dev:user-facebook-login:callback@example.com";
+
+    const connect = await app.inject({
+      method: "POST",
+      url: "/auth/meta/connect",
+      headers: { authorization, "idempotency-key": "facebook-login-connect-1" },
+      payload: { flow: "facebook_login" }
+    });
+    expect(connect.statusCode).toBe(200);
+    const authorizationUrl = new URL(connect.json().authorizationUrl);
+    const state = authorizationUrl.searchParams.get("state");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe("https://www.facebook.com/connect/login_success.html");
+    expect(state).toBeTruthy();
+
+    const callback = await app.inject({
+      method: "POST",
+      url: "/auth/meta/manual-callback",
+      headers: { authorization, "idempotency-key": "facebook-login-callback-1" },
+      payload: { callbackUrl: `https://www.facebook.com/connect/login_success.html?code=oauth-code&state=${state}` }
+    });
+    expect(callback.statusCode).toBe(200);
+    expect(callback.json().pages[0].pageName).toBe("Pagina Real Normalizada");
+    expect(completeRedirectUri).toBe("https://www.facebook.com/connect/login_success.html");
+
+    await app.close();
+    await rm(path, { force: true });
+  });
+
   it("creates a batch while API upload requires real storage", async () => {
     const path = join(tmpdir(), `fbmaniaco-api-batch-${Date.now()}.json`);
     const config = makeConfig(path);
