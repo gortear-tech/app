@@ -152,9 +152,11 @@ class GraphMetaProvider implements MetaProvider {
   }
 
   buildAuthorizationUrl(input: { state: string }) {
-    const url = new URL(`https://www.facebook.com/${this.config.graphApiVersion}/dialog/oauth`);
+    const url = new URL("https://www.facebook.com/dialog/oauth");
     url.searchParams.set("client_id", this.config.appId);
     url.searchParams.set("redirect_uri", this.config.redirectUri);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("auth_type", "rerequest");
     url.searchParams.set("state", input.state);
     url.searchParams.set("scope", this.config.requiredScopes.join(","));
     return url.toString();
