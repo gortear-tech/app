@@ -13,6 +13,7 @@
     "ios": "expo run:ios"
   },
   "dependencies": {
+    "@expo/vector-icons": "14.0.4",
     "@fbmaniaco/shared": "workspace:*",
     "@tanstack/react-query": "^5.62.8",
     "expo": "^52.0.23",
