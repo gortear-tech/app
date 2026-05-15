@@ -86,6 +86,7 @@ function BootScreen() {
   });
 
   const selectedBusinessId = bootstrap.data?.authenticated ? bootstrap.data.selectedBusinessId : null;
+  const selectedPageId = bootstrap.data?.authenticated ? bootstrap.data.selectedPageId : null;
   const activeBatch = useQuery({
     queryKey: ["active-batch", selectedBusinessId],
     queryFn: async () => getActiveBatch(token, selectedBusinessId ?? ""),
@@ -130,6 +131,10 @@ function BootScreen() {
         (bootstrap.data.nextStep === "select_page" || bootstrap.data.nextStep === "home")
     )
   });
+  const selectedPage = useMemo(
+    () => (pages.data ?? []).find((page) => page.id === selectedPageId || page.isSelected) ?? null,
+    [pages.data, selectedPageId]
+  );
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -189,9 +194,12 @@ function BootScreen() {
   });
   const selectPage = useMutation({
     mutationFn: async (pageId: string) => selectMetaPage(token, pageId),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      queryClient.setQueryData(["bootstrap"], result.bootstrap);
+      setTab("create");
       await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       await queryClient.invalidateQueries({ queryKey: ["pages"] });
+      await invalidateWork();
     }
   });
   const startBatch = useMutation({ mutationFn: async () => createBatch(token, selectedBusinessId ?? ""), onSuccess: invalidateWork });
@@ -296,14 +304,22 @@ function BootScreen() {
   });
   const captionEval = useMutation({ mutationFn: async () => runCaptionEval(token, selectedBusinessId ?? ""), onSuccess: invalidateWork });
 
+  const openPage = (page: MetaPage) => {
+    if (page.id === selectedPage?.id || page.isSelected) {
+      setTab("create");
+      return;
+    }
+    selectPage.mutate(page.id);
+  };
+
   const stateText = useMemo(() => {
     if (bootstrap.isLoading) return "Revisando conexion inicial...";
     if (bootstrap.isError) return "No pudimos conectar con FBmaniaco.";
     if (!bootstrap.data?.authenticated) return "Conecta Facebook para empezar.";
     if (bootstrap.data.nextStep === "connect_meta" || bootstrap.data.nextStep === "recover_meta") return "Sesion segura lista.";
     if (bootstrap.data.nextStep === "select_page") return "Facebook conectado: elige pagina.";
-    return `Pagina activa: ${bootstrap.data.workspace?.name ?? "FBmaniaco"}`;
-  }, [bootstrap.data, bootstrap.isError, bootstrap.isLoading]);
+    return `Pagina activa: ${selectedPage?.pageName ?? businessDetail.data?.business.name ?? "FBmaniaco"}`;
+  }, [bootstrap.data, bootstrap.isError, bootstrap.isLoading, businessDetail.data?.business.name, selectedPage?.pageName]);
 
   const visibleError =
     bootstrap.error ??
@@ -397,7 +413,7 @@ function BootScreen() {
               key={page.id}
               page={page}
               disabled={selectPage.isPending}
-              onPress={() => selectPage.mutate(page.id)}
+              onPress={() => openPage(page)}
             />
           ))}
         </Screen>
@@ -544,7 +560,7 @@ function BootScreen() {
               page={page}
               selected={page.isSelected}
               disabled={selectPage.isPending}
-              onPress={() => selectPage.mutate(page.id)}
+              onPress={() => openPage(page)}
             />
           ))}
           <Button label={connect.isPending ? "Conectando..." : "Reconectar Facebook"} variant="secondary" disabled={connect.isPending} onPress={() => connect.mutate()} />
