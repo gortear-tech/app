@@ -16,7 +16,8 @@
   "dependencies": {
     "@fbmaniaco/api": "workspace:*",
     "@fbmaniaco/providers": "workspace:*",
-    "@fbmaniaco/shared": "workspace:*"
+    "@fbmaniaco/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.47.10"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

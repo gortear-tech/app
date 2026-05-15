@@ -176,6 +176,51 @@ export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus
 };
 
 const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const transientUploadStatus = (status: number) => status === 408 || status === 429 || status >= 500;
+
+const uploadToSignedStorage = async (input: {
+  uploadUrl: string;
+  method: string;
+  headers?: Record<string, string>;
+  uri: string;
+  fileName: string;
+  contentType: string;
+}) => {
+  const retryDelays = [0, 1200, 3000];
+  let lastResponseText = "";
+  let lastStatus = 0;
+  for (const [attempt, delay] of retryDelays.entries()) {
+    if (delay > 0) await wait(delay);
+    const uploadBody = new FormData();
+    uploadBody.append("cacheControl", "3600");
+    uploadBody.append("", {
+      uri: input.uri,
+      name: input.fileName,
+      type: input.contentType
+    } as unknown as Blob);
+    try {
+      const response = await fetch(input.uploadUrl, {
+        method: input.method,
+        headers: {
+          "x-upsert": "false",
+          ...(input.headers ?? {})
+        },
+        body: uploadBody
+      });
+      if (response.ok || response.status === 409) return;
+      lastStatus = response.status;
+      lastResponseText = await response.text().catch(() => "");
+      if (!transientUploadStatus(response.status) || attempt === retryDelays.length - 1) break;
+    } catch (error) {
+      lastResponseText = error instanceof Error ? error.message : "network_error";
+      if (attempt === retryDelays.length - 1) break;
+    }
+  }
+  const detailSuffix = lastResponseText ? ` (${lastStatus || "red"}: ${lastResponseText.slice(0, 140)})` : lastStatus ? ` (${lastStatus})` : "";
+  if (lastStatus === 413) throw new Error("La foto pesa demasiado. Intenta con una imagen mas ligera.");
+  throw new Error(`No pudimos subir la foto al almacenamiento${detailSuffix}`);
+};
 
 export const connectMeta = async (token: string, flow: "oauth" | "device_login" = "oauth"): Promise<MetaConnectResponse> => {
   const { apiUrl } = getMobileConfig();
@@ -313,10 +358,13 @@ export type PhotoUploadFile = {
 export const uploadPhoto = async (token: string, businessId: string, batchId: string, file: PhotoUploadFile) => {
   const { apiUrl } = getMobileConfig();
   const fileName = file.name || `foto-${Date.now()}.jpg`;
-  const source = await fetch(file.uri);
-  if (!source.ok) throw new Error("No pudimos leer la foto seleccionada.");
-  const blob = await source.blob();
-  const fileSize = file.fileSize ?? blob.size;
+  let fileSize = file.fileSize;
+  if (fileSize === undefined) {
+    const source = await fetch(file.uri);
+    if (!source.ok) throw new Error("No pudimos leer la foto seleccionada.");
+    const blob = await source.blob();
+    fileSize = blob.size;
+  }
   const intentResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/upload-intent`, {
     method: "POST",
     headers: {
@@ -330,27 +378,14 @@ export const uploadPhoto = async (token: string, businessId: string, batchId: st
   const intentJson = await intentResponse.json();
   if (!intentResponse.ok) throw new Error(intentJson.userMessage ?? "No pudimos preparar la foto.");
 
-  const uploadBody = new FormData();
-  uploadBody.append("cacheControl", "3600");
-  uploadBody.append("", {
-    uri: file.uri,
-    name: fileName,
-    type: file.contentType
-  } as unknown as Blob);
-  const uploadResponse = await fetch(intentJson.upload.uploadUrl, {
+  await uploadToSignedStorage({
+    uploadUrl: intentJson.upload.uploadUrl,
     method: intentJson.upload.method,
-    headers: {
-      "x-upsert": "false",
-      ...(intentJson.upload.headers ?? {})
-    },
-    body: uploadBody
+    headers: intentJson.upload.headers ?? {},
+    uri: file.uri,
+    fileName,
+    contentType: file.contentType
   });
-  if (!uploadResponse.ok) {
-    const detail = await uploadResponse.text().catch(() => "");
-    const detailSuffix = detail ? ` (${uploadResponse.status}: ${detail.slice(0, 140)})` : ` (${uploadResponse.status})`;
-    if (uploadResponse.status === 413) throw new Error("La foto pesa demasiado. Intenta con una imagen mas ligera.");
-    throw new Error(`No pudimos subir la foto al almacenamiento${detailSuffix}`);
-  }
 
   const completeResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/complete-upload`, {
     method: "POST",

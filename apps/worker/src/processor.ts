@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DataStore, StoredJob } from "@fbmaniaco/api/dist/db/index.js";
 import { createVisionAnalysisProvider, VisionAnalysisProvider } from "@fbmaniaco/providers";
+import { createClient } from "@supabase/supabase-js";
 
 export type WorkerResult = {
   processed: boolean;
@@ -11,6 +12,20 @@ const envFlag = (name: string, fallback: boolean) => {
   const value = process.env[name];
   if (value === undefined) return fallback;
   return ["1", "true", "yes"].includes(value.toLowerCase());
+};
+
+const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: string; assetId: string | null | undefined }) => {
+  if (!input.assetId || !process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) return null;
+  const asset = await input.store.getMediaAsset({ assetId: input.assetId });
+  if (!asset || asset.workspaceId !== input.workspaceId) return null;
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+  const { data, error } = await supabase.storage.from(asset.bucket).createSignedUrl(asset.storageKey, 60 * 30);
+  if (error || !data?.signedUrl) {
+    throw new Error(`Could not create fresh signed media URL: ${error?.message ?? "unknown storage error"}`);
+  }
+  return data.signedUrl;
 };
 
 export const processOneJob = async (input: {
@@ -49,9 +64,8 @@ export const processOneJob = async (input: {
       const sourcePhoto = await input.store.getPhoto({ workspaceId: job.workspaceId, photoId: job.photoId });
       if (!sourcePhoto) throw new Error(`Photo not found: ${job.photoId}`);
       const imageUrl =
-        typeof job.payload.imageUrl === "string" && /^https?:\/\//.test(job.payload.imageUrl)
-          ? job.payload.imageUrl
-          : null;
+        (await freshSignedMediaUrl({ store: input.store, workspaceId: job.workspaceId, assetId: sourcePhoto.originalAssetId })) ??
+        (typeof job.payload.imageUrl === "string" && /^https?:\/\//.test(job.payload.imageUrl) ? job.payload.imageUrl : null);
       if (!imageUrl) throw new Error("analyze_photo job is missing real imageUrl");
       const promptVersion = "vision-analysis-v1";
       const vision = await visionProvider.analyze({
