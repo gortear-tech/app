@@ -6,19 +6,19 @@ export const VisionAnalysisSchema = Type.Object({
   subject: Type.Object({
     type: Type.Union([Type.Literal("product"), Type.Literal("person"), Type.Literal("space"), Type.Literal("food"), Type.Literal("unknown")]),
     description: Type.String()
-  }),
+  }, { additionalProperties: false }),
   composition: Type.Object({
     framing: Type.String(),
-    angle: Type.Optional(Type.String()),
+    angle: Type.String(),
     background: Type.String(),
     lighting: Type.String()
-  }),
+  }, { additionalProperties: false }),
   palette: Type.Object({
     dominantColors: Type.Array(Type.String()),
     temperature: Type.Union([Type.Literal("warm"), Type.Literal("neutral"), Type.Literal("cool"), Type.Literal("unknown")]),
     saturation: Type.String(),
     contrast: Type.String()
-  }),
+  }, { additionalProperties: false }),
   sensitiveElements: Type.Object({
     personVisible: Type.Boolean(),
     priceVisible: Type.Boolean(),
@@ -26,19 +26,19 @@ export const VisionAnalysisSchema = Type.Object({
     promotionVisible: Type.Boolean(),
     textVisible: Type.Boolean(),
     notes: Type.Array(Type.String())
-  }),
+  }, { additionalProperties: false }),
   quality: Type.Object({
     sharpness: Type.String(),
     exposure: Type.String(),
     noise: Type.String()
-  }),
+  }, { additionalProperties: false }),
   mood: Type.Object({
     temperature: Type.String(),
     keywords: Type.Array(Type.String()),
     description: Type.String()
-  }),
+  }, { additionalProperties: false }),
   summary: Type.String()
-});
+}, { additionalProperties: false });
 
 export const ModelProfileSchema = Type.Object({
   id: Type.String(),
