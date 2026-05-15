@@ -30,6 +30,7 @@ import {
   BillingAccount,
   BillingProvider,
   BillingProviderEvent,
+  CaptionResult,
   CommercialPlan
 } from "@fbmaniaco/shared";
 import {
@@ -2238,7 +2239,34 @@ export class SupabaseDataStoreCore {
     return { batch: toBatch(batchResult.rows[0]), variants: variants.rows.map(toVariant) };
   }
 
-  async completeGenerateVariant(input: { jobId: string; variantId: string }): ReturnType<DataStore["completeGenerateVariant"]> {
+  async getVariantCaptionContext(
+    input: Parameters<DataStore["getVariantCaptionContext"]>[0]
+  ): ReturnType<DataStore["getVariantCaptionContext"]> {
+    const variant = await this.requireVariant(input.workspaceId, input.businessId, input.batchId, input.variantId);
+    const photoResult = await this.pool.query(
+      "select * from public.photos where id = $1 and workspace_id = $2 and business_id = $3 and batch_id = $4",
+      [variant.photoId, input.workspaceId, input.businessId, input.batchId]
+    );
+    const photo = photoResult.rows[0] ? toPhoto(photoResult.rows[0]) : null;
+    if (!photo?.visionAnalysis) return null;
+    const business = await this.requireBusiness(input.workspaceId, input.businessId);
+    const pageResult = business.facebookPageId
+      ? await this.pool.query("select * from public.facebook_pages where id = $1 and workspace_id = $2", [
+          business.facebookPageId,
+          input.workspaceId
+        ])
+      : null;
+    return {
+      variant,
+      photo: photo as Photo & { visionAnalysis: VisionAnalysis },
+      business,
+      page: pageResult?.rows[0] ? toMetaPage(pageResult.rows[0]) : null,
+      style: this.assignStyle(variant.variantIndex),
+      promptVersion: "caption-page-context-v1"
+    };
+  }
+
+  async completeGenerateVariant(input: Parameters<DataStore["completeGenerateVariant"]>[0]): ReturnType<DataStore["completeGenerateVariant"]> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -2291,14 +2319,25 @@ export class SupabaseDataStoreCore {
         blockingReasons: [],
         requiresHumanReview: false
       };
-      const caption = this.captionForVariant(photo.fileName ?? "foto", current.variantIndex, style.styleName);
-      const captionResult = {
-        schemaVersion: "caption.v1" as const,
-        promptVersion: "caption-v1",
-        caption,
-        seoTermsUsed: ["Facebook", "negocio local"],
-        warnings: []
-      };
+      const businessResult = await client.query(
+        `select b.*, fp.page_name, fp.category
+         from public.businesses b
+         left join public.facebook_pages fp on fp.id = b.facebook_page_id and fp.workspace_id = b.workspace_id
+         where b.workspace_id = $1 and b.id = $2`,
+        [current.workspaceId, current.businessId]
+      );
+      const businessRow = businessResult.rows[0];
+      const fallbackCaptionResult = this.captionForVariant({
+        fileName: photo.fileName ?? "foto",
+        variantIndex: current.variantIndex,
+        styleName: style.styleName,
+        businessName: businessRow?.name ?? "tu negocio",
+        pageName: businessRow?.page_name ?? businessRow?.name ?? "tu pagina",
+        category: businessRow?.category ?? "Facebook Page",
+        visionAnalysis: photo.visionAnalysis as VisionAnalysis
+      });
+      const captionResult = input.captionResult ?? fallbackCaptionResult;
+      const caption = captionResult.caption;
       const updated = await client.query(
         `update public.variants
          set style_id = $2, assigned_style = $3::jsonb, generation_plan = $4::jsonb, quality_check = $5::jsonb,
@@ -2306,6 +2345,7 @@ export class SupabaseDataStoreCore {
              prompt_template_id = 'photo-variant-generation', prompt_version = $7,
              quality_check_id = $8, quality_status = $9, quality_score = $10,
              quality_warnings = $11::jsonb, generated_asset_id = $12, caption = $13,
+             ai_run_id = coalesce($14, ai_run_id),
              status = 'generada', updated_at = now()
          where id = $1 returning *`,
         [
@@ -2321,7 +2361,8 @@ export class SupabaseDataStoreCore {
           quality.score,
           JSON.stringify(quality.warnings),
           photo.originalAssetId,
-          caption
+          caption,
+          input.captionAiRunId ?? null
         ]
       );
       await client.query(
@@ -3295,14 +3336,44 @@ export class SupabaseDataStoreCore {
     };
   }
 
-  private captionForVariant(fileName: string, variantIndex: number, styleName: string) {
-    const openings = [
-      "Una opcion fresca para mostrar lo mejor de tu negocio en Facebook.",
-      "Lista para compartir: una imagen clara, cuidada y pensada para atraer miradas locales.",
-      "Un post sencillo y directo para que tus clientes recuerden lo que ofreces hoy."
+  private captionForVariant(input: {
+    fileName: string;
+    variantIndex: number;
+    styleName: string;
+    businessName: string;
+    pageName: string;
+    category: string;
+    visionAnalysis?: VisionAnalysis | null;
+  }): CaptionResult {
+    const subject = input.visionAnalysis?.subject.description || input.visionAnalysis?.summary || input.fileName;
+    const keywords = input.visionAnalysis?.mood.keywords.slice(0, 3).filter(Boolean) ?? [];
+    const cleanTag = (value: string) =>
+      value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .slice(0, 32);
+    const pageTag = cleanTag(input.pageName);
+    const categoryTag = cleanTag(input.category);
+    const endings = [
+      "Cuentanos que te parece.",
+      "Guardalo para tenerlo a la mano.",
+      "Escribenos si quieres saber mas."
     ];
-    const opening = openings[(variantIndex - 1) % openings.length];
-    return `${opening}\n\nFoto base: ${fileName}. Estilo: ${styleName}.\n\n#NegocioLocal #Facebook`;
+    const ending = endings[(input.variantIndex - 1) % endings.length];
+    const hashtags = [pageTag ? `#${pageTag}` : null, categoryTag ? `#${categoryTag}` : null]
+      .filter(Boolean)
+      .join(" ");
+    return {
+      schemaVersion: "caption.v1",
+      promptVersion: "caption-page-context-v1",
+      caption:
+        `${input.pageName}: ${subject}.\n\n` +
+        `Una publicacion pensada para ${input.category}, con estilo ${input.styleName}. ${ending}\n\n` +
+        `${hashtags || "#NegocioLocal"}`,
+      seoTermsUsed: [input.pageName, input.businessName, input.category, ...keywords].filter(Boolean),
+      warnings: ["caption_generado_con_contexto_de_pagina", "no_inventa_precios_ni_promociones"]
+    };
   }
 
   private variantNotFound(): never {

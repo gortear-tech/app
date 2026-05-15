@@ -1,6 +1,7 @@
 import {
   Business,
   BusinessAutonomySettings,
+  CaptionResult,
   AutonomyEvaluation,
   AiEvaluation,
   BillingAccount,
@@ -23,6 +24,7 @@ import {
   UploadIntent,
   User,
   Variant,
+  AssignedStyle,
   VisionAnalysis,
   WeeklyReport,
   Workspace,
@@ -241,6 +243,15 @@ export type WorkerHeartbeat = {
   status: "alive" | "stopping";
   lastBeatAt: string;
   metadata: Record<string, unknown>;
+};
+
+export type VariantCaptionContext = {
+  variant: Variant;
+  photo: Photo & { visionAnalysis: VisionAnalysis };
+  business: Business;
+  page: MetaPage | null;
+  style: AssignedStyle;
+  promptVersion: string;
 };
 
 export type DbReadiness = {
@@ -463,7 +474,13 @@ export type DataStore = {
     requestId: string;
   }): Promise<{ job: StoredJob; created: number; available: number; variants: Variant[] }>;
   completeGenerateBatch(input: { jobId: string; batchId: string }): Promise<{ batch: BatchSummary; variants: Variant[] }>;
-  completeGenerateVariant(input: { jobId: string; variantId: string }): Promise<Variant>;
+  getVariantCaptionContext(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    variantId: string;
+  }): Promise<VariantCaptionContext | null>;
+  completeGenerateVariant(input: { jobId: string; variantId: string; captionResult?: CaptionResult; captionAiRunId?: string }): Promise<Variant>;
   confirmCalendar(input: {
     workspaceId: string;
     businessId: string;

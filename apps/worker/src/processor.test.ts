@@ -142,6 +142,8 @@ describe("worker processor", () => {
     expect(secondVariantJob.job?.type).toBe("generate_variant");
     expect(variants).toHaveLength(2);
     expect(variants.every((variant) => variant.status === "generada" && Boolean(variant.caption))).toBe(true);
+    expect(variants.every((variant) => variant.caption?.includes("FBmaniaco Demo"))).toBe(true);
+    expect(variants.every((variant) => !variant.caption?.includes("Pagina sin permiso completo"))).toBe(true);
     expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(2);
 
     await store.approveVariant({

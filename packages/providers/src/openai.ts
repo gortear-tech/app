@@ -1,4 +1,4 @@
-import { VisionAnalysis, VisionAnalysisSchema } from "@fbmaniaco/shared";
+import { CaptionResult, VisionAnalysis, VisionAnalysisSchema } from "@fbmaniaco/shared";
 
 export type OpenAiMode = "mock" | "responses";
 
@@ -23,16 +23,56 @@ export type VisionAnalysisProvider = {
   analyze(input: VisionInput): Promise<VisionProviderResult>;
 };
 
+export type CaptionInput = {
+  pageName: string;
+  businessName: string;
+  category?: string | null;
+  styleName: string;
+  variantIndex: number;
+  fileName?: string | null;
+  visionAnalysis: VisionAnalysis;
+  requestId: string;
+  operationKey: string;
+  promptVersion: string;
+};
+
+export type CaptionProviderResult = {
+  result: CaptionResult;
+  responseId: string | null;
+  model: string;
+  usage: Record<string, unknown> | null;
+  latencyMs: number;
+};
+
+export type CaptionGenerationProvider = {
+  mode: OpenAiMode;
+  generate(input: CaptionInput): Promise<CaptionProviderResult>;
+};
+
 export type OpenAiProviderConfig = {
   apiKey?: string;
   baseUrl?: string;
   visionModel?: string;
+  captionModel?: string;
   timeoutMs?: number;
 };
 
 const defaultVisionModel = "gpt-5.5";
 const defaultPromptVersion = "vision-analysis-v1";
+const defaultCaptionPromptVersion = "caption-page-context-v1";
 const supportsReasoningEffort = (model: string) => /^(gpt-5|o[1-9]|o\d)/i.test(model);
+const captionResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "promptVersion", "caption", "seoTermsUsed", "warnings"],
+  properties: {
+    schemaVersion: { type: "string", enum: ["caption.v1"] },
+    promptVersion: { type: "string" },
+    caption: { type: "string", minLength: 1, maxLength: 2200 },
+    seoTermsUsed: { type: "array", items: { type: "string" } },
+    warnings: { type: "array", items: { type: "string" } }
+  }
+};
 
 const mockAnalysis = (promptVersion = defaultPromptVersion): VisionAnalysis => ({
   schemaVersion: "vision_analysis.v1",
@@ -86,6 +126,36 @@ const extractOutputText = (response: unknown): string => {
   throw new Error("OpenAI response did not include output text");
 };
 
+const cleanHashtag = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 32);
+
+const fallbackCaption = (input: CaptionInput): CaptionResult => {
+  const pageName = input.pageName.trim() || input.businessName.trim() || "tu pagina";
+  const category = input.category?.trim() || "negocio local";
+  const subject = input.visionAnalysis.subject.description || input.visionAnalysis.summary || "esta imagen";
+  const moodKeywords = input.visionAnalysis.mood.keywords.slice(0, 3).filter(Boolean);
+  const mood = moodKeywords.length > 0 ? ` Con un tono ${moodKeywords.join(", ")}.` : "";
+  const localTag = cleanHashtag(pageName);
+  const categoryTag = cleanHashtag(category);
+  const hashtagLine = [localTag ? `#${localTag}` : null, categoryTag ? `#${categoryTag}` : null]
+    .filter(Boolean)
+    .join(" ");
+  return {
+    schemaVersion: "caption.v1",
+    promptVersion: input.promptVersion || defaultCaptionPromptVersion,
+    caption:
+      `${pageName}: ${subject}.\n\n` +
+      `Una publicacion pensada para ${category}, con estilo ${input.styleName}.${mood}\n\n` +
+      `${hashtagLine || "#NegocioLocal"}`,
+    seoTermsUsed: [pageName, category, ...moodKeywords].filter(Boolean),
+    warnings: ["caption_generado_con_contexto_de_pagina", "no_inventa_precios_ni_promociones"]
+  };
+};
+
 const isVisionAnalysis = (value: unknown): value is VisionAnalysis => {
   const item = value as Partial<VisionAnalysis> | null;
   return Boolean(
@@ -99,6 +169,20 @@ const isVisionAnalysis = (value: unknown): value is VisionAnalysis => {
       item.quality &&
       item.mood &&
       typeof item.summary === "string"
+  );
+};
+
+const isCaptionResult = (value: unknown): value is CaptionResult => {
+  const item = value as Partial<CaptionResult> | null;
+  return Boolean(
+    item &&
+      item.schemaVersion === "caption.v1" &&
+      typeof item.promptVersion === "string" &&
+      typeof item.caption === "string" &&
+      item.caption.length > 0 &&
+      item.caption.length <= 2200 &&
+      Array.isArray(item.seoTermsUsed) &&
+      Array.isArray(item.warnings)
   );
 };
 
@@ -190,6 +274,122 @@ export const createVisionAnalysisProvider = (config: OpenAiProviderConfig): Visi
           responseId: (json as { id?: string }).id ?? null,
           model,
           usage: ((json as { usage?: Record<string, unknown> }).usage ?? null),
+          latencyMs: Date.now() - started
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  };
+};
+
+export const createCaptionGenerationProvider = (config: OpenAiProviderConfig): CaptionGenerationProvider => {
+  if (!config.apiKey) {
+    return {
+      mode: "mock",
+      generate: async (input) => ({
+        result: fallbackCaption(input),
+        responseId: null,
+        model: "mock-caption",
+        usage: null,
+        latencyMs: 0
+      })
+    };
+  }
+
+  const baseUrl = config.baseUrl ?? "https://api.openai.com/v1";
+  const model = config.captionModel ?? config.visionModel ?? defaultVisionModel;
+  const timeoutMs = config.timeoutMs ?? 30_000;
+
+  return {
+    mode: "responses",
+    generate: async (input) => {
+      const started = Date.now();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const payload = {
+          model,
+          prompt_cache_key: `fbmaniaco:${input.promptVersion}`,
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text:
+                    "Eres especialista en copy para paginas de Facebook de negocios locales. " +
+                    "Genera un caption en espanol de Mexico para UNA sola pagina usando solo el contexto recibido. " +
+                    "No uses informacion de otras paginas, no inventes precios, promociones, disponibilidad, ubicacion ni claims no observables. " +
+                    "Debe sonar natural, breve, accionable y listo para revision humana."
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: JSON.stringify({
+                    promptVersion: input.promptVersion,
+                    operationKey: input.operationKey,
+                    page: {
+                      name: input.pageName,
+                      businessName: input.businessName,
+                      category: input.category ?? "Facebook Page"
+                    },
+                    creative: {
+                      styleName: input.styleName,
+                      variantIndex: input.variantIndex,
+                      fileName: input.fileName ?? null
+                    },
+                    imageAnalysis: input.visionAnalysis,
+                    outputRules: [
+                      "caption maximo 650 caracteres salvo que la imagen necesite contexto",
+                      "incluye 1 llamada suave a interactuar o visitar la pagina cuando sea natural",
+                      "usa 1 a 4 hashtags relevantes derivados de la pagina o categoria",
+                      "no menciones que fue hecho con IA"
+                    ]
+                  })
+                }
+              ]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "caption_result",
+              strict: true,
+              schema: captionResultSchema
+            }
+          },
+          ...(supportsReasoningEffort(model) ? { reasoning: { effort: "low" } } : {})
+        };
+
+        const response = await fetch(`${baseUrl}/responses`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            authorization: `Bearer ${config.apiKey}`,
+            "content-type": "application/json",
+            "x-request-id": input.requestId
+          },
+          body: JSON.stringify(payload)
+        });
+        const json = (await response.json()) as unknown;
+        if (!response.ok) {
+          const message = (json as { error?: { message?: string } }).error?.message ?? "OpenAI caption request failed";
+          throw new Error(message);
+        }
+        const parsed = JSON.parse(extractOutputText(json)) as unknown;
+        if (!isCaptionResult(parsed)) {
+          throw new Error("OpenAI caption output did not match schema");
+        }
+        return {
+          result: parsed,
+          responseId: (json as { id?: string }).id ?? null,
+          model,
+          usage: (json as { usage?: Record<string, unknown> }).usage ?? null,
           latencyMs: Date.now() - started
         };
       } finally {

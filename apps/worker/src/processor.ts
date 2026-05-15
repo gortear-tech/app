@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { DataStore, StoredJob } from "@fbmaniaco/api/dist/db/index.js";
-import { createVisionAnalysisProvider, VisionAnalysisProvider } from "@fbmaniaco/providers";
+import {
+  CaptionGenerationProvider,
+  createCaptionGenerationProvider,
+  createVisionAnalysisProvider,
+  VisionAnalysisProvider
+} from "@fbmaniaco/providers";
 import { createClient } from "@supabase/supabase-js";
 
 export type WorkerResult = {
@@ -32,6 +37,7 @@ export const processOneJob = async (input: {
   store: DataStore;
   workerId: string;
   visionProvider?: VisionAnalysisProvider;
+  captionProvider?: CaptionGenerationProvider;
 }): Promise<WorkerResult> => {
   const providerConfig: Parameters<typeof createVisionAnalysisProvider>[0] = {
     timeoutMs: Number(process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000")
@@ -39,7 +45,9 @@ export const processOneJob = async (input: {
   if (process.env.OPENAI_API_KEY) providerConfig.apiKey = process.env.OPENAI_API_KEY;
   if (process.env.OPENAI_BASE_URL) providerConfig.baseUrl = process.env.OPENAI_BASE_URL;
   if (process.env.OPENAI_VISION_MODEL) providerConfig.visionModel = process.env.OPENAI_VISION_MODEL;
+  if (process.env.OPENAI_CAPTION_MODEL) providerConfig.captionModel = process.env.OPENAI_CAPTION_MODEL;
   const visionProvider = input.visionProvider ?? createVisionAnalysisProvider(providerConfig);
+  const captionProvider = input.captionProvider ?? createCaptionGenerationProvider(providerConfig);
   const job = await input.store.claimDueJob(input.workerId);
   if (!job) return { processed: false };
 
@@ -155,7 +163,102 @@ export const processOneJob = async (input: {
           operation: "generate_variant",
           status: "started"
         });
-        const variant = await input.store.completeGenerateVariant({ jobId: job.id, variantId: job.variantId });
+        let captionAiRunId: string | undefined;
+        const context = job.businessId && job.batchId
+          ? await input.store.getVariantCaptionContext({
+              workspaceId: job.workspaceId,
+              businessId: job.businessId,
+              batchId: job.batchId,
+              variantId: job.variantId
+            })
+          : null;
+        const captionOperationKey = `openai_caption:${job.variantId}`;
+        const caption = context?.photo.visionAnalysis
+          ? await (async () => {
+              await input.store.upsertExternalOperation({
+                operationKey: captionOperationKey,
+                workspaceId: job.workspaceId,
+                jobId: job.id,
+                provider: captionProvider.mode === "responses" ? "openai" : "mock",
+                operation: "generate_caption",
+                status: "started"
+              });
+              try {
+                return await captionProvider.generate({
+                  pageName: context.page?.pageName ?? context.business.name,
+                  businessName: context.business.name,
+                  category: context.page?.category ?? String(context.business.metadata.category ?? "Facebook Page"),
+                  styleName: context.style.styleName,
+                  variantIndex: context.variant.variantIndex,
+                  fileName: context.photo.fileName ?? null,
+                  visionAnalysis: context.photo.visionAnalysis,
+                  requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
+                  operationKey: captionOperationKey,
+                  promptVersion: context.promptVersion
+                });
+              } catch (error) {
+                await input.store.upsertExternalOperation({
+                  operationKey: captionOperationKey,
+                  workspaceId: job.workspaceId,
+                  jobId: job.id,
+                  provider: captionProvider.mode === "responses" ? "openai" : "mock",
+                  operation: "generate_caption",
+                  status: "failed"
+                });
+                throw error;
+              }
+            })()
+          : null;
+        if (caption && context) {
+          const inputHash = createHash("sha256")
+            .update(
+              JSON.stringify({
+                businessId: context.business.id,
+                pageId: context.page?.id ?? null,
+                photoId: context.photo.id,
+                variantId: context.variant.id,
+                promptVersion: context.promptVersion
+              })
+            )
+            .digest("hex");
+          const outputHash = createHash("sha256").update(JSON.stringify(caption.result)).digest("hex");
+          const aiRunInput: Parameters<DataStore["recordAiRun"]>[0] = {
+            workspaceId: job.workspaceId,
+            businessId: context.business.id,
+            jobId: job.id,
+            operationKey: captionOperationKey,
+            provider: captionProvider.mode === "responses" ? "openai" : "mock",
+            model: caption.model,
+            modelProfileId: "caption-default-v1",
+            promptTemplateId: "page-caption-generation",
+            promptVersion: caption.result.promptVersion,
+            schemaVersion: caption.result.schemaVersion,
+            inputHash,
+            outputHash,
+            latencyMs: caption.latencyMs,
+            status: "succeeded"
+          };
+          if (caption.responseId !== null) aiRunInput.responseId = caption.responseId;
+          if (caption.usage !== null) aiRunInput.usage = caption.usage;
+          if (typeof job.payload.requestId === "string") aiRunInput.requestId = job.payload.requestId;
+          const aiRun = await input.store.recordAiRun(aiRunInput);
+          captionAiRunId = aiRun.id;
+          await input.store.upsertExternalOperation({
+            operationKey: captionOperationKey,
+            workspaceId: job.workspaceId,
+            jobId: job.id,
+            provider: captionProvider.mode === "responses" ? "openai" : "mock",
+            operation: "generate_caption",
+            status: "succeeded"
+          });
+        }
+        const completeInput: Parameters<DataStore["completeGenerateVariant"]>[0] = {
+          jobId: job.id,
+          variantId: job.variantId
+        };
+        if (caption) completeInput.captionResult = caption.result;
+        if (captionAiRunId) completeInput.captionAiRunId = captionAiRunId;
+        const variant = await input.store.completeGenerateVariant(completeInput);
         const completed = await input.store.completeJob({
           jobId: job.id,
           result: {

@@ -14,6 +14,7 @@ import {
   AssignedStyle,
   BatchSummary,
   Business,
+  CaptionResult,
   CommercialPlan,
   FacebookTokenStatus,
   forbiddenError,
@@ -1965,7 +1966,32 @@ export class LocalDataStore implements DataStore {
     return { batch, variants };
   }
 
-  async completeGenerateVariant(input: { jobId: string; variantId: string }): Promise<Variant> {
+  async getVariantCaptionContext(input: Parameters<DataStore["getVariantCaptionContext"]>[0]): ReturnType<DataStore["getVariantCaptionContext"]> {
+    const state = await this.load();
+    const variant = this.requireVariant(state, input.workspaceId, input.businessId, input.batchId, input.variantId);
+    const photo = state.photos.find(
+      (item) =>
+        item.id === variant.photoId &&
+        item.workspaceId === input.workspaceId &&
+        item.businessId === input.businessId &&
+        item.batchId === input.batchId
+    );
+    if (!photo?.visionAnalysis) return null;
+    const business = this.requireBusiness(state, input.workspaceId, input.businessId);
+    const page = business.facebookPageId
+      ? state.pages.find((item) => item.id === business.facebookPageId && item.workspaceId === input.workspaceId)
+      : null;
+    return {
+      variant,
+      photo: photo as Photo & { visionAnalysis: VisionAnalysis },
+      business,
+      page: page ? publicMetaPage(page) : null,
+      style: this.assignStyle(variant.variantIndex),
+      promptVersion: "caption-page-context-v1"
+    };
+  }
+
+  async completeGenerateVariant(input: Parameters<DataStore["completeGenerateVariant"]>[0]): Promise<Variant> {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const variant = this.requireVariant(state, job.workspaceId, job.businessId, job.batchId, input.variantId);
@@ -2014,14 +2040,21 @@ export class LocalDataStore implements DataStore {
       blockingReasons: [],
       requiresHumanReview: false
     };
-    const caption = this.captionForVariant(photo.fileName ?? "foto", variant.variantIndex, style.styleName);
-    const captionResult = {
-      schemaVersion: "caption.v1" as const,
-      promptVersion: "caption-v1",
-      caption,
-      seoTermsUsed: ["Facebook", "negocio local"],
-      warnings: []
-    };
+    const business = state.businesses.find((item) => item.id === variant.businessId && item.workspaceId === variant.workspaceId);
+    const page = business?.facebookPageId
+      ? state.pages.find((item) => item.id === business.facebookPageId && item.workspaceId === variant.workspaceId)
+      : null;
+    const fallbackCaptionResult = this.captionForVariant({
+      fileName: photo.fileName ?? "foto",
+      variantIndex: variant.variantIndex,
+      styleName: style.styleName,
+      businessName: business?.name ?? "tu negocio",
+      pageName: page?.pageName ?? business?.name ?? "tu pagina",
+      category: page?.category ?? String(business?.metadata.category ?? "Facebook Page"),
+      visionAnalysis: photo.visionAnalysis as VisionAnalysis
+    });
+    const captionResult = input.captionResult ?? fallbackCaptionResult;
+    const caption = captionResult.caption;
     const asset: MediaAsset = {
       id: randomUUID(),
       workspaceId: variant.workspaceId,
@@ -2046,6 +2079,7 @@ export class LocalDataStore implements DataStore {
     variant.modelProfileId = "image-generation-local-v1";
     variant.promptTemplateId = "photo-variant-generation";
     variant.promptVersion = promptVersion;
+    if (input.captionAiRunId !== undefined) variant.aiRunId = input.captionAiRunId;
     variant.qualityCheckId = `quality:${variant.id}`;
     variant.qualityStatus = quality.status;
     variant.qualityScore = quality.score;
@@ -3236,14 +3270,44 @@ export class LocalDataStore implements DataStore {
     return selected;
   }
 
-  private captionForVariant(fileName: string, variantIndex: number, styleName: string) {
-    const openings = [
-      "Una opcion fresca para mostrar lo mejor de tu negocio en Facebook.",
-      "Lista para compartir: una imagen clara, cuidada y pensada para atraer miradas locales.",
-      "Un post sencillo y directo para que tus clientes recuerden lo que ofreces hoy."
+  private captionForVariant(input: {
+    fileName: string;
+    variantIndex: number;
+    styleName: string;
+    businessName: string;
+    pageName: string;
+    category: string;
+    visionAnalysis?: VisionAnalysis | null;
+  }): CaptionResult {
+    const subject = input.visionAnalysis?.subject.description || input.visionAnalysis?.summary || input.fileName;
+    const keywords = input.visionAnalysis?.mood.keywords.slice(0, 3).filter(Boolean) ?? [];
+    const cleanTag = (value: string) =>
+      value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .slice(0, 32);
+    const pageTag = cleanTag(input.pageName);
+    const categoryTag = cleanTag(input.category);
+    const endings = [
+      "Cuentanos que te parece.",
+      "Guardalo para tenerlo a la mano.",
+      "Escribenos si quieres saber mas."
     ];
-    const opening = openings[(variantIndex - 1) % openings.length];
-    return `${opening}\n\nFoto base: ${fileName}. Estilo: ${styleName}.\n\n#NegocioLocal #Facebook`;
+    const ending = endings[(input.variantIndex - 1) % endings.length];
+    const hashtags = [pageTag ? `#${pageTag}` : null, categoryTag ? `#${categoryTag}` : null]
+      .filter(Boolean)
+      .join(" ");
+    return {
+      schemaVersion: "caption.v1",
+      promptVersion: "caption-page-context-v1",
+      caption:
+        `${input.pageName}: ${subject}.\n\n` +
+        `Una publicacion pensada para ${input.category}, con estilo ${input.styleName}. ${ending}\n\n` +
+        `${hashtags || "#NegocioLocal"}`,
+      seoTermsUsed: [input.pageName, input.businessName, input.category, ...keywords].filter(Boolean),
+      warnings: ["caption_generado_con_contexto_de_pagina", "no_inventa_precios_ni_promociones"]
+    };
   }
 
   private assertUploadShape(contentType: string, fileSize: number, originalFileName?: string) {
