@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
-import type { MetaPage } from "@fbmaniaco/shared";
+import type { BatchDetail, MetaPage } from "@fbmaniaco/shared";
 import { Ionicons } from "@expo/vector-icons";
+import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
@@ -63,6 +64,7 @@ type IconName = ComponentProps<typeof Ionicons>["name"];
 const MAX_PHOTOS_PER_PICK = 10;
 const IMAGE_TARGET_WIDTH = 1800;
 const IMAGE_RECOMPRESS_THRESHOLD = 7 * 1024 * 1024;
+const WORK_POLL_MS = 4000;
 
 const mimeFromFileName = (fileName?: string | null) => {
   const lower = fileName?.toLowerCase() ?? "";
@@ -78,6 +80,22 @@ const uploadNameForAsset = (asset: ImagePicker.ImagePickerAsset, index: number, 
   return /\.[a-z0-9]+$/i.test(baseName) ? baseName.replace(/\.[a-z0-9]+$/i, ".jpg") : `${baseName}.jpg`;
 };
 
+const localFileSize = async (uri: string) => {
+  try {
+    const info = await FileSystem.getInfoAsync(uri, { size: true });
+    return info.exists ? info.size : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const hasWorkInProgress = (detail: BatchDetail | undefined) =>
+  Boolean(
+    detail?.photos.some((photo) => ["uploading", "uploaded", "analyzing"].includes(photo.status)) ||
+      detail?.variants.some((variant) => ["pendiente", "generando", "queued", "generating"].includes(variant.status)) ||
+      detail?.jobs.some((job) => ["queued", "running"].includes(job.status))
+  );
+
 const preparePhotoForUpload = async (asset: ImagePicker.ImagePickerAsset, index: number): Promise<PhotoUploadFile> => {
   const sourceMime = asset.mimeType ?? mimeFromFileName(asset.fileName) ?? "image/jpeg";
   const largeFile = (asset.fileSize ?? 0) > IMAGE_RECOMPRESS_THRESHOLD;
@@ -90,20 +108,23 @@ const preparePhotoForUpload = async (asset: ImagePicker.ImagePickerAsset, index:
       compress: 0.82,
       format: ImageManipulator.SaveFormat.JPEG
     });
+    const fileSize = await localFileSize(image.uri);
     return {
       uri: image.uri,
       name: uploadNameForAsset(asset, index, true),
       contentType: "image/jpeg",
+      ...(fileSize === undefined ? {} : { fileSize }),
       width: image.width,
       height: image.height
     };
   }
 
+  const fileSize = asset.fileSize ?? (await localFileSize(asset.uri));
   return {
     uri: asset.uri,
     name: uploadNameForAsset(asset, index),
     contentType: sourceMime,
-    ...(asset.fileSize === undefined ? {} : { fileSize: asset.fileSize }),
+    ...(fileSize === undefined ? {} : { fileSize }),
     ...(asset.width === undefined ? {} : { width: asset.width }),
     ...(asset.height === undefined ? {} : { height: asset.height })
   };
@@ -152,7 +173,8 @@ function BootScreen() {
   const batchDetail = useQuery({
     queryKey: ["batch-detail", selectedBusinessId, activeBatch.data?.id],
     queryFn: async () => getBatchDetail(token, selectedBusinessId ?? "", activeBatch.data?.id ?? ""),
-    enabled: Boolean(token && selectedBusinessId && activeBatch.data?.id)
+    enabled: Boolean(token && selectedBusinessId && activeBatch.data?.id),
+    refetchInterval: (query) => (hasWorkInProgress(query.state.data as BatchDetail | undefined) ? WORK_POLL_MS : false)
   });
   const scheduledPosts = useQuery({
     queryKey: ["scheduled-posts", selectedBusinessId],

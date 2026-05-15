@@ -17,6 +17,7 @@
     "@fbmaniaco/shared": "workspace:*",
     "@tanstack/react-query": "^5.62.8",
     "expo": "^52.0.23",
+    "expo-file-system": "~18.0.12",
     "expo-image-manipulator": "~13.0.6",
     "expo-image-picker": "~16.0.6",
     "expo-secure-store": "~14.0.1",

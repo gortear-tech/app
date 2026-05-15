@@ -178,6 +178,7 @@ export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus
 const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const transientUploadStatus = (status: number) => status === 408 || status === 429 || status >= 500;
+const duplicateUploadResponse = (status: number, body: string) => status === 409 || /already exists|resource already exists|duplicate/i.test(body);
 
 const uploadToSignedStorage = async (input: {
   uploadUrl: string;
@@ -208,9 +209,10 @@ const uploadToSignedStorage = async (input: {
         },
         body: uploadBody
       });
-      if (response.ok || response.status === 409) return;
+      if (response.ok) return;
       lastStatus = response.status;
       lastResponseText = await response.text().catch(() => "");
+      if (duplicateUploadResponse(response.status, lastResponseText)) return;
       if (!transientUploadStatus(response.status) || attempt === retryDelays.length - 1) break;
     } catch (error) {
       lastResponseText = error instanceof Error ? error.message : "network_error";
