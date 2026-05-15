@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import type { MetaPage } from "@fbmaniaco/shared";
 import { Ionicons } from "@expo/vector-icons";
+import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
 import * as WebBrowser from "expo-web-browser";
@@ -52,18 +53,69 @@ import {
   updateVariantCaption,
   uploadPhoto
 } from "./src/api/client";
+import type { PhotoUploadFile } from "./src/api/client";
 import { getMobileConfig } from "./src/config";
 
 const queryClient = new QueryClient();
 WebBrowser.maybeCompleteAuthSession();
 type TabKey = "today" | "create" | "calendar" | "business";
 type IconName = ComponentProps<typeof Ionicons>["name"];
+const MAX_PHOTOS_PER_PICK = 10;
+const IMAGE_TARGET_WIDTH = 1800;
+const IMAGE_RECOMPRESS_THRESHOLD = 7 * 1024 * 1024;
+
+const mimeFromFileName = (fileName?: string | null) => {
+  const lower = fileName?.toLowerCase() ?? "";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  return null;
+};
+
+const uploadNameForAsset = (asset: ImagePicker.ImagePickerAsset, index: number, forceJpeg = false) => {
+  const baseName = asset.fileName?.trim() || `foto-${Date.now()}-${index + 1}.jpg`;
+  if (!forceJpeg) return baseName;
+  return /\.[a-z0-9]+$/i.test(baseName) ? baseName.replace(/\.[a-z0-9]+$/i, ".jpg") : `${baseName}.jpg`;
+};
+
+const preparePhotoForUpload = async (asset: ImagePicker.ImagePickerAsset, index: number): Promise<PhotoUploadFile> => {
+  const sourceMime = asset.mimeType ?? mimeFromFileName(asset.fileName) ?? "image/jpeg";
+  const largeFile = (asset.fileSize ?? 0) > IMAGE_RECOMPRESS_THRESHOLD;
+  const wideImage = asset.width ? asset.width > IMAGE_TARGET_WIDTH : false;
+  const unsupportedForUpload = !["image/jpeg", "image/png", "image/webp"].includes(sourceMime);
+
+  if (largeFile || wideImage || unsupportedForUpload) {
+    const actions: ImageManipulator.Action[] = wideImage ? [{ resize: { width: IMAGE_TARGET_WIDTH } }] : [];
+    const image = await ImageManipulator.manipulateAsync(asset.uri, actions, {
+      compress: 0.82,
+      format: ImageManipulator.SaveFormat.JPEG
+    });
+    return {
+      uri: image.uri,
+      name: uploadNameForAsset(asset, index, true),
+      contentType: "image/jpeg",
+      width: image.width,
+      height: image.height
+    };
+  }
+
+  return {
+    uri: asset.uri,
+    name: uploadNameForAsset(asset, index),
+    contentType: sourceMime,
+    ...(asset.fileSize === undefined ? {} : { fileSize: asset.fileSize }),
+    ...(asset.width === undefined ? {} : { width: asset.width }),
+    ...(asset.height === undefined ? {} : { height: asset.height })
+  };
+};
 
 function BootScreen() {
   const config = getMobileConfig();
   const [tab, setTab] = useState<TabKey>("today");
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [metaReturnMessage, setMetaReturnMessage] = useState<string | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
 
@@ -208,30 +260,65 @@ function BootScreen() {
     }
   });
   const startBatch = useMutation({ mutationFn: async () => createBatch(token, selectedBusinessId ?? ""), onSuccess: invalidateWork });
-  const uploadSelectedPhoto = useMutation({
+  const uploadSelectedPhotos = useMutation({
     mutationFn: async () => {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) throw new Error("Necesitamos permiso para elegir fotos.");
       const selection = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         quality: 0.95,
-        allowsMultipleSelection: false
+        allowsMultipleSelection: true,
+        selectionLimit: MAX_PHOTOS_PER_PICK
       });
-      if (selection.canceled || !selection.assets[0]) throw new Error("No se eligio ninguna foto.");
-      const asset = selection.assets[0];
-      const upload = {
-        uri: asset.uri,
-        name: asset.fileName ?? `foto-${Date.now()}.jpg`,
-        contentType: asset.mimeType ?? "image/jpeg",
-        width: asset.width,
-        height: asset.height
-      };
-      return uploadPhoto(token, selectedBusinessId ?? "", activeBatch.data?.id ?? "", {
-        ...upload,
-        ...(asset.fileSize === undefined ? {} : { fileSize: asset.fileSize })
-      });
+      if (selection.canceled || selection.assets.length === 0) return { uploaded: 0, failed: 0, total: 0, errors: [] as string[] };
+
+      const businessId = selectedBusinessId ?? "";
+      if (!businessId) throw new Error("Selecciona una pagina antes de subir fotos.");
+      let batchId = activeBatch.data?.id;
+      if (!batchId) {
+        const batch = await createBatch(token, businessId);
+        batchId = batch.id;
+        queryClient.setQueryData(["active-batch", businessId], batch);
+      }
+
+      const assets = selection.assets.slice(0, MAX_PHOTOS_PER_PICK);
+      const errors: string[] = [];
+      let uploaded = 0;
+      setUploadNotice(null);
+      setUploadProgress({ done: 0, total: assets.length });
+
+      for (const [index, asset] of assets.entries()) {
+        try {
+          const upload = await preparePhotoForUpload(asset, index);
+          await uploadPhoto(token, businessId, batchId, upload);
+          uploaded += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "No pudimos subir esta foto.";
+          errors.push(`${asset.fileName ?? `Foto ${index + 1}`}: ${message}`);
+        } finally {
+          setUploadProgress({ done: index + 1, total: assets.length });
+        }
+      }
+
+      if (uploaded === 0) {
+        throw new Error(errors[0] ?? "No pudimos subir las fotos seleccionadas.");
+      }
+      return { uploaded, failed: errors.length, total: assets.length, errors };
     },
-    onSuccess: invalidateWork
+    onSuccess: async (result) => {
+      if (result.total > 0) {
+        setUploadNotice(
+          result.failed > 0
+            ? `Subimos ${result.uploaded} de ${result.total} fotos. ${result.failed} necesita reintento.`
+            : `Subimos ${result.uploaded} foto${result.uploaded === 1 ? "" : "s"} y ya se estan analizando.`
+        );
+      }
+      setUploadProgress(null);
+      await invalidateWork();
+    },
+    onError: () => {
+      setUploadProgress(null);
+    }
   });
   const generateVariants = useMutation({
     mutationFn: async () => {
@@ -355,7 +442,7 @@ function BootScreen() {
     businessDetail.error ??
     billing.error ??
     startBatch.error ??
-    uploadSelectedPhoto.error ??
+    uploadSelectedPhotos.error ??
     generateVariants.error ??
     saveCaption.error ??
     approve.error ??
@@ -503,9 +590,9 @@ function BootScreen() {
         </Text>
         {activeBatch.data ? (
           <ActionPair
-            primaryLabel={uploadSelectedPhoto.isPending ? "Subiendo..." : "Subir foto"}
-            primaryDisabled={uploadSelectedPhoto.isPending}
-            onPrimary={() => uploadSelectedPhoto.mutate()}
+            primaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir fotos"}
+            primaryDisabled={uploadSelectedPhotos.isPending}
+            onPrimary={() => uploadSelectedPhotos.mutate()}
             primaryIcon="images-outline"
             secondaryLabel={startBatch.isPending ? "Creando..." : "Nuevo lote"}
             secondaryDisabled={startBatch.isPending || !selectedBusinessId}
@@ -514,14 +601,18 @@ function BootScreen() {
           />
         ) : (
           <Button
-            label={startBatch.isPending ? "Creando..." : "Crear lote"}
-            icon="add-circle-outline"
-            disabled={startBatch.isPending || !selectedBusinessId}
-            onPress={() => startBatch.mutate()}
+            label={uploadSelectedPhotos.isPending ? "Preparando..." : "Elegir fotos"}
+            icon="images-outline"
+            disabled={uploadSelectedPhotos.isPending || !selectedBusinessId}
+            onPress={() => uploadSelectedPhotos.mutate()}
           />
         )}
       </Panel>
       <Panel title="Fotos">
+        {uploadProgress ? (
+          <Alert message={`Subiendo fotos ${uploadProgress.done}/${uploadProgress.total}...`} tone="info" />
+        ) : null}
+        {uploadNotice ? <Alert message={uploadNotice} tone="info" /> : null}
         {photos.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube una foto real para preparar la publicacion." /> : null}
         {photos.map((photo) => (
           <View key={photo.id} style={styles.mediaRow}>
@@ -886,10 +977,10 @@ function PageCard({
   );
 }
 
-function Alert({ message, tone }: { message: string; tone: "warning" | "critical" }) {
+function Alert({ message, tone }: { message: string; tone: "warning" | "critical" | "info" }) {
   return (
-    <View style={[styles.alert, tone === "critical" ? styles.alertCritical : styles.alertWarning]}>
-      <Text style={[styles.alertText, tone === "critical" ? styles.alertCriticalText : styles.alertWarningText]}>{message}</Text>
+    <View style={[styles.alert, tone === "critical" ? styles.alertCritical : tone === "info" ? styles.alertInfo : styles.alertWarning]}>
+      <Text style={[styles.alertText, tone === "critical" ? styles.alertCriticalText : tone === "info" ? styles.alertInfoText : styles.alertWarningText]}>{message}</Text>
     </View>
   );
 }
@@ -1310,8 +1401,10 @@ const styles = StyleSheet.create({
   alert: { borderRadius: 8, borderWidth: 1, padding: 12 },
   alertCritical: { borderColor: "#7f1d1d", backgroundColor: "#2a1215" },
   alertWarning: { borderColor: "#854d0e", backgroundColor: "#2b2112" },
+  alertInfo: { borderColor: "#1d4ed8", backgroundColor: "#132033" },
   alertText: { fontSize: 13, fontWeight: "800", lineHeight: 18 },
   alertCriticalText: { color: palette.danger },
+  alertInfoText: { color: "#bfdbfe" },
   alertWarningText: { color: palette.warning },
   tabs: {
     position: "absolute",

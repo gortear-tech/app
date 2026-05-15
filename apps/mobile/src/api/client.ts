@@ -339,10 +339,18 @@ export const uploadPhoto = async (token: string, businessId: string, batchId: st
   } as unknown as Blob);
   const uploadResponse = await fetch(intentJson.upload.uploadUrl, {
     method: intentJson.upload.method,
-    headers: intentJson.upload.headers ?? {},
+    headers: {
+      "x-upsert": "false",
+      ...(intentJson.upload.headers ?? {})
+    },
     body: uploadBody
   });
-  if (!uploadResponse.ok) throw new Error("No pudimos subir la foto al almacenamiento.");
+  if (!uploadResponse.ok) {
+    const detail = await uploadResponse.text().catch(() => "");
+    const detailSuffix = detail ? ` (${uploadResponse.status}: ${detail.slice(0, 140)})` : ` (${uploadResponse.status})`;
+    if (uploadResponse.status === 413) throw new Error("La foto pesa demasiado. Intenta con una imagen mas ligera.");
+    throw new Error(`No pudimos subir la foto al almacenamiento${detailSuffix}`);
+  }
 
   const completeResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/complete-upload`, {
     method: "POST",
