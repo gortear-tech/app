@@ -32,6 +32,7 @@ export type OpenAiProviderConfig = {
 
 const defaultVisionModel = "gpt-5.5";
 const defaultPromptVersion = "vision-analysis-v1";
+const supportsReasoningEffort = (model: string) => /^(gpt-5|o[1-9]|o\d)/i.test(model);
 
 const mockAnalysis = (promptVersion = defaultPromptVersion): VisionAnalysis => ({
   schemaVersion: "vision_analysis.v1",
@@ -126,6 +127,45 @@ export const createVisionAnalysisProvider = (config: OpenAiProviderConfig): Visi
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const payload = {
+          model,
+          prompt_cache_key: `fbmaniaco:${input.promptVersion}`,
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text:
+                    "Analiza la imagen para FBmaniaco. Devuelve solo datos observables y evita inferir claims comerciales, precios o promociones no visibles."
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: `Version de prompt: ${input.promptVersion}. OperationKey: ${input.operationKey}.`
+                },
+                {
+                  type: "input_image",
+                  image_url: input.imageUrl
+                }
+              ]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "vision_analysis",
+              strict: true,
+              schema: VisionAnalysisSchema
+            }
+          },
+          ...(supportsReasoningEffort(model) ? { reasoning: { effort: "low" } } : {})
+        };
+
         const response = await fetch(`${baseUrl}/responses`, {
           method: "POST",
           signal: controller.signal,
@@ -134,44 +174,7 @@ export const createVisionAnalysisProvider = (config: OpenAiProviderConfig): Visi
             "content-type": "application/json",
             "x-request-id": input.requestId
           },
-          body: JSON.stringify({
-            model,
-            prompt_cache_key: `fbmaniaco:${input.promptVersion}`,
-            input: [
-              {
-                role: "system",
-                content: [
-                  {
-                    type: "input_text",
-                    text:
-                      "Analiza la imagen para FBmaniaco. Devuelve solo datos observables y evita inferir claims comerciales, precios o promociones no visibles."
-                  }
-                ]
-              },
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "input_text",
-                    text: `Version de prompt: ${input.promptVersion}. OperationKey: ${input.operationKey}.`
-                  },
-                  {
-                    type: "input_image",
-                    image_url: input.imageUrl
-                  }
-                ]
-              }
-            ],
-            text: {
-              format: {
-                type: "json_schema",
-                name: "vision_analysis",
-                strict: true,
-                schema: VisionAnalysisSchema
-              }
-            },
-            reasoning: { effort: "low" }
-          })
+          body: JSON.stringify(payload)
         });
         const json = (await response.json()) as unknown;
         if (!response.ok) {
