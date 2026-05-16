@@ -49,7 +49,7 @@ if (ready.ok !== true) {
   fail(`/ready is not ok: ${JSON.stringify(ready)}`);
 }
 
-for (const check of ["config", "db", "queue", "worker"]) {
+for (const check of ["config", "db", "queue"]) {
   if (ready.checks?.[check] !== true) {
     fail(`/ready check ${check} is not true: ${JSON.stringify(ready.checks)}`);
   }

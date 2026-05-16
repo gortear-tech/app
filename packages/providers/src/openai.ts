@@ -232,6 +232,12 @@ const imageEditErrorMessage = (status: number, json: unknown) => {
   return message;
 };
 
+const imageFileNameForMime = (mimeType: string) => {
+  if (mimeType === "image/png") return "source-image.png";
+  if (mimeType === "image/webp") return "source-image.webp";
+  return "source-image.jpg";
+};
+
 export const createVisionAnalysisProvider = (config: OpenAiProviderConfig): VisionAnalysisProvider => {
   if (!config.apiKey) {
     return {
@@ -481,7 +487,7 @@ export const createImageEditProvider = (config: OpenAiProviderConfig): ImageEdit
         form.append("prompt", input.prompt);
         form.append("size", input.size ?? "1024x1024");
         form.append("output_format", "jpeg");
-        form.append("image", new Blob([sourceBytes], { type: input.mimeType }), "source-image");
+        form.append("image", new Blob([sourceBytes], { type: input.mimeType }), imageFileNameForMime(input.mimeType));
 
         const response = await fetch(`${baseUrl}/images/edits`, {
           method: "POST",
