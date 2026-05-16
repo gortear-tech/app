@@ -1,6 +1,8 @@
+import { Blob } from "node:buffer";
 import { CaptionResult, VisionAnalysis, VisionAnalysisSchema } from "@fbmaniaco/shared";
 
 export type OpenAiMode = "mock" | "responses";
+export type ImageEditMode = "mock" | "images";
 
 export type VisionInput = {
   imageUrl: string;
@@ -49,15 +51,40 @@ export type CaptionGenerationProvider = {
   generate(input: CaptionInput): Promise<CaptionProviderResult>;
 };
 
+export type ImageEditInput = {
+  imageUrl: string;
+  mimeType: string;
+  prompt: string;
+  requestId: string;
+  operationKey: string;
+  size?: string;
+};
+
+export type ImageEditProviderResult = {
+  imageBytes: Uint8Array;
+  mimeType: string;
+  responseId: string | null;
+  model: string;
+  usage: Record<string, unknown> | null;
+  latencyMs: number;
+};
+
+export type ImageEditProvider = {
+  mode: ImageEditMode;
+  edit(input: ImageEditInput): Promise<ImageEditProviderResult>;
+};
+
 export type OpenAiProviderConfig = {
   apiKey?: string;
   baseUrl?: string;
   visionModel?: string;
   captionModel?: string;
+  imageEditModel?: string;
   timeoutMs?: number;
 };
 
 const defaultVisionModel = "gpt-5.5";
+const defaultImageEditModel = "gpt-image-1";
 const defaultPromptVersion = "vision-analysis-v1";
 const defaultCaptionPromptVersion = "caption-page-context-v1";
 const supportsReasoningEffort = (model: string) => /^(gpt-5|o[1-9]|o\d)/i.test(model);
@@ -184,6 +211,25 @@ const isCaptionResult = (value: unknown): value is CaptionResult => {
       Array.isArray(item.seoTermsUsed) &&
       Array.isArray(item.warnings)
   );
+};
+
+const jsonFromResponse = async (response: Response): Promise<unknown> => {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return { error: { message: text } };
+  }
+};
+
+const imageEditErrorMessage = (status: number, json: unknown) => {
+  const message = (json as { error?: { message?: string } }).error?.message ?? "OpenAI image edit request failed";
+  const accessPattern = /(verify|verification|organization|org|access|permission|not authorized|unauthorized|forbidden)/i;
+  if (status === 401 || status === 403 || accessPattern.test(message)) {
+    return `OpenAI image edit access/organization verification error: ${message}`;
+  }
+  return message;
 };
 
 export const createVisionAnalysisProvider = (config: OpenAiProviderConfig): VisionAnalysisProvider => {
@@ -387,6 +433,76 @@ export const createCaptionGenerationProvider = (config: OpenAiProviderConfig): C
         }
         return {
           result: parsed,
+          responseId: (json as { id?: string }).id ?? null,
+          model,
+          usage: (json as { usage?: Record<string, unknown> }).usage ?? null,
+          latencyMs: Date.now() - started
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  };
+};
+
+export const createImageEditProvider = (config: OpenAiProviderConfig): ImageEditProvider => {
+  if (!config.apiKey) {
+    return {
+      mode: "mock",
+      edit: async (input) => ({
+        imageBytes: Buffer.from(`mock-edited-image:${input.operationKey}`),
+        mimeType: "image/jpeg",
+        responseId: null,
+        model: "mock-image-edit",
+        usage: null,
+        latencyMs: 0
+      })
+    };
+  }
+
+  const baseUrl = config.baseUrl ?? "https://api.openai.com/v1";
+  const model = config.imageEditModel ?? defaultImageEditModel;
+  const timeoutMs = config.timeoutMs ?? 30_000;
+
+  return {
+    mode: "images",
+    edit: async (input) => {
+      const started = Date.now();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const source = await fetch(input.imageUrl, { signal: controller.signal });
+        if (!source.ok) {
+          throw new Error(`Could not fetch source image for edit: ${source.status} ${source.statusText}`);
+        }
+        const sourceBytes = new Uint8Array(await source.arrayBuffer());
+        const form = new FormData();
+        form.append("model", model);
+        form.append("prompt", input.prompt);
+        form.append("size", input.size ?? "1024x1024");
+        form.append("output_format", "jpeg");
+        form.append("image", new Blob([sourceBytes], { type: input.mimeType }), "source-image");
+
+        const response = await fetch(`${baseUrl}/images/edits`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            authorization: `Bearer ${config.apiKey}`,
+            "x-request-id": input.requestId
+          },
+          body: form
+        });
+        const json = await jsonFromResponse(response);
+        if (!response.ok) {
+          throw new Error(imageEditErrorMessage(response.status, json));
+        }
+        const imageBase64 = (json as { data?: Array<{ b64_json?: string }> }).data?.[0]?.b64_json;
+        if (!imageBase64) {
+          throw new Error("OpenAI image edit response did not include b64_json");
+        }
+        return {
+          imageBytes: Buffer.from(imageBase64, "base64"),
+          mimeType: "image/jpeg",
           responseId: (json as { id?: string }).id ?? null,
           model,
           usage: (json as { usage?: Record<string, unknown> }).usage ?? null,

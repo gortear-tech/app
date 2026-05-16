@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { rm } from "node:fs/promises";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { VisionAnalysisProvider } from "@fbmaniaco/providers";
+import { ImageEditProvider, VisionAnalysisProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 const path = join(tmpdir(), `fbmaniaco-worker-${Date.now()}.json`);
@@ -32,6 +32,17 @@ const visionProvider: VisionAnalysisProvider = {
     },
     responseId: "smoke-vision",
     model: "smoke-vision",
+    usage: null,
+    latencyMs: 1
+  })
+};
+const imageEditProvider: ImageEditProvider = {
+  mode: "mock",
+  edit: async (input) => ({
+    imageBytes: Buffer.from(`dummy-edited-image:${input.prompt}:${input.operationKey}`),
+    mimeType: "image/jpeg",
+    responseId: null,
+    model: "mock-image-edit",
     usage: null,
     latencyMs: 1
   })
@@ -88,10 +99,13 @@ await store.requestGenerateBatch({
   requestId: "worker-smoke-generate"
 });
 await processOneJob({ store, workerId: "worker-smoke" });
-const variantResult = await processOneJob({ store, workerId: "worker-smoke" });
+const variantResult = await processOneJob({ store, workerId: "worker-smoke", imageEditProvider });
 const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 if (!variantResult.processed || variants[0]?.status !== "generada" || !variants[0].caption) {
   throw new Error(`worker variant smoke failed: ${JSON.stringify({ variantResult, variants })}`);
+}
+if (!variants[0].generatedAssetId || variants[0].generatedAssetId === detail?.photos[0]?.originalAssetId) {
+  throw new Error(`worker variant reused original asset: ${JSON.stringify({ variant: variants[0], photo: detail?.photos[0] })}`);
 }
 await store.approveVariant({
   workspaceId: workspace.id,

@@ -410,7 +410,16 @@ describe("api bootstrap and tenancy", () => {
     if (!workspaceId) throw new Error("Missing test workspace");
     const variantJob = (await store.listJobs(workspaceId)).find((job) => job.type === "generate_variant");
     if (!variantJob?.variantId) throw new Error("Missing generate_variant job");
-    await store.completeGenerateVariant({ jobId: variantJob.id, variantId: variantJob.variantId });
+    await store.completeGenerateVariant({
+      jobId: variantJob.id,
+      variantId: variantJob.variantId,
+      generatedAsset: {
+        bucket: "business-media",
+        storageKey: `${workspaceId}/${businessId}/${batchId}/generated/${variantJob.variantId}.jpg`,
+        mimeType: "image/jpeg",
+        fileSize: 16
+      }
+    });
 
     const variants = await app.inject({
       method: "GET",

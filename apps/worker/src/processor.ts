@@ -3,7 +3,9 @@ import { DataStore, StoredJob } from "@fbmaniaco/api/dist/db/index.js";
 import {
   CaptionGenerationProvider,
   createCaptionGenerationProvider,
+  createImageEditProvider,
   createVisionAnalysisProvider,
+  ImageEditProvider,
   VisionAnalysisProvider
 } from "@fbmaniaco/providers";
 import { createClient } from "@supabase/supabase-js";
@@ -19,6 +21,11 @@ const envFlag = (name: string, fallback: boolean) => {
   return ["1", "true", "yes"].includes(value.toLowerCase());
 };
 
+const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
+const backgroundPalette = ["Atardecer", "Mármol", "Madera", "Jardín", "Playa", "Estudio", "Nocturno", "Bambú"];
+const backgroundPromptForVariant = (variantIndex: number) =>
+  `Corrige la iluminación y los colores. Cambia el fondo. ${backgroundPalette[(variantIndex - 1) % backgroundPalette.length]}.`;
+
 const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: string; assetId: string | null | undefined }) => {
   if (!input.assetId || !process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) return null;
   const asset = await input.store.getMediaAsset({ assetId: input.assetId });
@@ -33,21 +40,65 @@ const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: strin
   return data.signedUrl;
 };
 
+const generatedVariantStorageKey = (input: { workspaceId: string; businessId: string; batchId: string; variantId: string }) =>
+  `${input.workspaceId}/${input.businessId}/${input.batchId}/generated/${input.variantId}.jpg`;
+
+const storeGeneratedVariantImage = async (input: {
+  workspaceId: string;
+  businessId: string;
+  batchId: string;
+  variantId: string;
+  imageBytes: Uint8Array;
+  mimeType: string;
+  requiresStorage: boolean;
+}) => {
+  const storageKey = generatedVariantStorageKey(input);
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) {
+    if (input.requiresStorage) {
+      throw new Error("Generated image upload requires Supabase Storage");
+    }
+    return {
+      bucket: MEDIA_BUCKET,
+      storageKey,
+      mimeType: input.mimeType,
+      fileSize: input.imageBytes.byteLength
+    };
+  }
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+  const { error } = await supabase.storage
+    .from(MEDIA_BUCKET)
+    .upload(storageKey, Buffer.from(input.imageBytes), { contentType: input.mimeType, upsert: true });
+  if (error) {
+    throw new Error(`Could not upload generated image asset: ${error.message}`);
+  }
+  return {
+    bucket: MEDIA_BUCKET,
+    storageKey,
+    mimeType: input.mimeType,
+    fileSize: input.imageBytes.byteLength
+  };
+};
+
 export const processOneJob = async (input: {
   store: DataStore;
   workerId: string;
   visionProvider?: VisionAnalysisProvider;
   captionProvider?: CaptionGenerationProvider;
+  imageEditProvider?: ImageEditProvider;
 }): Promise<WorkerResult> => {
   const providerConfig: Parameters<typeof createVisionAnalysisProvider>[0] = {
-    timeoutMs: Number(process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000")
+    timeoutMs: Number(process.env.OPENAI_IMAGE_TIMEOUT_MS ?? process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000")
   };
   if (process.env.OPENAI_API_KEY) providerConfig.apiKey = process.env.OPENAI_API_KEY;
   if (process.env.OPENAI_BASE_URL) providerConfig.baseUrl = process.env.OPENAI_BASE_URL;
   if (process.env.OPENAI_VISION_MODEL) providerConfig.visionModel = process.env.OPENAI_VISION_MODEL;
   if (process.env.OPENAI_CAPTION_MODEL) providerConfig.captionModel = process.env.OPENAI_CAPTION_MODEL;
+  if (process.env.OPENAI_IMAGE_MODEL) providerConfig.imageEditModel = process.env.OPENAI_IMAGE_MODEL;
   const visionProvider = input.visionProvider ?? createVisionAnalysisProvider(providerConfig);
   const captionProvider = input.captionProvider ?? createCaptionGenerationProvider(providerConfig);
+  const imageEditProvider = input.imageEditProvider ?? createImageEditProvider(providerConfig);
   const job = await input.store.claimDueJob(input.workerId);
   if (!job) return { processed: false };
 
@@ -152,13 +203,19 @@ export const processOneJob = async (input: {
       }
 
       if (job.type === "generate_variant") {
+        if (!envFlag("FEATURE_OPENAI_IMAGE_GENERATION", true)) {
+          throw new Error("OpenAI image generation is disabled by feature flag");
+        }
+        if (!input.imageEditProvider && imageEditProvider.mode !== "images") {
+          throw new Error("OpenAI image edit provider is not configured");
+        }
         if (!job.variantId) throw new Error("generate_variant job is missing variantId");
-        const operationKey = job.operationKey ?? `source_photo_variant:${job.variantId}`;
+        const operationKey = job.operationKey ?? `openai_image_edit:${job.variantId}`;
         await input.store.upsertExternalOperation({
           operationKey,
           workspaceId: job.workspaceId,
           jobId: job.id,
-          provider: "internal",
+          provider: imageEditProvider.mode === "images" ? "openai" : "mock",
           operation: "generate_variant",
           status: "started"
         });
@@ -251,9 +308,47 @@ export const processOneJob = async (input: {
             status: "succeeded"
           });
         }
+        if (!context) throw new Error("generate_variant job is missing variant context");
+        const sourceImageUrl =
+          (await freshSignedMediaUrl({ store: input.store, workspaceId: job.workspaceId, assetId: context.photo.originalAssetId })) ??
+          (imageEditProvider.mode === "mock" ? `mock://media/${context.photo.originalAssetId ?? context.photo.id}` : null);
+        if (!sourceImageUrl) {
+          throw new Error("generate_variant job is missing real source imageUrl");
+        }
+        let generatedAsset: Parameters<DataStore["completeGenerateVariant"]>[0]["generatedAsset"];
+        try {
+          const imageEdit = await imageEditProvider.edit({
+            imageUrl: sourceImageUrl,
+            mimeType: context.photo.mimeType ?? "image/jpeg",
+            prompt: backgroundPromptForVariant(context.variant.variantIndex),
+            requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
+            operationKey,
+            size: "1024x1024"
+          });
+          generatedAsset = await storeGeneratedVariantImage({
+            workspaceId: job.workspaceId,
+            businessId: context.business.id,
+            batchId: context.variant.batchId,
+            variantId: context.variant.id,
+            imageBytes: imageEdit.imageBytes,
+            mimeType: imageEdit.mimeType,
+            requiresStorage: imageEditProvider.mode === "images"
+          });
+        } catch (error) {
+          await input.store.upsertExternalOperation({
+            operationKey,
+            workspaceId: job.workspaceId,
+            jobId: job.id,
+            provider: imageEditProvider.mode === "images" ? "openai" : "mock",
+            operation: "generate_variant",
+            status: "failed"
+          });
+          throw error;
+        }
         const completeInput: Parameters<DataStore["completeGenerateVariant"]>[0] = {
           jobId: job.id,
-          variantId: job.variantId
+          variantId: job.variantId,
+          generatedAsset
         };
         if (caption) completeInput.captionResult = caption.result;
         if (captionAiRunId) completeInput.captionAiRunId = captionAiRunId;
@@ -274,7 +369,7 @@ export const processOneJob = async (input: {
           operationKey,
           workspaceId: job.workspaceId,
           jobId: job.id,
-          provider: "internal",
+          provider: imageEditProvider.mode === "images" ? "openai" : "mock",
           operation: "generate_variant",
           status: "succeeded"
         });

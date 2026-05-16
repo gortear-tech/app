@@ -1301,15 +1301,20 @@ export class SupabaseDataStoreCore {
       ]);
       if (!variantResult.rows[0]) this.variantNotFound();
       const current = toVariant(variantResult.rows[0]);
-      if (current.generatedAssetId && current.caption && ["generada", "aprobada", "rechazada"].includes(current.status)) {
-        await client.query("commit");
-        return current;
-      }
       const photoResult = await client.query("select * from public.photos where id = $1 and workspace_id = $2", [
         current.photoId,
         current.workspaceId
       ]);
       const photo = photoResult.rows[0] ? toPhoto(photoResult.rows[0]) : null;
+      if (
+        current.generatedAssetId &&
+        current.generatedAssetId !== photo?.originalAssetId &&
+        current.caption &&
+        ["generada", "aprobada", "rechazada"].includes(current.status)
+      ) {
+        await client.query("commit");
+        return current;
+      }
       if (!photo || photo.status !== "validada" || !photo.visionAnalysis) {
         throw new AppError({
           code: "photo_not_ready_for_variant",
@@ -1328,6 +1333,16 @@ export class SupabaseDataStoreCore {
           userMessage: "La foto no tiene archivo original disponible para publicar.",
           retryable: false,
           action: "refresh"
+        });
+      }
+      if (!input.generatedAsset || input.generatedAsset.storageKey === photo.storageKey || input.generatedAsset.fileSize <= 0) {
+        throw new AppError({
+          code: "generated_asset_missing",
+          statusCode: 409,
+          message: "Generated variant image asset is missing or points to the original photo",
+          userMessage: "No se pudo generar una imagen editada nueva.",
+          retryable: true,
+          action: "retry"
         });
       }
       const style = this.assignStyle(current.variantIndex);
@@ -1360,6 +1375,25 @@ export class SupabaseDataStoreCore {
       });
       const captionResult = input.captionResult ?? fallbackCaptionResult;
       const caption = captionResult.caption;
+      const generatedAssetId = randomUUID();
+      await client.query(
+        `insert into public.media_assets
+         (id, workspace_id, business_id, batch_id, photo_id, variant_id, kind, bucket, storage_key,
+          mime_type, file_size, is_public, created_at)
+         values ($1, $2, $3, $4, $5, $6, 'generated', $7, $8, $9, $10, false, now())`,
+        [
+          generatedAssetId,
+          current.workspaceId,
+          current.businessId,
+          current.batchId,
+          current.photoId,
+          current.id,
+          input.generatedAsset.bucket,
+          input.generatedAsset.storageKey,
+          input.generatedAsset.mimeType,
+          input.generatedAsset.fileSize
+        ]
+      );
       const updated = await client.query(
         `update public.variants
          set style_id = $2, assigned_style = $3::jsonb, generation_plan = $4::jsonb, quality_check = $5::jsonb,
@@ -1382,7 +1416,7 @@ export class SupabaseDataStoreCore {
           quality.status,
           quality.score,
           JSON.stringify(quality.warnings),
-          photo.originalAssetId,
+          generatedAssetId,
           caption,
           input.captionAiRunId ?? null
         ]

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { VisionAnalysisProvider } from "@fbmaniaco/providers";
+import { ImageEditProvider, VisionAnalysisProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 describe("worker processor", () => {
@@ -35,6 +35,17 @@ describe("worker processor", () => {
         },
         responseId: "resp_test",
         model: "test-vision",
+        usage: null,
+        latencyMs: 1
+      })
+    };
+    const imageEditProvider: ImageEditProvider = {
+      mode: "mock",
+      edit: async (input) => ({
+        imageBytes: Buffer.from(`edited:${input.prompt}:${input.operationKey}`),
+        mimeType: "image/jpeg",
+        responseId: null,
+        model: "mock-image-edit",
         usage: null,
         latencyMs: 1
       })
@@ -102,8 +113,8 @@ describe("worker processor", () => {
     expect(generation.created).toBe(2);
 
     const batchJob = await processOneJob({ store, workerId: "variant-worker" });
-    const firstVariantJob = await processOneJob({ store, workerId: "variant-worker" });
-    const secondVariantJob = await processOneJob({ store, workerId: "variant-worker" });
+    const firstVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
+    const secondVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
     const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 
     expect(batchJob.job?.type).toBe("generate_batch");
@@ -114,6 +125,9 @@ describe("worker processor", () => {
     expect(variants.every((variant) => variant.caption?.includes("FBmaniaco Demo"))).toBe(true);
     expect(variants.every((variant) => !variant.caption?.includes("Pagina sin permiso completo"))).toBe(true);
     expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(2);
+    expect(variants.every((variant) => variant.generatedAssetId && variant.generatedAssetId !== detail?.photos[0]?.originalAssetId)).toBe(
+      true
+    );
 
     await store.approveVariant({
       workspaceId: workspace.id,

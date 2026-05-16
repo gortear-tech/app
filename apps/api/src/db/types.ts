@@ -159,6 +159,13 @@ export type MediaAsset = {
   createdAt: string;
 };
 
+export type GeneratedVariantAssetInput = {
+  bucket: string;
+  storageKey: string;
+  mimeType: string;
+  fileSize: number;
+};
+
 export type VariantCaptionContext = {
   variant: Variant;
   photo: Photo & { visionAnalysis: VisionAnalysis };
@@ -279,7 +286,13 @@ export type DataStore = {
     batchId: string;
     variantId: string;
   }): Promise<VariantCaptionContext | null>;
-  completeGenerateVariant(input: { jobId: string; variantId: string; captionResult?: CaptionResult; captionAiRunId?: string }): Promise<Variant>;
+  completeGenerateVariant(input: {
+    jobId: string;
+    variantId: string;
+    generatedAsset: GeneratedVariantAssetInput;
+    captionResult?: CaptionResult;
+    captionAiRunId?: string;
+  }): Promise<Variant>;
   confirmCalendar(input: {
     workspaceId: string;
     businessId: string;

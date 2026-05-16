@@ -1092,16 +1092,31 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const variant = this.requireVariant(state, job.workspaceId, job.businessId, job.batchId, input.variantId);
-    if (variant.generatedAssetId && variant.caption && ["generada", "aprobada", "rechazada"].includes(variant.status)) {
+    const photo = state.photos.find((item) => item.id === variant.photoId && item.workspaceId === variant.workspaceId);
+    if (
+      variant.generatedAssetId &&
+      variant.generatedAssetId !== photo?.originalAssetId &&
+      variant.caption &&
+      ["generada", "aprobada", "rechazada"].includes(variant.status)
+    ) {
       return variant;
     }
-    const photo = state.photos.find((item) => item.id === variant.photoId && item.workspaceId === variant.workspaceId);
     if (!photo || photo.status !== "validada" || !photo.visionAnalysis) {
       throw new AppError({
         code: "photo_not_ready_for_variant",
         statusCode: 409,
         message: "Source photo is not validated",
         userMessage: "La foto todavia no esta lista para generar variantes.",
+        retryable: true,
+        action: "retry"
+      });
+    }
+    if (!input.generatedAsset || input.generatedAsset.storageKey === photo.storageKey || input.generatedAsset.fileSize <= 0) {
+      throw new AppError({
+        code: "generated_asset_missing",
+        statusCode: 409,
+        message: "Generated variant image asset is missing or points to the original photo",
+        userMessage: "No se pudo generar una imagen editada nueva.",
         retryable: true,
         action: "retry"
       });
@@ -1160,10 +1175,10 @@ export class LocalDataStore implements DataStore {
       photoId: variant.photoId,
       variantId: variant.id,
       kind: "generated",
-      bucket: MEDIA_BUCKET,
-      storageKey: `${variant.workspaceId}/${variant.businessId}/${variant.batchId}/generated/${variant.id}.jpg`,
-      mimeType: "image/jpeg",
-      fileSize: 0,
+      bucket: input.generatedAsset.bucket,
+      storageKey: input.generatedAsset.storageKey,
+      mimeType: input.generatedAsset.mimeType,
+      fileSize: input.generatedAsset.fileSize,
       isPublic: false,
       createdAt: timestamp
     };
