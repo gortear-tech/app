@@ -6,6 +6,7 @@ import {
   BusinessDetailResponse,
   ConfirmCalendarResponse,
   GenerateBatchResponse,
+  GenerateBatchStyleOverride,
   MetaConnectResponse,
   MetaPage,
   MobileAuthSessionResponse,
@@ -398,7 +399,8 @@ export const generateBatchVariants = async (
   token: string,
   businessId: string,
   batchId: string,
-  variantsPerPhoto: number
+  variantsPerPhoto: number,
+  styleOverrides?: GenerateBatchStyleOverride[]
 ): Promise<GenerateBatchResponse> => {
   const { apiUrl } = getMobileConfig();
   const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/generate`, {
@@ -409,7 +411,7 @@ export const generateBatchVariants = async (
       "idempotency-key": idempotencyKey("generate-batch"),
       "x-request-id": `mobile-${Date.now()}`
     },
-    body: JSON.stringify({ variantsPerPhoto })
+    body: JSON.stringify({ variantsPerPhoto, ...(styleOverrides?.length ? { styleOverrides } : {}) })
   });
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos generar variantes.");

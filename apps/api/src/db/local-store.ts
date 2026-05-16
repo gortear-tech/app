@@ -35,6 +35,8 @@ import {
 } from "./types.js";
 import { publishFacebookPagePost } from "@fbmaniaco/providers";
 
+type GenerateStyleOverride = NonNullable<Parameters<DataStore["requestGenerateBatch"]>[0]["styleOverrides"]>[number];
+
 type LocalMetaPage = MetaPage & {
   encryptedPageAccessToken?: string | null;
   pageAccessTokenKeyId?: string | null;
@@ -949,6 +951,7 @@ export class LocalDataStore implements DataStore {
     businessId: string;
     batchId: string;
     variantsPerPhoto: number;
+    styleOverrides?: Parameters<DataStore["requestGenerateBatch"]>[0]["styleOverrides"];
     actorId: string;
     requestId: string;
   }): Promise<{ job: StoredJob; created: number; available: number; variants: Variant[] }> {
@@ -991,8 +994,11 @@ export class LocalDataStore implements DataStore {
     let created = 0;
     let available = 0;
     const touched: Variant[] = [];
+    const styleOverrides = new Map((input.styleOverrides ?? []).map((override) => [override.photoId, override]));
     for (const photo of validPhotos) {
       for (let index = 1; index <= input.variantsPerPhoto; index += 1) {
+        const style = this.assignStyle(index, styleOverrides.get(photo.id));
+        const promptVersion = "generation-plan-v1";
         let variant = state.variants.find(
           (item) =>
             item.workspaceId === input.workspaceId &&
@@ -1010,6 +1016,11 @@ export class LocalDataStore implements DataStore {
             batchId: input.batchId,
             photoId: photo.id,
             variantIndex: index,
+            styleId: style.styleId,
+            assignedStyle: style,
+            generationPlan: this.generationPlan(style, promptVersion),
+            promptTemplateId: "photo-variant-generation",
+            promptVersion,
             status: "generando",
             createdAt: timestamp,
             updatedAt: timestamp
@@ -1017,6 +1028,14 @@ export class LocalDataStore implements DataStore {
           state.variants.push(variant);
           created += 1;
         } else {
+          if (["pendiente", "generando"].includes(variant.status)) {
+            variant.styleId = style.styleId;
+            variant.assignedStyle = style;
+            variant.generationPlan = this.generationPlan(style, promptVersion);
+            variant.promptTemplateId = "photo-variant-generation";
+            variant.promptVersion = promptVersion;
+            variant.updatedAt = timestamp;
+          }
           available += 1;
         }
         touched.push(variant);
@@ -1083,7 +1102,7 @@ export class LocalDataStore implements DataStore {
       photo: photo as Photo & { visionAnalysis: VisionAnalysis },
       business,
       page: page ? publicMetaPage(page) : null,
-      style: this.assignStyle(variant.variantIndex),
+      style: variant.assignedStyle ?? this.assignStyle(variant.variantIndex),
       promptVersion: "caption-page-context-v1"
     };
   }
@@ -1121,7 +1140,7 @@ export class LocalDataStore implements DataStore {
         action: "retry"
       });
     }
-    const style = this.assignStyle(variant.variantIndex);
+    const style = variant.assignedStyle ?? this.assignStyle(variant.variantIndex);
     const promptVersion = "generation-plan-v1";
     const timestamp = now();
     const plan = {
@@ -1846,7 +1865,8 @@ export class LocalDataStore implements DataStore {
     });
   }
 
-  private assignStyle(variantIndex: number): AssignedStyle {
+  private assignStyle(variantIndex: number, override?: GenerateStyleOverride): AssignedStyle {
+    if (override) return this.manualStyle(variantIndex, override);
     const styles: AssignedStyle[] = [
       {
         styleId: "luminoso-editorial",
@@ -1884,6 +1904,61 @@ export class LocalDataStore implements DataStore {
     ];
     const selected = styles[(variantIndex - 1) % styles.length] ?? styles[0]!;
     return selected;
+  }
+
+  private manualStyle(
+    variantIndex: number,
+    override: GenerateStyleOverride
+  ): AssignedStyle {
+    const palette = [
+      { id: "atardecer", name: "Atardecer", warmth: 0.28, saturation: 0.22 },
+      { id: "marmol", name: "Marmol", warmth: 0.02, saturation: 0.08 },
+      { id: "madera", name: "Madera", warmth: 0.2, saturation: 0.14 },
+      { id: "jardin", name: "Jardin", warmth: 0.1, saturation: 0.24 },
+      { id: "playa", name: "Playa", warmth: 0.18, saturation: 0.18 },
+      { id: "estudio", name: "Estudio", warmth: 0.04, saturation: 0.1 },
+      { id: "nocturno", name: "Nocturno", warmth: -0.04, saturation: 0.16 },
+      { id: "bambu", name: "Bambu", warmth: 0.12, saturation: 0.2 }
+    ];
+    const startIndex = Math.max(0, palette.findIndex((item) => item.id === override.styleId));
+    const selected = palette[(startIndex + variantIndex - 1) % palette.length] ?? palette[0]!;
+    const intensityValue = Math.max(0, Math.min(100, override.intensity));
+    const intensity = intensityValue >= 80 ? "fuerte" : intensityValue <= 40 ? "ligera" : "media";
+    const strength = intensityValue / 100;
+    return {
+      styleId: selected.id,
+      styleName: selected.name,
+      intensity,
+      contrast: 0.18 + strength * 0.38,
+      saturation: selected.saturation + strength * 0.24,
+      warmth: selected.warmth,
+      sharpness: 0.22 + strength * 0.24,
+      lowConfidence: false,
+      manualOverride: true
+    };
+  }
+
+  private generationPlan(style: AssignedStyle, promptVersion: string) {
+    return {
+      schemaVersion: "generation_plan.v1" as const,
+      puedeGenerar: true,
+      motivo: "Foto validada con analisis disponible.",
+      sujetoPrincipal: "producto o escena principal de la foto",
+      preservar: ["producto real", "logos visibles", "texto visible", "identidad de personas"],
+      permitido: ["encuadre cuadrado", "mejora de luz", "fondo limpio", "composicion para Facebook"],
+      prohibido: ["inventar precios", "inventar promociones", "cambiar producto real", "agregar texto nuevo sobre la imagen"],
+      riesgo: [],
+      nivelRiesgo: "riesgo_bajo" as const,
+      divulgacionIa: "no_requerida" as const,
+      identityPolicy: "preservar" as const,
+      textPolicy: "evitar_texto_nuevo" as const,
+      brandPolicy: "preservar_logos" as const,
+      commercialClaimPolicy: "no_inventar_claims" as const,
+      requiresHumanReview: false,
+      promptFinal: `Crear una variante cuadrada para Facebook con estilo ${style.styleName}.`,
+      promptVersion,
+      planVersion: "generation-plan-v1"
+    };
   }
 
   private captionForVariant(input: {

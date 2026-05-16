@@ -401,7 +401,10 @@ describe("api bootstrap and tenancy", () => {
       method: "POST",
       url: `/businesses/${businessId}/batches/${batchId}/generate`,
       headers: { authorization, "idempotency-key": "generate-batch-1" },
-      payload: { variantsPerPhoto: 1 }
+      payload: {
+        variantsPerPhoto: 1,
+        styleOverrides: [{ photoId: detail.json().photos[0].id, styleId: "playa", styleName: "Playa", intensity: 90 }]
+      }
     });
     expect(generate.statusCode).toBe(200);
     expect(generate.json().created).toBe(1);
@@ -428,6 +431,8 @@ describe("api bootstrap and tenancy", () => {
     });
     expect(variants.statusCode).toBe(200);
     expect(variants.json().variants[0].status).toBe("generada");
+    expect(variants.json().variants[0].assignedStyle.styleName).toBe("Playa");
+    expect(variants.json().variants[0].assignedStyle.manualOverride).toBe(true);
     expect(variants.json().variants[0].imageUrl).toMatch(/\/media\/assets\/.+\/preview\?/);
 
     const caption = await app.inject({

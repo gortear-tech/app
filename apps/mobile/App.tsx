@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
-import type { BatchDetail, BatchSummary, MetaPage, Photo, ScheduledPost, Variant } from "@fbmaniaco/shared";
+import type { BatchDetail, BatchSummary, GenerateBatchStyleOverride, MetaPage, Photo, ScheduledPost, Variant } from "@fbmaniaco/shared";
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
@@ -169,6 +169,17 @@ const promptForPhoto = (photoId: string, preferences: Record<string, PhotoStyleP
   const intensity = preferences[photoId]?.intensity ?? 70;
   return `Corrige la iluminacion y los colores. Cambia el fondo. ${style.name}. Intensidad ${intensity}%.`;
 };
+
+const styleOverridesForGeneration = (photos: Photo[], preferences: Record<string, PhotoStylePreference>): GenerateBatchStyleOverride[] =>
+  photos.filter(isPhotoAnalyzed).map((photo) => {
+    const style = styleForPhoto(photo.id, preferences);
+    return {
+      photoId: photo.id,
+      styleId: style.id,
+      styleName: style.name,
+      intensity: preferences[photo.id]?.intensity ?? 70
+    };
+  });
 
 const visionLabels = (photo: Photo) => {
   const analysis = photo.visionAnalysis as
@@ -422,7 +433,14 @@ function BootScreen() {
   });
 
   const generateVariants = useMutation({
-    mutationFn: async () => generateBatchVariants(token, selectedBusinessId ?? "", selectedBatch?.id ?? "", variantsPerPhoto),
+    mutationFn: async () =>
+      generateBatchVariants(
+        token,
+        selectedBusinessId ?? "",
+        selectedBatch?.id ?? "",
+        variantsPerPhoto,
+        styleOverridesForGeneration(photos, photoPrefs)
+      ),
     onMutate: () => setFlow("generate"),
     onSuccess: invalidateWork
   });
@@ -1124,7 +1142,7 @@ function BatchRow({ batch, selected, onPress }: { batch: BatchSummary; selected:
       </View>
       <View style={styles.flex}>
         <Text style={styles.rowTitle}>{formatDate(batch.createdAt)}</Text>
-        <Text style={styles.muted}>{batch.photosCount} fotos · {batch.variantsCount} variantes</Text>
+        <Text style={styles.muted}>{batch.photosCount} fotos - {batch.variantsCount} variantes</Text>
       </View>
       <Pill label={batch.status} tone={batch.status === "completado" || batch.status === "completed" ? "good" : "neutral"} />
     </Pressable>
@@ -1146,7 +1164,7 @@ function UploadDropZone({
         <Ionicons name="cloud-upload-outline" size={42} color={palette.blue} />
       </View>
       <Text style={styles.uploadTitle}>{busy ? "Subiendo..." : "Subir fotos"}</Text>
-      <Text style={styles.muted}>JPG, PNG, WEBP · max 10 fotos · 12MB recomendado</Text>
+      <Text style={styles.muted}>JPG, PNG, WEBP - max 10 fotos - 12MB recomendado</Text>
       {progress ? (
         <View style={styles.fullWidth}>
           <ProgressBar progress={pct(progress.done, progress.total)} />
@@ -1338,7 +1356,7 @@ function SchedulePreview({ periodDays, acceptedCount }: { periodDays: PeriodDays
     <View style={styles.previewBox}>
       <Text style={styles.rowTitle}>Smart Schedule</Text>
       {preview.map((date) => (
-        <Text key={date.toISOString()} style={styles.muted}>{formatDate(date)} · {formatTime(date)}</Text>
+        <Text key={date.toISOString()} style={styles.muted}>{formatDate(date)} - {formatTime(date)}</Text>
       ))}
     </View>
   );
@@ -1418,7 +1436,7 @@ function ScheduledPostRow({
     <View style={styles.postRow}>
       <View style={[styles.timelineDot, isPostFailed(post) ? styles.timelineBad : isPostGood(post) ? styles.timelineGood : null]} />
       <View style={styles.flex}>
-        <Text style={styles.rowTitle}>{formatDate(post.scheduledFor)} · {formatTime(post.scheduledFor)}</Text>
+        <Text style={styles.rowTitle}>{formatDate(post.scheduledFor)} - {formatTime(post.scheduledFor)}</Text>
         <Text style={styles.muted}>{post.status} / {post.remoteStatus}</Text>
         <Text style={styles.captionPreview} numberOfLines={3}>{post.caption ?? "Sin caption"}</Text>
         <View style={styles.compactActions}>
@@ -1460,7 +1478,7 @@ function WorkBanner({
     progress = pct(done, photos.length);
     target = "styles";
   } else if (photos.length > 0 && variants.length === 0) {
-    label = "Lote listo · Ver fotos";
+    label = "Lote listo - Ver fotos";
     progress = 100;
     target = "styles";
   } else if (variants.some(isVariantBusy)) {
@@ -1469,11 +1487,11 @@ function WorkBanner({
     progress = pct(done, variants.length);
     target = "generate";
   } else if (variants.some(isVariantReviewable)) {
-    label = "Variantes listas · Swipe";
+    label = "Variantes listas - Swipe";
     progress = 100;
     target = "review";
   } else if (acceptedCount > 0) {
-    label = `${acceptedCount} aceptadas · Programar`;
+    label = `${acceptedCount} aceptadas - Programar`;
     progress = 100;
     target = "schedule";
   } else {

@@ -33,6 +33,7 @@ import {
 import { publishFacebookPagePost } from "@fbmaniaco/providers";
 
 const { Pool } = pg;
+type GenerateStyleOverride = NonNullable<Parameters<DataStore["requestGenerateBatch"]>[0]["styleOverrides"]>[number];
 
 const now = () => new Date().toISOString();
 const encodeServerToken = (token: string) => `server:${Buffer.from(token, "utf8").toString("base64url")}`;
@@ -1175,26 +1176,52 @@ export class SupabaseDataStoreCore {
       let created = 0;
       let available = 0;
       const variants: Variant[] = [];
+      const styleOverrides = new Map((input.styleOverrides ?? []).map((override) => [override.photoId, override]));
       for (const photo of validPhotos) {
         for (let index = 1; index <= input.variantsPerPhoto; index += 1) {
           const variantId = randomUUID();
+          const style = this.assignStyle(index, styleOverrides.get(photo.id));
+          const promptVersion = "generation-plan-v1";
+          const plan = this.generationPlan(style, promptVersion);
           const inserted = await client.query(
             `insert into public.variants
-             (id, workspace_id, business_id, batch_id, photo_id, variant_index, status, created_at, updated_at)
-             values ($1, $2, $3, $4, $5, $6, 'generando', now(), now())
+             (id, workspace_id, business_id, batch_id, photo_id, variant_index, style_id, assigned_style,
+              generation_plan, prompt_template_id, prompt_version, status, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, 'photo-variant-generation', $10, 'generando', now(), now())
              on conflict (workspace_id, business_id, batch_id, photo_id, variant_index) do nothing
              returning *`,
-            [variantId, input.workspaceId, input.businessId, input.batchId, photo.id, index]
+            [
+              variantId,
+              input.workspaceId,
+              input.businessId,
+              input.batchId,
+              photo.id,
+              index,
+              style.styleId,
+              JSON.stringify(style),
+              JSON.stringify(plan),
+              promptVersion
+            ]
           );
-          const variantRow =
-            inserted.rows[0] ??
-            (
-              await client.query(
-                `select * from public.variants
-                 where workspace_id = $1 and business_id = $2 and batch_id = $3 and photo_id = $4 and variant_index = $5`,
-                [input.workspaceId, input.businessId, input.batchId, photo.id, index]
-              )
-            ).rows[0];
+          let variantRow = inserted.rows[0];
+          if (!variantRow) {
+            const existing = await client.query(
+              `select * from public.variants
+               where workspace_id = $1 and business_id = $2 and batch_id = $3 and photo_id = $4 and variant_index = $5`,
+              [input.workspaceId, input.businessId, input.batchId, photo.id, index]
+            );
+            variantRow = existing.rows[0];
+            if (variantRow && ["pendiente", "generando"].includes(String(variantRow.status))) {
+              const updated = await client.query(
+                `update public.variants
+                 set style_id = $2, assigned_style = $3::jsonb, generation_plan = $4::jsonb,
+                     prompt_template_id = 'photo-variant-generation', prompt_version = $5, updated_at = now()
+                 where id = $1 returning *`,
+                [variantRow.id, style.styleId, JSON.stringify(style), JSON.stringify(plan), promptVersion]
+              );
+              variantRow = updated.rows[0];
+            }
+          }
           if (inserted.rows[0]) created += 1;
           else available += 1;
           const variant = toVariant(variantRow);
@@ -1283,7 +1310,7 @@ export class SupabaseDataStoreCore {
       photo: photo as Photo & { visionAnalysis: VisionAnalysis },
       business,
       page: pageResult?.rows[0] ? toMetaPage(pageResult.rows[0]) : null,
-      style: this.assignStyle(variant.variantIndex),
+      style: variant.assignedStyle ?? this.assignStyle(variant.variantIndex),
       promptVersion: "caption-page-context-v1"
     };
   }
@@ -1345,7 +1372,7 @@ export class SupabaseDataStoreCore {
           action: "retry"
         });
       }
-      const style = this.assignStyle(current.variantIndex);
+      const style = current.assignedStyle ?? this.assignStyle(current.variantIndex);
       const promptVersion = "generation-plan-v1";
       const plan = this.generationPlan(style, promptVersion);
       const quality = {
@@ -2006,7 +2033,8 @@ export class SupabaseDataStoreCore {
     return result.rows.map(toPhoto);
   }
 
-  private assignStyle(index: number): AssignedStyle {
+  private assignStyle(index: number, override?: GenerateStyleOverride): AssignedStyle {
+    if (override) return this.manualStyle(index, override);
     const styles: AssignedStyle[] = [
       {
         styleId: "clean-bright",
@@ -2043,6 +2071,35 @@ export class SupabaseDataStoreCore {
       }
     ];
     return styles[(index - 1) % styles.length]!;
+  }
+
+  private manualStyle(index: number, override: GenerateStyleOverride): AssignedStyle {
+    const palette = [
+      { id: "atardecer", name: "Atardecer", warmth: 0.28, saturation: 0.22 },
+      { id: "marmol", name: "Marmol", warmth: 0.02, saturation: 0.08 },
+      { id: "madera", name: "Madera", warmth: 0.2, saturation: 0.14 },
+      { id: "jardin", name: "Jardin", warmth: 0.1, saturation: 0.24 },
+      { id: "playa", name: "Playa", warmth: 0.18, saturation: 0.18 },
+      { id: "estudio", name: "Estudio", warmth: 0.04, saturation: 0.1 },
+      { id: "nocturno", name: "Nocturno", warmth: -0.04, saturation: 0.16 },
+      { id: "bambu", name: "Bambu", warmth: 0.12, saturation: 0.2 }
+    ];
+    const startIndex = Math.max(0, palette.findIndex((item) => item.id === override.styleId));
+    const selected = palette[(startIndex + index - 1) % palette.length] ?? palette[0]!;
+    const intensityValue = Math.max(0, Math.min(100, override.intensity));
+    const intensity = intensityValue >= 80 ? "fuerte" : intensityValue <= 40 ? "ligera" : "media";
+    const strength = intensityValue / 100;
+    return {
+      styleId: selected.id,
+      styleName: selected.name,
+      intensity,
+      contrast: 0.18 + strength * 0.38,
+      saturation: selected.saturation + strength * 0.24,
+      warmth: selected.warmth,
+      sharpness: 0.22 + strength * 0.24,
+      lowConfidence: false,
+      manualOverride: true
+    };
   }
 
   private generationPlan(style: AssignedStyle, promptVersion: string) {

@@ -9,6 +9,7 @@ import {
   VisionAnalysisProvider
 } from "@fbmaniaco/providers";
 import { createClient } from "@supabase/supabase-js";
+import type { AssignedStyle } from "@fbmaniaco/shared";
 
 export type WorkerResult = {
   processed: boolean;
@@ -22,9 +23,13 @@ const envFlag = (name: string, fallback: boolean) => {
 };
 
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
-const backgroundPalette = ["Atardecer", "Mármol", "Madera", "Jardín", "Playa", "Estudio", "Nocturno", "Bambú"];
-const backgroundPromptForVariant = (variantIndex: number) =>
-  `Corrige la iluminación y los colores. Cambia el fondo. ${backgroundPalette[(variantIndex - 1) % backgroundPalette.length]}.`;
+const backgroundPalette = ["Atardecer", "Marmol", "Madera", "Jardin", "Playa", "Estudio", "Nocturno", "Bambu"];
+const backgroundPromptForVariant = (variantIndex: number, style?: AssignedStyle) => {
+  const background = style?.manualOverride && style.styleName.trim().length > 0
+    ? style.styleName.trim()
+    : backgroundPalette[(variantIndex - 1) % backgroundPalette.length];
+  return `Corrige la iluminacion y los colores. Cambia el fondo. ${background}.`;
+};
 
 const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: string; assetId: string | null | undefined }) => {
   if (!input.assetId || !process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) return null;
@@ -320,7 +325,7 @@ export const processOneJob = async (input: {
           const imageEdit = await imageEditProvider.edit({
             imageUrl: sourceImageUrl,
             mimeType: context.photo.mimeType ?? "image/jpeg",
-            prompt: backgroundPromptForVariant(context.variant.variantIndex),
+            prompt: backgroundPromptForVariant(context.variant.variantIndex, context.style),
             requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
             operationKey,
             size: "1024x1024"

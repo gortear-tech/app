@@ -1398,7 +1398,10 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     async (request) => {
       const requestId = String(request.headers["x-request-id"]);
       const params = request.params as { businessId: string; batchId: string };
-      const body = request.body as { variantsPerPhoto: number };
+      const body = request.body as {
+        variantsPerPhoto: number;
+        styleOverrides?: Parameters<DataStore["requestGenerateBatch"]>[0]["styleOverrides"];
+      };
       const { actor } = await authenticateRequest(request);
       const { workspace, business } = await requireBusinessAccess({
         actorId: actor.userId,
@@ -1421,14 +1424,16 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
               action: "retry"
             });
           }
-          const generation = await input.store.requestGenerateBatch({
+          const generationInput: Parameters<DataStore["requestGenerateBatch"]>[0] = {
             workspaceId: workspace.id,
             businessId: business.id,
             batchId: params.batchId,
             variantsPerPhoto: body.variantsPerPhoto,
             actorId: actor.userId,
             requestId
-          });
+          };
+          if (body.styleOverrides !== undefined) generationInput.styleOverrides = body.styleOverrides;
+          const generation = await input.store.requestGenerateBatch(generationInput);
           return {
             schemaVersion: "generate_batch.v1" as const,
             created: generation.created,

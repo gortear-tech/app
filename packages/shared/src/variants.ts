@@ -101,8 +101,16 @@ export const VariantSchema = Type.Object({
   updatedAt: Type.String()
 });
 
+export const GenerateBatchStyleOverrideSchema = Type.Object({
+  photoId: Type.String(),
+  styleId: Type.String({ minLength: 1, maxLength: 64 }),
+  styleName: Type.String({ minLength: 1, maxLength: 80 }),
+  intensity: Type.Number({ minimum: 0, maximum: 100 })
+});
+
 export const GenerateBatchBodySchema = Type.Object({
-  variantsPerPhoto: Type.Number({ minimum: 1, maximum: 5 })
+  variantsPerPhoto: Type.Number({ minimum: 1, maximum: 5 }),
+  styleOverrides: Type.Optional(Type.Array(GenerateBatchStyleOverrideSchema, { maxItems: 10 }))
 });
 
 export const GenerateBatchResponseSchema = Type.Object({
@@ -143,6 +151,7 @@ export type GenerationPlan = Static<typeof GenerationPlanSchema>;
 export type AiQualityCheck = Static<typeof AiQualityCheckSchema>;
 export type CaptionResult = Static<typeof CaptionResultSchema>;
 export type Variant = Static<typeof VariantSchema>;
+export type GenerateBatchStyleOverride = Static<typeof GenerateBatchStyleOverrideSchema>;
 export type GenerateBatchResponse = Static<typeof GenerateBatchResponseSchema>;
 export type VariantsResponse = Static<typeof VariantsResponseSchema>;
 export type VariantMutationResponse = Static<typeof VariantMutationResponseSchema>;

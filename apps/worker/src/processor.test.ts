@@ -39,16 +39,20 @@ describe("worker processor", () => {
         latencyMs: 1
       })
     };
+    const imagePrompts: string[] = [];
     const imageEditProvider: ImageEditProvider = {
       mode: "mock",
-      edit: async (input) => ({
-        imageBytes: Buffer.from(`edited:${input.prompt}:${input.operationKey}`),
-        mimeType: "image/jpeg",
-        responseId: null,
-        model: "mock-image-edit",
-        usage: null,
-        latencyMs: 1
-      })
+      edit: async (input) => {
+        imagePrompts.push(input.prompt);
+        return {
+          imageBytes: Buffer.from(`edited:${input.prompt}:${input.operationKey}`),
+          mimeType: "image/jpeg",
+          responseId: null,
+          model: "mock-image-edit",
+          usage: null,
+          latencyMs: 1
+        };
+      }
     };
     await store.upsertLocalUser({ userId: "u2", email: "u2@example.com" });
     const { workspace } = await store.ensureDefaultWorkspace("u2");
@@ -107,6 +111,7 @@ describe("worker processor", () => {
       businessId: business.id,
       batchId: batch.id,
       variantsPerPhoto: 2,
+      styleOverrides: [{ photoId: detail?.photos[0]?.id ?? "", styleId: "playa", styleName: "Playa", intensity: 90 }],
       actorId: "u2",
       requestId: "test-generate"
     });
@@ -125,6 +130,10 @@ describe("worker processor", () => {
     expect(variants.every((variant) => variant.caption?.includes("FBmaniaco Demo"))).toBe(true);
     expect(variants.every((variant) => !variant.caption?.includes("Pagina sin permiso completo"))).toBe(true);
     expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(2);
+    expect(imagePrompts).toEqual([
+      "Corrige la iluminacion y los colores. Cambia el fondo. Playa.",
+      "Corrige la iluminacion y los colores. Cambia el fondo. Estudio."
+    ]);
     expect(variants.every((variant) => variant.generatedAssetId && variant.generatedAssetId !== detail?.photos[0]?.originalAssetId)).toBe(
       true
     );

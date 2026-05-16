@@ -13,6 +13,7 @@ import {
   UploadIntent,
   User,
   Variant,
+  GenerateBatchStyleOverride,
   AssignedStyle,
   VisionAnalysis,
   Workspace,
@@ -276,6 +277,7 @@ export type DataStore = {
     businessId: string;
     batchId: string;
     variantsPerPhoto: number;
+    styleOverrides?: GenerateBatchStyleOverride[];
     actorId: string;
     requestId: string;
   }): Promise<{ job: StoredJob; created: number; available: number; variants: Variant[] }>;
