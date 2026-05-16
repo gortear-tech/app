@@ -288,6 +288,19 @@ export const getActiveBatch = async (token: string, businessId: string): Promise
   return (json.batches?.[0] ?? null) as BatchSummary | null;
 };
 
+export const listBatches = async (token: string, businessId: string): Promise<BatchSummary[]> => {
+  const { apiUrl } = getMobileConfig();
+  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-request-id": `mobile-${Date.now()}`
+    }
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer tus lotes.");
+  return (json.batches ?? []) as BatchSummary[];
+};
+
 export const createBatch = async (token: string, businessId: string): Promise<BatchSummary> => {
   const { apiUrl } = getMobileConfig();
   const response = await fetch(`${apiUrl}/businesses/${businessId}/batches`, {
@@ -546,5 +559,50 @@ export const cancelScheduledPost = async (
   });
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos cancelar la publicacion.");
+  return json as ScheduledPostMutationResponse;
+};
+
+export const updateScheduledPost = async (
+  token: string,
+  businessId: string,
+  batchId: string,
+  scheduledPostId: string,
+  scheduledFor: string
+): Promise<ScheduledPostMutationResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}`, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("update-post"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify({ scheduledFor })
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos reprogramar la publicacion.");
+  return json as ScheduledPostMutationResponse;
+};
+
+export const retryScheduledPost = async (
+  token: string,
+  businessId: string,
+  batchId: string,
+  scheduledPostId: string
+): Promise<ScheduledPostMutationResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/retry`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("retry-post"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify({})
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos reintentar la publicacion.");
   return json as ScheduledPostMutationResponse;
 };
