@@ -28,15 +28,10 @@ const makeConfig = (overrides: Partial<ApiConfig> = {}): ApiConfig => ({
   openaiVisionModel: "gpt-5.5",
   openaiVisionTimeoutMs: 30000,
   release: "test",
-  workerHeartbeatMaxAgeMs: 120000,
-  requireWorkerHeartbeat: false,
-  billingWebhookSecret: undefined,
   featureFlags: {
     metaPublishing: false,
     openaiVision: false,
-    openaiImageGeneration: false,
-    remoteSchedule: false,
-    autonomy: false
+    openaiImageGeneration: false
   },
   ...overrides
 });

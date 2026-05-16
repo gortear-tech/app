@@ -2,38 +2,42 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { rm } from "node:fs/promises";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
+import { VisionAnalysisProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 const path = join(tmpdir(), `fbmaniaco-worker-${Date.now()}.json`);
 const store = new LocalDataStore(path);
+const previousPublicApiUrl = process.env.PUBLIC_API_URL;
+process.env.PUBLIC_API_URL = "https://api.example.test";
+const visionProvider: VisionAnalysisProvider = {
+  mode: "responses",
+  analyze: async (input) => ({
+    analysis: {
+      schemaVersion: "vision_analysis.v1",
+      promptVersion: input.promptVersion,
+      subject: { type: "food", description: "Foto smoke" },
+      composition: { framing: "centered", angle: "front", background: "simple", lighting: "natural" },
+      palette: { dominantColors: ["red"], temperature: "warm", saturation: "medium", contrast: "medium" },
+      sensitiveElements: {
+        personVisible: false,
+        priceVisible: false,
+        logoVisible: false,
+        promotionVisible: false,
+        textVisible: false,
+        notes: []
+      },
+      quality: { sharpness: "ok", exposure: "ok", noise: "low" },
+      mood: { temperature: "warm", keywords: ["antojo"], description: "Lista para publicar" },
+      summary: "Foto validada por smoke."
+    },
+    responseId: "smoke-vision",
+    model: "smoke-vision",
+    usage: null,
+    latencyMs: 1
+  })
+};
 await store.upsertLocalUser({ userId: "worker-smoke", email: "worker@example.com" });
 const { workspace } = await store.ensureDefaultWorkspace("worker-smoke");
-await store.recordWorkerHeartbeat({
-  workerId: "worker-smoke",
-  environment: "development",
-  release: "smoke",
-  metadata: { smoke: true }
-});
-const heartbeat = await store.getLatestWorkerHeartbeat();
-if (!heartbeat || heartbeat.workerId !== "worker-smoke") {
-  throw new Error(`worker heartbeat smoke failed: ${JSON.stringify(heartbeat)}`);
-}
-const job = await store.createJob({
-  type: "mock_job",
-  workspaceId: workspace.id,
-  dedupeKey: "worker-smoke",
-  payload: { smoke: true }
-});
-
-const result = await processOneJob({ store, workerId: "worker-smoke" });
-if (!result.processed || result.job?.id !== job.id || result.job.status !== "succeeded") {
-  throw new Error(`worker smoke failed: ${JSON.stringify(result)}`);
-}
-
-const attempts = await store.listAttempts(job.id);
-if (attempts.length !== 1 || attempts[0]?.status !== "succeeded") {
-  throw new Error(`worker attempt ledger failed: ${JSON.stringify(attempts)}`);
-}
 
 await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "worker-smoke" });
 const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
@@ -69,27 +73,12 @@ const upload = await store.completeUpload({
   actorId: "worker-smoke",
   requestId: "worker-smoke"
 });
-const photoResult = await processOneJob({ store, workerId: "worker-smoke" });
+const photoResult = await processOneJob({ store, workerId: "worker-smoke", visionProvider });
 const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 if (!photoResult.processed || photoResult.job?.id !== upload.job.id || detail?.photos[0]?.status !== "validada") {
   throw new Error(`worker analyze smoke failed: ${JSON.stringify({ photoResult, detail })}`);
 }
 
-const estimate = await store.estimateBatchCost({
-  workspaceId: workspace.id,
-  businessId: business.id,
-  batchId: batch.id,
-  variantsPerPhoto: 1
-});
-await store.confirmBatchCost({
-  workspaceId: workspace.id,
-  businessId: business.id,
-  batchId: batch.id,
-  variantsPerPhoto: 1,
-  priceVersion: estimate.priceVersion,
-  actorId: "worker-smoke",
-  requestId: "worker-smoke-confirm"
-});
 await store.requestGenerateBatch({
   workspaceId: workspace.id,
   businessId: business.id,
@@ -139,46 +128,7 @@ if (!publishResult.processed || published?.status !== "publicada" || !published.
   throw new Error(`worker publish smoke failed: ${JSON.stringify({ publishResult, published })}`);
 }
 
-const metricsRequest = await store.requestCollectMetrics({
-  workspaceId: workspace.id,
-  businessId: business.id,
-  window: "7d",
-  actorId: "worker-smoke",
-  requestId: "worker-smoke-metrics"
-});
-const metricsResult = await processOneJob({ store, workerId: "worker-smoke" });
-if (!metricsResult.processed || metricsResult.job?.id !== metricsRequest.job.id || metricsResult.job.status !== "succeeded") {
-  throw new Error(`worker metrics smoke failed: ${JSON.stringify(metricsResult)}`);
-}
-const summaries = await store.listPerformanceSummaries({ workspaceId: workspace.id, businessId: business.id });
-if (!summaries.length || summaries[0]?.confidence !== "exploratoria") {
-  throw new Error(`worker performance smoke failed: ${JSON.stringify(summaries)}`);
-}
-
-const reportRequest = await store.requestWeeklyReport({
-  workspaceId: workspace.id,
-  businessId: business.id,
-  actorId: "worker-smoke",
-  requestId: "worker-smoke-report"
-});
-const reportResult = await processOneJob({ store, workerId: "worker-smoke" });
-const report = await store.getLatestWeeklyReport({ workspaceId: workspace.id, businessId: business.id });
-if (!reportResult.processed || reportResult.job?.id !== reportRequest.job.id || report?.confidence !== "exploratoria") {
-  throw new Error(`worker weekly report smoke failed: ${JSON.stringify({ reportResult, report })}`);
-}
-
-const evalRequest = await store.requestBatchCaptionEval({
-  workspaceId: workspace.id,
-  businessId: business.id,
-  actorId: "worker-smoke",
-  requestId: "worker-smoke-eval",
-  candidateCaptionEditRate: 0.18
-});
-const evalResult = await processOneJob({ store, workerId: "worker-smoke" });
-const evaluations = await store.listAiEvaluations({ workspaceId: workspace.id, businessId: business.id });
-if (!evalResult.processed || evalResult.job?.id !== evalRequest.job.id || evaluations[0]?.rolloutRecommendation !== "retain_baseline") {
-  throw new Error(`worker caption eval smoke failed: ${JSON.stringify({ evalResult, evaluations })}`);
-}
-
 console.log("worker smoke ok");
+if (previousPublicApiUrl === undefined) delete process.env.PUBLIC_API_URL;
+else process.env.PUBLIC_API_URL = previousPublicApiUrl;
 await rm(path, { force: true });

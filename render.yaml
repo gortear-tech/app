@@ -23,8 +23,6 @@ services:
         value: "false"
       - key: LOCAL_AUTH_ENABLED
         value: "false"
-      - key: REQUIRE_WORKER_HEARTBEAT
-        value: "true"
       - key: FEATURE_META_PUBLISHING
         sync: false
       - key: PUBLIC_API_URL
@@ -51,13 +49,7 @@ services:
         sync: false
       - key: FEATURE_OPENAI_IMAGE_GENERATION
         sync: false
-      - key: FEATURE_REMOTE_SCHEDULE
-        value: "false"
-      - key: FEATURE_AUTONOMY
-        value: "false"
       - key: SENTRY_DSN
-        sync: false
-      - key: BILLING_WEBHOOK_SECRET
         sync: false
   - type: worker
     name: fbmaniaco-worker
@@ -84,8 +76,6 @@ services:
         value: "false"
       - key: WORKER_POLL_INTERVAL_MS
         value: "5000"
-      - key: WORKER_HEARTBEAT_INTERVAL_MS
-        value: "30000"
       - key: FEATURE_META_PUBLISHING
         sync: false
       - key: PUBLIC_API_URL
@@ -102,9 +92,5 @@ services:
         sync: false
       - key: FEATURE_OPENAI_IMAGE_GENERATION
         sync: false
-      - key: FEATURE_REMOTE_SCHEDULE
-        value: "false"
-      - key: FEATURE_AUTONOMY
-        value: "false"
       - key: SENTRY_DSN
         sync: false

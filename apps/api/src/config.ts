@@ -30,15 +30,10 @@ export type ApiConfig = {
   openaiBaseUrl: string | undefined;
   openaiVisionModel: string;
   openaiVisionTimeoutMs: number;
-  workerHeartbeatMaxAgeMs: number;
-  requireWorkerHeartbeat: boolean;
-  billingWebhookSecret: string | undefined;
   featureFlags: {
     metaPublishing: boolean;
     openaiVision: boolean;
     openaiImageGeneration: boolean;
-    remoteSchedule: boolean;
-    autonomy: boolean;
   };
 };
 
@@ -179,15 +174,10 @@ export const loadConfig = (): ApiConfig => {
     openaiBaseUrl: process.env.OPENAI_BASE_URL || undefined,
     openaiVisionModel: process.env.OPENAI_VISION_MODEL ?? "gpt-5.5",
     openaiVisionTimeoutMs: Number(process.env.OPENAI_IMAGE_TIMEOUT_MS ?? process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000"),
-    workerHeartbeatMaxAgeMs: Number(process.env.WORKER_HEARTBEAT_MAX_AGE_MS ?? "120000"),
-    requireWorkerHeartbeat: toBool(process.env.REQUIRE_WORKER_HEARTBEAT, appEnv !== "development"),
-    billingWebhookSecret: process.env.BILLING_WEBHOOK_SECRET || undefined,
     featureFlags: {
       metaPublishing: toBool(process.env.FEATURE_META_PUBLISHING, true),
       openaiVision: toBool(process.env.FEATURE_OPENAI_VISION, true),
-      openaiImageGeneration: toBool(process.env.FEATURE_OPENAI_IMAGE_GENERATION, true),
-      remoteSchedule: toBool(process.env.FEATURE_REMOTE_SCHEDULE, false),
-      autonomy: toBool(process.env.FEATURE_AUTONOMY, false)
+      openaiImageGeneration: toBool(process.env.FEATURE_OPENAI_IMAGE_GENERATION, true)
     }
   };
 };

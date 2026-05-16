@@ -135,8 +135,7 @@ export const processOneJob = async (input: {
       return { processed: true, job: completed };
     }
 
-    if (job.type !== "mock_job") {
-      if (job.type === "generate_batch") {
+    if (job.type === "generate_batch") {
         if (!job.batchId) throw new Error("generate_batch job is missing batchId");
         const completedBatch = await input.store.completeGenerateBatch({ jobId: job.id, batchId: job.batchId });
         const completed = await input.store.completeJob({
@@ -297,7 +296,7 @@ export const processOneJob = async (input: {
         return { processed: true, job: completed };
       }
 
-      if (job.type === "publish_post" || job.type === "retry_post") {
+      if (job.type === "publish_post") {
         if (!envFlag("FEATURE_META_PUBLISHING", true)) {
           throw new Error("Meta publishing is disabled by feature flag");
         }
@@ -322,89 +321,8 @@ export const processOneJob = async (input: {
         return { processed: true, job: completed };
       }
 
-      if (job.type === "collect_metrics") {
-        const metrics = await input.store.completeCollectMetrics({ jobId: job.id });
-        const completed = await input.store.completeJob({
-          jobId: job.id,
-          result: {
-            ok: true,
-            snapshotsCount: metrics.snapshots.length,
-            summariesCount: metrics.summaries.length,
-            unavailableMetricIds: metrics.unavailableMetrics.map((metric) => metric.id),
-            processedBy: input.workerId,
-            processedAt: new Date().toISOString()
-          }
-        });
-        return { processed: true, job: completed };
-      }
+    throw new Error(`Unsupported job type in this phase: ${job.type}`);
 
-      if (job.type === "weekly_report") {
-        const report = await input.store.completeWeeklyReport({ jobId: job.id });
-        const completed = await input.store.completeJob({
-          jobId: job.id,
-          result: {
-            ok: true,
-            reportId: report.id,
-            confidence: report.confidence,
-            sampleSize: report.sampleSize,
-            processedBy: input.workerId,
-            processedAt: new Date().toISOString()
-          }
-        });
-        return { processed: true, job: completed };
-      }
-
-      if (job.type === "batch_caption_eval") {
-        const evaluation = await input.store.completeBatchCaptionEval({ jobId: job.id });
-        const completed = await input.store.completeJob({
-          jobId: job.id,
-          result: {
-            ok: true,
-            evaluationId: evaluation.id,
-            status: evaluation.status,
-            rolloutRecommendation: evaluation.rolloutRecommendation,
-            failedCriteria: evaluation.failedCriteria,
-            usedBatchMode: evaluation.usedBatchMode,
-            processedBy: input.workerId,
-            processedAt: new Date().toISOString()
-          }
-        });
-        return { processed: true, job: completed };
-      }
-
-      throw new Error(`Unsupported job type in this phase: ${job.type}`);
-    }
-
-    if (process.env.APP_ENV === "production") {
-      throw new Error("mock_job is disabled in production");
-    }
-    const operationKey = job.operationKey ?? `development:mock:${job.id}`;
-    await input.store.upsertExternalOperation({
-      operationKey,
-      workspaceId: job.workspaceId,
-      jobId: job.id,
-      provider: "local",
-      operation: "mock_job",
-      status: "started"
-    });
-
-    const completed = await input.store.completeJob({
-      jobId: job.id,
-      result: {
-        ok: true,
-        processedBy: input.workerId,
-        processedAt: new Date().toISOString()
-      }
-    });
-    await input.store.upsertExternalOperation({
-      operationKey,
-      workspaceId: job.workspaceId,
-      jobId: job.id,
-      provider: "local",
-      operation: "mock_job",
-      status: "succeeded"
-    });
-    return { processed: true, job: completed };
   } catch (error) {
     const failed = await input.store.failJob({
       jobId: job.id,

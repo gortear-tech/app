@@ -1,5 +1,5 @@
 import { Static, Type } from "@sinclair/typebox";
-import { BillingStatus, MemberStatus, WorkspaceRole, WorkspaceStatus } from "./states.js";
+import { MemberStatus, WorkspaceRole, WorkspaceStatus } from "./states.js";
 
 export const UserSchema = Type.Object({
   id: Type.String(),
@@ -14,9 +14,6 @@ export const WorkspaceSchema = Type.Object({
   id: Type.String(),
   name: Type.String(),
   ownerUserId: Type.String(),
-  plan: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  billingStatus: BillingStatus,
-  entitlements: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   status: WorkspaceStatus,
   createdAt: Type.String(),
   updatedAt: Type.String()

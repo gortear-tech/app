@@ -1,32 +1,20 @@
 import {
   Business,
-  BusinessAutonomySettings,
   CaptionResult,
-  AutonomyEvaluation,
-  AiEvaluation,
-  BillingAccount,
-  BillingProvider,
-  BillingProviderEvent,
   BatchSummary,
-  CommercialPlan,
   FacebookTokenStatus,
   IdempotencyRecordStatus,
   JobStatus,
   JobType,
   MetaAuthorizationStatus,
   MetaPage,
-  MetricDefinition,
-  MetricWindow,
-  PerformanceSummary,
   Photo,
-  PostMetricSnapshot,
   ScheduledPost,
   UploadIntent,
   User,
   Variant,
   AssignedStyle,
   VisionAnalysis,
-  WeeklyReport,
   Workspace,
   WorkspaceMember,
   WorkspaceRole
@@ -119,22 +107,6 @@ export type IdempotencyRecord = {
   expiresAt: string;
 };
 
-export type OutboxEvent = {
-  id: string;
-  eventType: string;
-  aggregateType: string;
-  aggregateId: string;
-  workspaceId: string;
-  businessId?: string;
-  payload: Record<string, unknown>;
-  status: "pending" | "processing" | "processed" | "failed";
-  availableAt: string;
-  processedAt?: string;
-  attempts: number;
-  lastError?: string;
-  createdAt: string;
-};
-
 export type ExternalOperation = {
   operationKey: string;
   workspaceId: string;
@@ -187,64 +159,6 @@ export type MediaAsset = {
   createdAt: string;
 };
 
-export type PricingRule = {
-  id: string;
-  provider: string;
-  model: string;
-  operation: "vision" | "image_generation" | "caption" | "generated_variant";
-  unitType: "token" | "image" | "request" | "post" | "month" | "credit_usd";
-  unitSize: number;
-  dimensions?: Record<string, unknown>;
-  currency: "USD";
-  unitCostUsd: number;
-  customerUnitPriceUsd: number;
-  priceVersion: string;
-  effectiveFrom: string;
-  effectiveTo?: string;
-  active: boolean;
-};
-
-export type UsageMeter = {
-  id: string;
-  workspaceId: string;
-  metric: "photo_uploads" | "generated_variants" | "scheduled_posts" | "ai_customer_spend_usd" | "ai_provider_cost_usd";
-  periodStart: string;
-  periodEnd: string;
-  limitValue?: number;
-  reservedValue: number;
-  usedValue: number;
-  updatedAt: string;
-};
-
-export type CostLedgerEntry = {
-  id: string;
-  workspaceId: string;
-  businessId?: string;
-  batchId?: string;
-  jobId?: string;
-  variantId?: string;
-  operation: string;
-  operationKey?: string;
-  entryType: "estimate" | "reservation" | "actual" | "release";
-  usageMetric?: UsageMeter["metric"];
-  quantity: number;
-  priceVersion: string;
-  customerCostUsd: number;
-  providerCostUsd: number;
-  status: "estimated" | "reserved" | "used" | "released";
-  createdAt: string;
-};
-
-export type WorkerHeartbeat = {
-  workerId: string;
-  service: "worker";
-  environment: string;
-  release: string;
-  status: "alive" | "stopping";
-  lastBeatAt: string;
-  metadata: Record<string, unknown>;
-};
-
 export type VariantCaptionContext = {
   variant: Variant;
   photo: Photo & { visionAnalysis: VisionAnalysis };
@@ -286,45 +200,6 @@ export type DataStore = {
   failJob(input: { jobId: string; error: string }): Promise<StoredJob>;
   listJobs(workspaceId: string): Promise<StoredJob[]>;
   listAttempts(jobId: string): Promise<JobAttempt[]>;
-  recordWorkerHeartbeat(input: {
-    workerId: string;
-    environment: string;
-    release: string;
-    status?: "alive" | "stopping";
-    metadata?: Record<string, unknown>;
-  }): Promise<WorkerHeartbeat>;
-  getLatestWorkerHeartbeat(): Promise<WorkerHeartbeat | null>;
-  listMetricDefinitions(): Promise<MetricDefinition[]>;
-  listPerformanceSummaries(input: {
-    workspaceId: string;
-    businessId: string;
-    from?: string;
-    to?: string;
-    scope?: PerformanceSummary["scope"];
-  }): Promise<PerformanceSummary[]>;
-  requestCollectMetrics(input: {
-    workspaceId: string;
-    businessId: string;
-    from?: string;
-    to?: string;
-    window?: MetricWindow;
-    actorId: string;
-    requestId: string;
-  }): Promise<{ job: StoredJob }>;
-  completeCollectMetrics(input: { jobId: string }): Promise<{
-    snapshots: PostMetricSnapshot[];
-    summaries: PerformanceSummary[];
-    unavailableMetrics: MetricDefinition[];
-  }>;
-  requestWeeklyReport(input: {
-    workspaceId: string;
-    businessId: string;
-    weekStart?: string;
-    actorId: string;
-    requestId: string;
-  }): Promise<{ job: StoredJob }>;
-  completeWeeklyReport(input: { jobId: string }): Promise<WeeklyReport>;
-  getLatestWeeklyReport(input: { workspaceId: string; businessId: string }): Promise<WeeklyReport | null>;
   getBootstrapContext(userId: string): Promise<{
     selectedBusinessId: string | null;
     selectedPageId: string | null;
@@ -349,41 +224,7 @@ export type DataStore = {
     name?: string;
     timezone?: string;
     metadata?: Record<string, unknown>;
-    autonomySettings?: BusinessAutonomySettings;
   }): Promise<Business>;
-  evaluateBusinessAutonomy(input: {
-    workspaceId: string;
-    businessId: string;
-    autonomyFeatureEnabled: boolean;
-  }): Promise<AutonomyEvaluation>;
-  requestBatchCaptionEval(input: {
-    workspaceId: string;
-    businessId: string;
-    actorId: string;
-    requestId: string;
-    candidatePromptTemplateId?: string;
-    baselinePromptTemplateId?: string;
-    datasetId?: string;
-    candidateCaptionEditRate?: number;
-  }): Promise<{ job: StoredJob }>;
-  completeBatchCaptionEval(input: { jobId: string }): Promise<AiEvaluation>;
-  listAiEvaluations(input: { workspaceId: string; businessId: string }): Promise<AiEvaluation[]>;
-  getBillingStatus(input: { workspaceId: string }): Promise<{ workspace: Workspace; billingAccount: BillingAccount | null }>;
-  createUpgradeIntent(input: {
-    workspaceId: string;
-    actorId: string;
-    requestId: string;
-    plan: CommercialPlan;
-    provider: BillingProvider;
-  }): Promise<{ provider: BillingProvider; targetPlan: CommercialPlan; checkoutUrl: string | null; message: string }>;
-  processBillingProviderEvent(input: {
-    provider: BillingProvider;
-    providerEventId: string;
-    type: string;
-    workspaceId?: string;
-    plan?: CommercialPlan;
-    billingStatus?: Workspace["billingStatus"];
-  }): Promise<{ event: BillingProviderEvent; duplicate: boolean }>;
   createBatch(input: { workspaceId: string; businessId: string; actorId: string; requestId: string }): Promise<BatchSummary>;
   listBatches(input: { workspaceId: string; businessId: string }): Promise<BatchSummary[]>;
   getActiveBatch(input: { workspaceId: string; businessId: string }): Promise<BatchSummary | null>;
@@ -422,48 +263,6 @@ export type DataStore = {
     aiRunId?: string;
   }): Promise<Photo>;
   getMediaAsset(input: { assetId: string }): Promise<MediaAsset | null>;
-  estimateBatchCost(input: {
-    workspaceId: string;
-    businessId: string;
-    batchId: string;
-    variantsPerPhoto: number;
-  }): Promise<{
-    batchId: string;
-    variantsPerPhoto: number;
-    photoCount: number;
-    variantCount: number;
-    priceVersion: string;
-    estimatedCostUsd: number;
-    estimatedProviderCostUsd: number;
-    breakdown: Array<{
-      operation: string;
-      provider: string;
-      model: string;
-      unitType: string;
-      quantity: number;
-      unitPriceUsd: number;
-      estimatedCostUsd: number;
-      priceVersion: string;
-    }>;
-    canConfirm: boolean;
-    blockedReason?: string | null;
-    usage: Array<{
-      metric: UsageMeter["metric"];
-      limitValue?: number | null;
-      usedValue: number;
-      reservedValue: number;
-      availableValue?: number | null;
-    }>;
-  }>;
-  confirmBatchCost(input: {
-    workspaceId: string;
-    businessId: string;
-    batchId: string;
-    variantsPerPhoto: number;
-    priceVersion: string;
-    actorId: string;
-    requestId: string;
-  }): Promise<{ batch: BatchSummary; variantCount: number; customerCostUsd: number; providerCostUsd: number; priceVersion: string }>;
   listVariants(input: { workspaceId: string; businessId: string; batchId: string }): Promise<Variant[]>;
   requestGenerateBatch(input: {
     workspaceId: string;
@@ -567,15 +366,6 @@ export type DataStore = {
     requestHash: string;
     response: unknown;
   }): Promise<IdempotencyRecord>;
-  createOutboxEvent(input: {
-    eventType: string;
-    aggregateType: string;
-    aggregateId: string;
-    workspaceId: string;
-    businessId?: string;
-    payload?: Record<string, unknown>;
-  }): Promise<OutboxEvent>;
-  listOutboxEvents(workspaceId: string): Promise<OutboxEvent[]>;
   upsertExternalOperation(input: {
     operationKey: string;
     workspaceId: string;

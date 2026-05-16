@@ -3,35 +3,20 @@ import { dirname, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
   AppError,
-  ActionAutonomyState,
-  AiEvaluation,
-  AutonomyAction,
-  AutonomyEvaluation,
-  BillingAccount,
-  BillingProvider,
-  BillingProviderEvent,
-  BusinessAutonomySettings,
   AssignedStyle,
   BatchSummary,
   Business,
   CaptionResult,
-  CommercialPlan,
   FacebookTokenStatus,
   forbiddenError,
   MetaAuthorizationStatus,
   MetaPage,
-  MetricDefinition,
-  MetricWindow,
-  PerformanceSummary,
   Photo,
-  PLAN_ENTITLEMENTS,
-  PostMetricSnapshot,
   ScheduledPost,
   UploadIntent,
   User,
   Variant,
   VisionAnalysis,
-  WeeklyReport,
   Workspace,
   WorkspaceMember,
   WorkspaceRole
@@ -45,12 +30,7 @@ import {
   JobAttempt,
   MediaAsset,
   MetaAuthorization,
-  OutboxEvent,
   PersistedMetaAuthorizationInput,
-  CostLedgerEntry,
-  PricingRule,
-  UsageMeter,
-  WorkerHeartbeat,
   StoredJob
 } from "./types.js";
 import { publishFacebookPagePost } from "@fbmaniaco/providers";
@@ -78,19 +58,7 @@ type LocalState = {
   jobs: StoredJob[];
   jobAttempts: JobAttempt[];
   idempotencyRecords: IdempotencyRecord[];
-  outboxEvents: OutboxEvent[];
   externalOperations: ExternalOperation[];
-  pricingRules: PricingRule[];
-  usageMeters: UsageMeter[];
-  costLedger: CostLedgerEntry[];
-  workerHeartbeats: WorkerHeartbeat[];
-  metricDefinitions: MetricDefinition[];
-  postMetricSnapshots: PostMetricSnapshot[];
-  performanceSummaries: PerformanceSummary[];
-  weeklyReports: WeeklyReport[];
-  aiEvaluations: AiEvaluation[];
-  billingAccounts: BillingAccount[];
-  billingProviderEvents: BillingProviderEvent[];
 };
 
 const now = () => new Date().toISOString();
@@ -115,99 +83,6 @@ const MEDIA_BUCKET = "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
-const defaultPricingRules = (): PricingRule[] => [
-  {
-    id: "price-local-generated-variant-v1",
-    provider: "local",
-    model: "mock-image-caption-v1",
-    operation: "generated_variant",
-    unitType: "image",
-    unitSize: 1,
-    dimensions: { size: "1:1", quality: "mock", includesCaption: true },
-    currency: "USD",
-    unitCostUsd: 0.002,
-    customerUnitPriceUsd: 0.01,
-    priceVersion: "local-2026-05-01",
-    effectiveFrom: "2026-05-01T00:00:00.000Z",
-    active: true
-  }
-];
-const defaultMetricDefinitions = (): MetricDefinition[] => [
-  {
-    id: "metric-fbmaniaco-publish-success-v1",
-    provider: "fbmaniaco",
-    canonicalMetric: "publish_success",
-    providerMetricName: null,
-    graphApiVersion: null,
-    valueType: "count",
-    status: "active",
-    effectiveFrom: "2026-05-01T00:00:00.000Z",
-    notes: "Publicaciones confirmadas por FBmaniaco."
-  },
-  {
-    id: "metric-fbmaniaco-publish-failure-v1",
-    provider: "fbmaniaco",
-    canonicalMetric: "publish_failure",
-    providerMetricName: null,
-    graphApiVersion: null,
-    valueType: "count",
-    status: "active",
-    effectiveFrom: "2026-05-01T00:00:00.000Z",
-    notes: "Publicaciones fallidas o inciertas en FBmaniaco."
-  },
-  {
-    id: "metric-fbmaniaco-week-coverage-v1",
-    provider: "fbmaniaco",
-    canonicalMetric: "week_coverage",
-    providerMetricName: null,
-    graphApiVersion: null,
-    valueType: "rate",
-    status: "active",
-    effectiveFrom: "2026-05-01T00:00:00.000Z",
-    notes: "Cobertura semanal de publicaciones programadas o publicadas."
-  },
-  {
-    id: "metric-meta-engagements-v23-unavailable",
-    provider: "meta",
-    canonicalMetric: "engagements",
-    providerMetricName: "post_engaged_users",
-    graphApiVersion: "v23.0",
-    valueType: "count",
-    status: "unavailable",
-    effectiveFrom: "2026-05-01T00:00:00.000Z",
-    notes: "Insights Meta degradados en adaptador local hasta configurar permisos reales."
-  }
-];
-const autonomyActions: AutonomyAction[] = [
-  "STYLE_ASSIGNMENT",
-  "VARIANT_COUNT",
-  "SCHEDULING",
-  "CAPTION_GENERATION",
-  "FACEBOOK_PUBLISH"
-];
-const defaultAutonomySettings = (timestamp: string): BusinessAutonomySettings => ({
-  schemaVersion: "business_autonomy.v1",
-  actions: Object.fromEntries(
-    autonomyActions.map((action) => [
-      action,
-      {
-        action,
-        mode: action === "FACEBOOK_PUBLISH" ? "human_approval" : "suggest_only",
-        score: 0,
-        approvals: 0,
-        threshold: action === "FACEBOOK_PUBLISH" ? 0.95 : 0.75,
-        paused: action === "FACEBOOK_PUBLISH",
-        consecutiveApprovals: 0,
-        consecutiveRejections: 0,
-        requiresExplicitOptIn: action === "FACEBOOK_PUBLISH",
-        explicitOptIn: false,
-        pauseReasons: action === "FACEBOOK_PUBLISH" ? ["explicit_opt_in_required"] : [],
-        updatedAt: timestamp
-      } satisfies ActionAutonomyState
-    ])
-  ) as Record<string, ActionAutonomyState>,
-  updatedAt: timestamp
-});
 const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "photo";
 const extensionMimeHints = new Map([
   [".jpg", "image/jpeg"],
@@ -234,19 +109,7 @@ const emptyState = (): LocalState => ({
   jobs: [],
   jobAttempts: [],
   idempotencyRecords: [],
-  outboxEvents: [],
-  externalOperations: [],
-  pricingRules: defaultPricingRules(),
-  usageMeters: [],
-  costLedger: [],
-  workerHeartbeats: [],
-  metricDefinitions: defaultMetricDefinitions(),
-  postMetricSnapshots: [],
-  performanceSummaries: [],
-  weeklyReports: [],
-  aiEvaluations: [],
-  billingAccounts: [],
-  billingProviderEvents: []
+  externalOperations: []
 });
 
 const hasNewerTimestamp = (candidate: unknown, current: unknown) => {
@@ -273,16 +136,52 @@ const mergeByKey = <T>(latest: T[], current: T[], keyFor: (item: T) => string) =
   return Array.from(merged.values());
 };
 
+const cleanWorkspace = (workspace: Workspace): Workspace => ({
+  id: workspace.id,
+  name: workspace.name,
+  ownerUserId: workspace.ownerUserId,
+  status: workspace.status,
+  createdAt: workspace.createdAt,
+  updatedAt: workspace.updatedAt
+});
+
+const cleanBusiness = (business: Business): Business => ({
+  id: business.id,
+  workspaceId: business.workspaceId,
+  facebookPageId: business.facebookPageId,
+  name: business.name,
+  timezone: business.timezone,
+  tokenStatus: business.tokenStatus,
+  metadata: business.metadata,
+  createdAt: business.createdAt,
+  updatedAt: business.updatedAt
+});
+
+const cleanBatch = (batch: BatchSummary): BatchSummary => {
+  const cleaned: BatchSummary = {
+    id: batch.id,
+    workspaceId: batch.workspaceId,
+    businessId: batch.businessId,
+    status: batch.status,
+    photosCount: batch.photosCount,
+    variantsCount: batch.variantsCount,
+    lastActivityAt: batch.lastActivityAt,
+    createdAt: batch.createdAt,
+    updatedAt: batch.updatedAt
+  };
+  if (batch.variantsPerPhoto !== undefined) cleaned.variantsPerPhoto = batch.variantsPerPhoto;
+  return cleaned;
+};
+
 const mergeLocalState = (latest: LocalState, current: LocalState): LocalState => ({
-  ...latest,
-  ...current,
+  ...emptyState(),
   users: mergeById(latest.users, current.users),
-  workspaces: mergeById(latest.workspaces, current.workspaces),
+  workspaces: mergeById(latest.workspaces, current.workspaces).map(cleanWorkspace),
   members: mergeByKey(latest.members, current.members, (item) => `${item.workspaceId}:${item.userId}`),
   metaAuthorizations: mergeById(latest.metaAuthorizations, current.metaAuthorizations),
   pages: mergeById(latest.pages, current.pages),
-  businesses: mergeById(latest.businesses, current.businesses),
-  batches: mergeById(latest.batches, current.batches),
+  businesses: mergeById(latest.businesses, current.businesses).map(cleanBusiness),
+  batches: mergeById(latest.batches, current.batches).map(cleanBatch),
   photos: mergeById(latest.photos, current.photos),
   uploadIntents: mergeById(latest.uploadIntents, current.uploadIntents),
   mediaAssets: mergeById(latest.mediaAssets, current.mediaAssets),
@@ -292,19 +191,7 @@ const mergeLocalState = (latest: LocalState, current: LocalState): LocalState =>
   jobs: mergeById(latest.jobs, current.jobs),
   jobAttempts: mergeById(latest.jobAttempts, current.jobAttempts),
   idempotencyRecords: mergeById(latest.idempotencyRecords, current.idempotencyRecords),
-  outboxEvents: mergeById(latest.outboxEvents, current.outboxEvents),
   externalOperations: mergeByKey(latest.externalOperations, current.externalOperations, (item) => item.operationKey),
-  pricingRules: mergeById(latest.pricingRules, current.pricingRules),
-  usageMeters: mergeById(latest.usageMeters, current.usageMeters),
-  costLedger: mergeById(latest.costLedger, current.costLedger),
-  workerHeartbeats: mergeByKey(latest.workerHeartbeats, current.workerHeartbeats, (item) => item.workerId),
-  metricDefinitions: mergeById(latest.metricDefinitions, current.metricDefinitions),
-  postMetricSnapshots: mergeById(latest.postMetricSnapshots, current.postMetricSnapshots),
-  performanceSummaries: mergeById(latest.performanceSummaries, current.performanceSummaries),
-  weeklyReports: mergeById(latest.weeklyReports, current.weeklyReports),
-  aiEvaluations: mergeById(latest.aiEvaluations, current.aiEvaluations),
-  billingAccounts: mergeById(latest.billingAccounts, current.billingAccounts),
-  billingProviderEvents: mergeById(latest.billingProviderEvents, current.billingProviderEvents),
   selectedByWorkspace: { ...latest.selectedByWorkspace, ...current.selectedByWorkspace }
 });
 
@@ -363,9 +250,6 @@ export class LocalDataStore implements DataStore {
       id: randomUUID(),
       name: "Mi workspace FBmaniaco",
       ownerUserId: userId,
-      plan: "piloto",
-      billingStatus: "trial",
-      entitlements: PLAN_ENTITLEMENTS.piloto,
       status: "activo",
       createdAt: timestamp,
       updatedAt: timestamp
@@ -379,21 +263,6 @@ export class LocalDataStore implements DataStore {
     };
     state.workspaces.push(workspace);
     state.members.push(membership);
-    state.billingAccounts.push({
-      id: randomUUID(),
-      workspaceId: workspace.id,
-      provider: "manual",
-      providerCustomerId: null,
-      providerSubscriptionId: null,
-      providerSubscriptionItemId: null,
-      providerPriceId: null,
-      plan: "piloto",
-      billingStatus: "trial",
-      currentPeriodStart: this.currentPeriodStart(),
-      currentPeriodEnd: this.currentPeriodEnd(),
-      createdAt: timestamp,
-      updatedAt: timestamp
-    });
     await this.persist();
     return { workspace, membership };
   }
@@ -535,302 +404,6 @@ export class LocalDataStore implements DataStore {
     return state.jobAttempts.filter((attempt) => attempt.jobId === jobId);
   }
 
-  async recordWorkerHeartbeat(input: {
-    workerId: string;
-    environment: string;
-    release: string;
-    status?: "alive" | "stopping";
-    metadata?: Record<string, unknown>;
-  }): Promise<WorkerHeartbeat> {
-    const state = await this.load();
-    const timestamp = now();
-    let heartbeat = state.workerHeartbeats.find((item) => item.workerId === input.workerId);
-    if (!heartbeat) {
-      heartbeat = {
-        workerId: input.workerId,
-        service: "worker",
-        environment: input.environment,
-        release: input.release,
-        status: input.status ?? "alive",
-        lastBeatAt: timestamp,
-        metadata: input.metadata ?? {}
-      };
-      state.workerHeartbeats.push(heartbeat);
-    } else {
-      heartbeat.environment = input.environment;
-      heartbeat.release = input.release;
-      heartbeat.status = input.status ?? "alive";
-      heartbeat.lastBeatAt = timestamp;
-      heartbeat.metadata = input.metadata ?? {};
-    }
-    await this.persist();
-    return heartbeat;
-  }
-
-  async getLatestWorkerHeartbeat(): Promise<WorkerHeartbeat | null> {
-    const state = await this.load();
-    return state.workerHeartbeats
-      .filter((heartbeat) => heartbeat.status === "alive")
-      .sort((a, b) => b.lastBeatAt.localeCompare(a.lastBeatAt))[0] ?? null;
-  }
-
-  async listMetricDefinitions(): Promise<MetricDefinition[]> {
-    const state = await this.load();
-    return [...state.metricDefinitions].sort((a, b) => a.canonicalMetric.localeCompare(b.canonicalMetric));
-  }
-
-  async listPerformanceSummaries(input: {
-    workspaceId: string;
-    businessId: string;
-    from?: string;
-    to?: string;
-    scope?: PerformanceSummary["scope"];
-  }): Promise<PerformanceSummary[]> {
-    const state = await this.load();
-    this.requireBusiness(state, input.workspaceId, input.businessId);
-    return state.performanceSummaries
-      .filter(
-        (summary) =>
-          summary.workspaceId === input.workspaceId &&
-          summary.businessId === input.businessId &&
-          (input.scope === undefined || summary.scope === input.scope) &&
-          (input.from === undefined || summary.periodEnd >= input.from) &&
-          (input.to === undefined || summary.periodStart <= input.to)
-      )
-      .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
-  }
-
-  async requestCollectMetrics(input: {
-    workspaceId: string;
-    businessId: string;
-    from?: string;
-    to?: string;
-    window?: MetricWindow;
-    actorId: string;
-    requestId: string;
-  }): Promise<{ job: StoredJob }> {
-    const state = await this.load();
-    this.requireBusiness(state, input.workspaceId, input.businessId);
-    const from = input.from ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const to = input.to ?? now();
-    const window = input.window ?? "7d";
-    const job = await this.createJob({
-      type: "collect_metrics",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      dedupeKey: `collect_metrics:${input.businessId}:${from}:${to}:${window}`,
-      payload: { from, to, window, actorId: input.actorId, requestId: input.requestId }
-    });
-    await this.createOutboxEvent({
-      eventType: "metricas_recoleccion_solicitada",
-      aggregateType: "business",
-      aggregateId: input.businessId,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { from, to, window, actorId: input.actorId, requestId: input.requestId }
-    });
-    await this.persist();
-    return { job };
-  }
-
-  async completeCollectMetrics(input: { jobId: string }): Promise<{
-    snapshots: PostMetricSnapshot[];
-    summaries: PerformanceSummary[];
-    unavailableMetrics: MetricDefinition[];
-  }> {
-    const state = await this.load();
-    const job = this.requireJob(state, input.jobId);
-    if (!job.businessId) throw new Error("collect_metrics job is missing businessId");
-    const from = typeof job.payload.from === "string" ? job.payload.from : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const to = typeof job.payload.to === "string" ? job.payload.to : now();
-    const window = (typeof job.payload.window === "string" ? job.payload.window : "7d") as MetricWindow;
-    const timestamp = now();
-    const publishedPosts = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === job.workspaceId &&
-        post.businessId === job.businessId &&
-        post.status === "publicada" &&
-        post.scheduledFor >= from &&
-        post.scheduledFor <= to
-    );
-    const successDefinition = this.metricDefinition(state, "fbmaniaco", "publish_success");
-    const failureDefinition = this.metricDefinition(state, "fbmaniaco", "publish_failure");
-    const metaDefinitions = state.metricDefinitions.filter((definition) => definition.provider === "meta" && definition.status !== "active");
-    const snapshots: PostMetricSnapshot[] = [];
-    for (const post of publishedPosts) {
-      const snapshot: PostMetricSnapshot = {
-        id: randomUUID(),
-        workspaceId: post.workspaceId,
-        businessId: post.businessId,
-        scheduledPostId: post.id,
-        facebookPostId: post.facebookPostId ?? null,
-        metricDefinitionId: successDefinition.id,
-        provider: "fbmaniaco",
-        canonicalMetric: "publish_success",
-        providerMetricName: null,
-        window,
-        value: 1,
-        collectedAt: timestamp,
-        observedUntil: to,
-        collectionStatus: "ok",
-        sourceVersion: "fbmaniaco-local-metrics-v1",
-        rawRef: null
-      };
-      snapshots.push(snapshot);
-      state.postMetricSnapshots.push(snapshot);
-    }
-    const failedPosts = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === job.workspaceId &&
-        post.businessId === job.businessId &&
-        ["fallida", "estado_incierto"].includes(post.status) &&
-        post.scheduledFor >= from &&
-        post.scheduledFor <= to
-    );
-    for (const post of failedPosts) {
-      const snapshot: PostMetricSnapshot = {
-        id: randomUUID(),
-        workspaceId: post.workspaceId,
-        businessId: post.businessId,
-        scheduledPostId: post.id,
-        facebookPostId: post.facebookPostId ?? null,
-        metricDefinitionId: failureDefinition.id,
-        provider: "fbmaniaco",
-        canonicalMetric: "publish_failure",
-        providerMetricName: null,
-        window,
-        value: 1,
-        collectedAt: timestamp,
-        observedUntil: to,
-        collectionStatus: "ok",
-        sourceVersion: "fbmaniaco-local-metrics-v1",
-        rawRef: null
-      };
-      snapshots.push(snapshot);
-      state.postMetricSnapshots.push(snapshot);
-    }
-    const summaries = this.recalculatePerformanceSummaries(state, job.workspaceId, job.businessId, from, to, timestamp);
-    await this.createOutboxEvent({
-      eventType: "metricas_recolectadas",
-      aggregateType: "business",
-      aggregateId: job.businessId,
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      payload: {
-        jobId: job.id,
-        snapshotCount: snapshots.length,
-        unavailableMetricIds: metaDefinitions.map((definition) => definition.id)
-      }
-    });
-    for (const definition of metaDefinitions) {
-      await this.createOutboxEvent({
-        eventType: "metrica_no_disponible",
-        aggregateType: "metric_definition",
-        aggregateId: definition.id,
-        workspaceId: job.workspaceId,
-        businessId: job.businessId,
-        payload: { status: definition.status, canonicalMetric: definition.canonicalMetric }
-      });
-    }
-    await this.persist();
-    return { snapshots, summaries, unavailableMetrics: metaDefinitions };
-  }
-
-  async requestWeeklyReport(input: {
-    workspaceId: string;
-    businessId: string;
-    weekStart?: string;
-    actorId: string;
-    requestId: string;
-  }): Promise<{ job: StoredJob }> {
-    const state = await this.load();
-    this.requireBusiness(state, input.workspaceId, input.businessId);
-    const periodStart = input.weekStart ?? this.weekStart(new Date()).toISOString();
-    const periodEnd = new Date(new Date(periodStart).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    const job = await this.createJob({
-      type: "weekly_report",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      dedupeKey: `weekly_report:${input.businessId}:${periodStart}`,
-      payload: { periodStart, periodEnd, actorId: input.actorId, requestId: input.requestId }
-    });
-    await this.persist();
-    return { job };
-  }
-
-  async completeWeeklyReport(input: { jobId: string }): Promise<WeeklyReport> {
-    const state = await this.load();
-    const job = this.requireJob(state, input.jobId);
-    if (!job.businessId) throw new Error("weekly_report job is missing businessId");
-    const periodStart = typeof job.payload.periodStart === "string" ? job.payload.periodStart : this.weekStart(new Date()).toISOString();
-    const periodEnd =
-      typeof job.payload.periodEnd === "string"
-        ? job.payload.periodEnd
-        : new Date(new Date(periodStart).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    const timestamp = now();
-    const summaries = this.recalculatePerformanceSummaries(state, job.workspaceId, job.businessId, periodStart, periodEnd, timestamp);
-    const published = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === job.workspaceId &&
-        post.businessId === job.businessId &&
-        post.status === "publicada" &&
-        post.scheduledFor >= periodStart &&
-        post.scheduledFor <= periodEnd
-    );
-    const failed = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === job.workspaceId &&
-        post.businessId === job.businessId &&
-        ["fallida", "estado_incierto"].includes(post.status) &&
-        post.scheduledFor >= periodStart &&
-        post.scheduledFor <= periodEnd
-    );
-    const summary = summaries.find((item) => item.scope === "business_week");
-    const sampleSize = summary?.sampleSize ?? published.length;
-    const confidence = this.confidenceForSample(sampleSize);
-    const report: WeeklyReport = {
-      id: randomUUID(),
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      periodStart,
-      periodEnd,
-      confidence,
-      sampleSize,
-      sections: {
-        worked: published.length > 0 ? [`${published.length} publicaciones quedaron confirmadas.`] : ["Aun no hay publicaciones confirmadas esta semana."],
-        didNotWork: failed.length > 0 ? [`${failed.length} publicaciones requieren revision.`] : ["No se detectaron fallas propias en la ventana."],
-        styleAcceptance: confidence === "exploratoria" ? ["Muestra pequena: no se declara un estilo ganador."] : ["Hay muestra suficiente para comparar estilos."],
-        captionEdits: ["Se separan ediciones de caption de metricas externas para no mezclar senales."],
-        recommendedTimes: confidence === "exploratoria" ? ["Mantener horarios conservadores hasta tener 20 posts publicados."] : ["Revisar horarios con snapshots comparables."],
-        metaHealth: ["Insights de Meta degradados en modo local; se usan senales propias de FBmaniaco."],
-        calendarCoverage: [`Cobertura semanal estimada: ${Math.round((summary?.metrics.week_coverage ?? 0) * 100)}%.`],
-        aiCost: ["Costos IA se leen del ledger interno; no se infieren desde el reporte."],
-        nextActions: published.length === 0 ? ["Publicar al menos un post para empezar aprendizaje real."] : ["Recolectar snapshots comparables antes del siguiente reporte."]
-      },
-      reasonCodes: summary?.reasonCodes ?? ["sample_size_low", "meta_insights_unavailable"],
-      generatedAt: timestamp
-    };
-    state.weeklyReports.push(report);
-    await this.createOutboxEvent({
-      eventType: "performance_summary_generado",
-      aggregateType: "business",
-      aggregateId: job.businessId,
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      payload: { jobId: job.id, reportId: report.id, confidence: report.confidence, sampleSize: report.sampleSize }
-    });
-    await this.persist();
-    return report;
-  }
-
-  async getLatestWeeklyReport(input: { workspaceId: string; businessId: string }): Promise<WeeklyReport | null> {
-    const state = await this.load();
-    this.requireBusiness(state, input.workspaceId, input.businessId);
-    return state.weeklyReports
-      .filter((report) => report.workspaceId === input.workspaceId && report.businessId === input.businessId)
-      .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))[0] ?? null;
-  }
-
   async updateBusiness(input: {
     workspaceId: string;
     businessId: string;
@@ -839,7 +412,6 @@ export class LocalDataStore implements DataStore {
     name?: string;
     timezone?: string;
     metadata?: Record<string, unknown>;
-    autonomySettings?: BusinessAutonomySettings;
   }): Promise<Business> {
     const state = await this.load();
     const business = this.requireBusiness(state, input.workspaceId, input.businessId);
@@ -847,266 +419,9 @@ export class LocalDataStore implements DataStore {
     if (input.name !== undefined) business.name = input.name;
     if (input.timezone !== undefined) business.timezone = input.timezone;
     if (input.metadata !== undefined) business.metadata = { ...business.metadata, ...input.metadata };
-    if (input.autonomySettings !== undefined) {
-      business.autonomySettings = this.normalizedAutonomy(input.autonomySettings, timestamp);
-    }
     business.updatedAt = timestamp;
-    await this.createOutboxEvent({
-      eventType: input.autonomySettings !== undefined ? "autonomia_actualizada" : "negocio_actualizado",
-      aggregateType: "business",
-      aggregateId: business.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return business;
-  }
-
-  async evaluateBusinessAutonomy(input: {
-    workspaceId: string;
-    businessId: string;
-    autonomyFeatureEnabled: boolean;
-  }): Promise<AutonomyEvaluation> {
-    const state = await this.load();
-    const business = this.requireBusiness(state, input.workspaceId, input.businessId);
-    const settings = this.businessAutonomy(business);
-    const publish = settings.actions.FACEBOOK_PUBLISH;
-    const reasons = new Set<string>();
-    if (!input.autonomyFeatureEnabled) reasons.add("kill_switch_autonomy");
-    if (!publish?.explicitOptIn) reasons.add("explicit_opt_in_required");
-    if (publish?.mode !== "autonomous") reasons.add("publish_not_autonomous");
-    if (business.tokenStatus === "expirado" || business.tokenStatus === "requiere_reconexion") reasons.add("meta_token_unhealthy");
-    if (state.scheduledPosts.some((post) => post.businessId === business.id && post.status === "estado_incierto")) reasons.add("uncertain_post_exists");
-    if (this.hasBudgetPressure(state, input.workspaceId)) reasons.add("budget_limit_reached");
-    if (this.hasSensitivePublishRisk(state, input.workspaceId, input.businessId)) reasons.add("sensitive_content_requires_review");
-    const publishedCount = state.scheduledPosts.filter((post) => post.businessId === business.id && post.status === "publicada").length;
-    if (publishedCount < 20) reasons.add("insufficient_history");
-    return {
-      schemaVersion: "autonomy_evaluation.v1",
-      businessId: business.id,
-      canAutopublish: reasons.size === 0,
-      blockingReasons: [...reasons],
-      warnings: publishedCount < 100 ? ["La confianza seguira siendo conservadora hasta tener mas historial."] : [],
-      evaluatedAt: now()
-    };
-  }
-
-  async requestBatchCaptionEval(input: {
-    workspaceId: string;
-    businessId: string;
-    actorId: string;
-    requestId: string;
-    candidatePromptTemplateId?: string;
-    baselinePromptTemplateId?: string;
-    datasetId?: string;
-    candidateCaptionEditRate?: number;
-  }): Promise<{ job: StoredJob }> {
-    const state = await this.load();
-    this.requireBusiness(state, input.workspaceId, input.businessId);
-    const datasetId = input.datasetId ?? "golden-caption-local-v1";
-    const candidate = input.candidatePromptTemplateId ?? "caption-template-canary-v1";
-    const baseline = input.baselinePromptTemplateId ?? "caption-template-active-v1";
-    const job = await this.createJob({
-      type: "batch_caption_eval",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      dedupeKey: `batch_caption_eval:${input.businessId}:${candidate}:${baseline}:${datasetId}`,
-      payload: {
-        datasetId,
-        candidatePromptTemplateId: candidate,
-        baselinePromptTemplateId: baseline,
-        candidateCaptionEditRate: input.candidateCaptionEditRate,
-        actorId: input.actorId,
-        requestId: input.requestId,
-        executionMode: "batch_flex_compatible"
-      }
-    });
-    await this.persist();
-    return { job };
-  }
-
-  async completeBatchCaptionEval(input: { jobId: string }): Promise<AiEvaluation> {
-    const state = await this.load();
-    const job = this.requireJob(state, input.jobId);
-    if (!job.businessId) throw new Error("batch_caption_eval job is missing businessId");
-    const baselineEditRate = 0.1;
-    const candidateEditRate =
-      typeof job.payload.candidateCaptionEditRate === "number" ? job.payload.candidateCaptionEditRate : 0.08;
-    const failedCriteria = [
-      ...(candidateEditRate > baselineEditRate ? ["caption_edit_rate_regression"] : []),
-      ...(candidateEditRate > 0.2 ? ["manual_edit_rate_too_high"] : [])
-    ];
-    const timestamp = now();
-    const evaluation: AiEvaluation = {
-      id: randomUUID(),
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      task: "caption",
-      datasetId: typeof job.payload.datasetId === "string" ? job.payload.datasetId : "golden-caption-local-v1",
-      baselinePromptTemplateId:
-        typeof job.payload.baselinePromptTemplateId === "string" ? job.payload.baselinePromptTemplateId : "caption-template-active-v1",
-      candidatePromptTemplateId:
-        typeof job.payload.candidatePromptTemplateId === "string" ? job.payload.candidatePromptTemplateId : "caption-template-canary-v1",
-      status: failedCriteria.length === 0 ? "passed" : "failed",
-      metrics: {
-        schema_valid_rate: 1,
-        refusal_rate: 0,
-        baseline_caption_edit_rate: baselineEditRate,
-        candidate_caption_edit_rate: candidateEditRate,
-        cost_per_approved_variant_usd: 0.01,
-        latency_p95_ms: 1200
-      },
-      failedCriteria,
-      rolloutRecommendation: failedCriteria.length === 0 ? "promote_canary" : "retain_baseline",
-      usedBatchMode: true,
-      createdAt: timestamp
-    };
-    state.aiEvaluations.push(evaluation);
-    await this.createOutboxEvent({
-      eventType: "ai_eval_completada",
-      aggregateType: "ai_evaluation",
-      aggregateId: evaluation.id,
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      payload: {
-        status: evaluation.status,
-        rolloutRecommendation: evaluation.rolloutRecommendation,
-        failedCriteria: evaluation.failedCriteria
-      }
-    });
-    await this.persist();
-    return evaluation;
-  }
-
-  async listAiEvaluations(input: { workspaceId: string; businessId: string }): Promise<AiEvaluation[]> {
-    const state = await this.load();
-    this.requireBusiness(state, input.workspaceId, input.businessId);
-    return state.aiEvaluations
-      .filter((evaluation) => evaluation.workspaceId === input.workspaceId && evaluation.businessId === input.businessId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }
-
-  async getBillingStatus(input: { workspaceId: string }): Promise<{ workspace: Workspace; billingAccount: BillingAccount | null }> {
-    const state = await this.load();
-    const workspace = this.requireWorkspace(state, input.workspaceId);
-    const billingAccount =
-      state.billingAccounts
-        .filter((account) => account.workspaceId === input.workspaceId)
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null;
-    return { workspace, billingAccount };
-  }
-
-  async createUpgradeIntent(input: {
-    workspaceId: string;
-    actorId: string;
-    requestId: string;
-    plan: CommercialPlan;
-    provider: BillingProvider;
-  }): Promise<{ provider: BillingProvider; targetPlan: CommercialPlan; checkoutUrl: string | null; message: string }> {
-    const state = await this.load();
-    this.requireWorkspace(state, input.workspaceId);
-    await this.createOutboxEvent({
-      eventType: "billing_upgrade_intent_created",
-      aggregateType: "workspace",
-      aggregateId: input.workspaceId,
-      workspaceId: input.workspaceId,
-      payload: { actorId: input.actorId, requestId: input.requestId, plan: input.plan, provider: input.provider }
-    });
-    await this.persist();
-    return {
-      provider: input.provider,
-      targetPlan: input.plan,
-      checkoutUrl:
-        input.provider === "manual"
-          ? null
-          : `https://billing.example/${input.provider}/checkout?workspace=${encodeURIComponent(input.workspaceId)}&plan=${input.plan}`,
-      message:
-        input.provider === "manual"
-          ? "Solicitud de upgrade registrada para piloto privado."
-          : "Checkout mock preparado. No se ha cobrado nada."
-    };
-  }
-
-  async processBillingProviderEvent(input: {
-    provider: BillingProvider;
-    providerEventId: string;
-    type: string;
-    workspaceId?: string;
-    plan?: CommercialPlan;
-    billingStatus?: Workspace["billingStatus"];
-  }): Promise<{ event: BillingProviderEvent; duplicate: boolean }> {
-    const state = await this.load();
-    const existing = state.billingProviderEvents.find(
-      (event) => event.provider === input.provider && event.providerEventId === input.providerEventId
-    );
-    if (existing) return { event: existing, duplicate: true };
-    const timestamp = now();
-    const event: BillingProviderEvent = {
-      id: randomUUID(),
-      provider: input.provider,
-      providerEventId: input.providerEventId,
-      workspaceId: input.workspaceId ?? null,
-      type: input.type,
-      status: "received",
-      receivedAt: timestamp,
-      processedAt: null,
-      lastError: null
-    };
-    state.billingProviderEvents.push(event);
-    try {
-      if (!input.workspaceId) {
-        event.status = "ignored";
-        event.processedAt = timestamp;
-      } else {
-        const workspace = this.requireWorkspace(state, input.workspaceId);
-        const nextPlan = input.plan ?? (workspace.plan as CommercialPlan | undefined) ?? "piloto";
-        const nextStatus = input.billingStatus ?? workspace.billingStatus;
-        workspace.plan = nextPlan;
-        workspace.billingStatus = nextStatus;
-        workspace.entitlements = PLAN_ENTITLEMENTS[nextPlan];
-        workspace.updatedAt = timestamp;
-        let account = state.billingAccounts.find(
-          (item) => item.workspaceId === workspace.id && item.provider === input.provider
-        );
-        if (!account) {
-          account = {
-            id: randomUUID(),
-            workspaceId: workspace.id,
-            provider: input.provider,
-            providerCustomerId: null,
-            providerSubscriptionId: null,
-            providerSubscriptionItemId: null,
-            providerPriceId: null,
-            plan: nextPlan,
-            billingStatus: nextStatus,
-            currentPeriodStart: this.currentPeriodStart(),
-            currentPeriodEnd: this.currentPeriodEnd(),
-            createdAt: timestamp,
-            updatedAt: timestamp
-          };
-          state.billingAccounts.push(account);
-        } else {
-          account.plan = nextPlan;
-          account.billingStatus = nextStatus;
-          account.updatedAt = timestamp;
-        }
-        event.status = "processed";
-        event.processedAt = timestamp;
-        await this.createOutboxEvent({
-          eventType: "billing_updated",
-          aggregateType: "workspace",
-          aggregateId: workspace.id,
-          workspaceId: workspace.id,
-          payload: { provider: input.provider, providerEventId: input.providerEventId, plan: nextPlan, billingStatus: nextStatus }
-        });
-      }
-    } catch (error) {
-      event.status = "failed";
-      event.lastError = error instanceof Error ? error.message : "Unknown billing event error";
-    }
-    await this.persist();
-    return { event, duplicate: false };
   }
 
   async getBootstrapContext(userId: string): Promise<{
@@ -1251,13 +566,6 @@ export class LocalDataStore implements DataStore {
       });
     }
 
-    await this.createOutboxEvent({
-      eventType: "meta_autorizacion_actualizada",
-      aggregateType: "meta_authorization",
-      aggregateId: authorization.id,
-      workspaceId: input.workspaceId,
-      payload: { status: authorization.status, grantedScopes: authorization.grantedScopes }
-    });
     await this.persist();
     return authorization;
   }
@@ -1320,33 +628,16 @@ export class LocalDataStore implements DataStore {
           category: page.category ?? "Facebook Page",
           facebookSeo: { keywords: [], context: null }
         },
-        autonomySettings: defaultAutonomySettings(timestamp),
         createdAt: timestamp,
         updatedAt: timestamp
       };
       state.businesses.push(business);
-      await this.createOutboxEvent({
-        eventType: "negocio_creado",
-        aggregateType: "business",
-        aggregateId: business.id,
-        workspaceId: input.workspaceId,
-        businessId: business.id,
-        payload: { actorId: input.actorId, requestId: input.requestId }
-      });
     } else {
       business.tokenStatus = page.pageAccessTokenStatus;
       business.updatedAt = timestamp;
     }
 
     state.selectedByWorkspace[input.workspaceId] = { pageId: page.id, businessId: business.id };
-    await this.createOutboxEvent({
-      eventType: "pagina_seleccionada",
-      aggregateType: "facebook_page",
-      aggregateId: page.id,
-      workspaceId: input.workspaceId,
-      businessId: business.id,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return business;
   }
@@ -1386,14 +677,6 @@ export class LocalDataStore implements DataStore {
       updatedAt: timestamp
     };
     state.batches.push(batch);
-    await this.createOutboxEvent({
-      eventType: "lote_creado",
-      aggregateType: "batch",
-      aggregateId: batch.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return batch;
   }
@@ -1549,14 +832,6 @@ export class LocalDataStore implements DataStore {
         requestId: input.requestId
       }
     });
-    await this.createOutboxEvent({
-      eventType: "foto_subida",
-      aggregateType: "photo",
-      aggregateId: photo.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { batchId: input.batchId, actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return { photo, job };
   }
@@ -1627,14 +902,6 @@ export class LocalDataStore implements DataStore {
       batch.lastActivityAt = timestamp;
       batch.updatedAt = timestamp;
     }
-    await this.createOutboxEvent({
-      eventType: "foto_validada",
-      aggregateType: "photo",
-      aggregateId: photo.id,
-      workspaceId: photo.workspaceId,
-      businessId: photo.businessId,
-      payload: { batchId: photo.batchId, jobId: input.jobId, aiRunId: input.aiRunId ?? null }
-    });
     await this.persist();
     return photo;
   }
@@ -1642,152 +909,6 @@ export class LocalDataStore implements DataStore {
   async getMediaAsset(input: { assetId: string }): Promise<MediaAsset | null> {
     const state = await this.load();
     return state.mediaAssets.find((asset) => asset.id === input.assetId) ?? null;
-  }
-
-  async estimateBatchCost(input: {
-    workspaceId: string;
-    businessId: string;
-    batchId: string;
-    variantsPerPhoto: number;
-  }) {
-    const state = await this.load();
-    this.assertWorkspaceBillingAllows(state, input.workspaceId, "costly");
-    const batch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
-    const workspace = this.requireWorkspace(state, input.workspaceId);
-    const rule = this.activePricingRule(state);
-    const validPhotos = this.validPhotosForGeneration(state, input.workspaceId, input.businessId, input.batchId);
-    const variantCount = validPhotos.length * input.variantsPerPhoto;
-    const customerCost = this.money(variantCount * (rule.customerUnitPriceUsd / rule.unitSize));
-    const providerCost = this.money(variantCount * (rule.unitCostUsd / rule.unitSize));
-    const usage = [
-      this.usageSnapshot(state, workspace, "generated_variants", variantCount),
-      this.usageSnapshot(state, workspace, "ai_customer_spend_usd", customerCost),
-      this.usageSnapshot(state, workspace, "ai_provider_cost_usd", providerCost)
-    ];
-    const blocked = usage.find((item) => item.availableValue !== null && item.availableValue !== undefined && item.availableValue < 0);
-    return {
-      batchId: batch.id,
-      variantsPerPhoto: input.variantsPerPhoto,
-      photoCount: validPhotos.length,
-      variantCount,
-      priceVersion: rule.priceVersion,
-      estimatedCostUsd: customerCost,
-      estimatedProviderCostUsd: providerCost,
-      breakdown: [
-        {
-          operation: rule.operation,
-          provider: rule.provider,
-          model: rule.model,
-          unitType: rule.unitType,
-          quantity: variantCount,
-          unitPriceUsd: rule.customerUnitPriceUsd,
-          estimatedCostUsd: customerCost,
-          priceVersion: rule.priceVersion
-        }
-      ],
-      canConfirm: variantCount > 0 && !blocked,
-      blockedReason: variantCount === 0 ? "no_valid_photos" : blocked ? `limit_exceeded:${blocked.metric}` : null,
-      usage
-    };
-  }
-
-  async confirmBatchCost(input: {
-    workspaceId: string;
-    businessId: string;
-    batchId: string;
-    variantsPerPhoto: number;
-    priceVersion: string;
-    actorId: string;
-    requestId: string;
-  }): Promise<{ batch: BatchSummary; variantCount: number; customerCostUsd: number; providerCostUsd: number; priceVersion: string }> {
-    const state = await this.load();
-    this.assertWorkspaceBillingAllows(state, input.workspaceId, "costly");
-    const batch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
-    const estimate = await this.estimateBatchCost(input);
-    if (!estimate.canConfirm) {
-      throw new AppError({
-        code: "cost_limit_exceeded",
-        statusCode: 409,
-        message: `Cost confirmation blocked: ${estimate.blockedReason ?? "unknown"}`,
-        userMessage: "Este lote supera el limite disponible del plan.",
-        retryable: false,
-        action: "contact_support"
-      });
-    }
-    if (estimate.priceVersion !== input.priceVersion) {
-      throw new AppError({
-        code: "price_version_changed",
-        statusCode: 409,
-        message: "Price version no longer matches active pricing",
-        userMessage: "El calculo de costo cambio. Vuelve a revisar la estimacion.",
-        retryable: false,
-        action: "refresh"
-      });
-    }
-    const existingReservation = state.costLedger.find(
-      (entry) =>
-        entry.workspaceId === input.workspaceId &&
-        entry.batchId === input.batchId &&
-        entry.entryType === "reservation" &&
-        entry.operation === "generated_variant" &&
-        entry.priceVersion === input.priceVersion
-    );
-    const timestamp = now();
-    if (!existingReservation) {
-      this.reserveUsage(state, input.workspaceId, "generated_variants", estimate.variantCount);
-      this.reserveUsage(state, input.workspaceId, "ai_customer_spend_usd", estimate.estimatedCostUsd);
-      this.reserveUsage(state, input.workspaceId, "ai_provider_cost_usd", estimate.estimatedProviderCostUsd);
-      state.costLedger.push({
-        id: randomUUID(),
-        workspaceId: input.workspaceId,
-        businessId: input.businessId,
-        batchId: input.batchId,
-        operation: "generated_variant",
-        operationKey: `batch_generation:${input.batchId}:${input.priceVersion}`,
-        entryType: "reservation",
-        usageMetric: "generated_variants",
-        quantity: estimate.variantCount,
-        priceVersion: input.priceVersion,
-        customerCostUsd: estimate.estimatedCostUsd,
-        providerCostUsd: estimate.estimatedProviderCostUsd,
-        status: "reserved",
-        createdAt: timestamp
-      });
-    }
-    batch.status = "confirmado";
-    batch.estimatedCostUsd = estimate.estimatedCostUsd;
-    batch.estimatedProviderCostUsd = estimate.estimatedProviderCostUsd;
-    batch.confirmedCostUsd = estimate.estimatedCostUsd;
-    batch.confirmedPriceVersion = input.priceVersion;
-    batch.confirmedCostBreakdown = {
-      schemaVersion: "cost_breakdown.v1",
-      breakdown: estimate.breakdown,
-      providerCostUsd: estimate.estimatedProviderCostUsd
-    };
-    batch.variantsPerPhoto = input.variantsPerPhoto;
-    batch.lastActivityAt = timestamp;
-    batch.updatedAt = timestamp;
-    await this.createOutboxEvent({
-      eventType: "costo_confirmado",
-      aggregateType: "batch",
-      aggregateId: batch.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: {
-        actorId: input.actorId,
-        requestId: input.requestId,
-        priceVersion: input.priceVersion,
-        variantCount: estimate.variantCount
-      }
-    });
-    await this.persist();
-    return {
-      batch,
-      variantCount: estimate.variantCount,
-      customerCostUsd: estimate.estimatedCostUsd,
-      providerCostUsd: estimate.estimatedProviderCostUsd,
-      priceVersion: input.priceVersion
-    };
   }
 
   async recordAiRun(input: Omit<AiRun, "id" | "createdAt">): Promise<AiRun> {
@@ -1832,29 +953,13 @@ export class LocalDataStore implements DataStore {
     requestId: string;
   }): Promise<{ job: StoredJob; created: number; available: number; variants: Variant[] }> {
     const state = await this.load();
-    this.assertWorkspaceBillingAllows(state, input.workspaceId, "publish");
     const batch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
-    if (!["confirmado", "generado_parcial"].includes(batch.status)) {
+    if (!["pendiente_confirmacion", "confirmado", "generado_parcial"].includes(batch.status)) {
       throw new AppError({
         code: "batch_not_ready_for_generation",
         statusCode: 409,
         message: `Batch cannot generate variants from status ${batch.status}`,
-        userMessage: "Primero confirma el costo del lote antes de generar variantes.",
-        retryable: false,
-        action: "refresh"
-      });
-    }
-    if (
-      !batch.confirmedPriceVersion ||
-      !batch.confirmedCostUsd ||
-      batch.variantsPerPhoto !== input.variantsPerPhoto ||
-      !this.hasReservation(state, input.workspaceId, input.batchId, batch.confirmedPriceVersion)
-    ) {
-      throw new AppError({
-        code: "cost_not_confirmed",
-        statusCode: 409,
-        message: "Batch generation requires a confirmed cost reservation",
-        userMessage: "Confirma el costo del lote antes de generar variantes.",
+        userMessage: "Primero termina de subir y analizar las fotos antes de generar variantes.",
         retryable: false,
         action: "refresh"
       });
@@ -1937,14 +1042,6 @@ export class LocalDataStore implements DataStore {
     batch.variantsCount = state.variants.filter((variant) => variant.batchId === batch.id && variant.status !== "eliminada").length;
     batch.lastActivityAt = timestamp;
     batch.updatedAt = timestamp;
-    await this.createOutboxEvent({
-      eventType: "generacion_solicitada",
-      aggregateType: "batch",
-      aggregateId: batch.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId, variantsPerPhoto: input.variantsPerPhoto, created, available }
-    });
     await this.persist();
     return { job, created, available, variants: touched };
   }
@@ -2095,15 +1192,6 @@ export class LocalDataStore implements DataStore {
       batch.lastActivityAt = timestamp;
       batch.updatedAt = timestamp;
     }
-    this.consumeVariantReservation(state, variant, input.jobId, asset.id);
-    await this.createOutboxEvent({
-      eventType: "variante_generada",
-      aggregateType: "variant",
-      aggregateId: variant.id,
-      workspaceId: variant.workspaceId,
-      businessId: variant.businessId,
-      payload: { batchId: variant.batchId, photoId: variant.photoId, jobId: input.jobId }
-    });
     await this.persist();
     return variant;
   }
@@ -2191,14 +1279,6 @@ export class LocalDataStore implements DataStore {
     batch.status = "completado";
     batch.lastActivityAt = timestamp;
     batch.updatedAt = timestamp;
-    await this.createOutboxEvent({
-      eventType: "calendario_confirmado",
-      aggregateType: "batch",
-      aggregateId: batch.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId, scheduledPostIds: scheduledPosts.map((post) => post.id) }
-    });
     await this.persist();
     return { scheduledPosts, job };
   }
@@ -2355,14 +1435,6 @@ export class LocalDataStore implements DataStore {
       operation: "publish_post",
       status: "succeeded"
     });
-    await this.createOutboxEvent({
-      eventType: "post_publicado",
-      aggregateType: "scheduled_post",
-      aggregateId: post.id,
-      workspaceId: post.workspaceId,
-      businessId: post.businessId,
-      payload: { facebookPostId: post.facebookPostId, jobId: job.id }
-    });
     await this.persist();
     return post;
   }
@@ -2377,7 +1449,6 @@ export class LocalDataStore implements DataStore {
     requestId: string;
   }): Promise<{ scheduledPost: ScheduledPost; job?: StoredJob }> {
     const state = await this.load();
-    this.assertWorkspaceBillingAllows(state, input.workspaceId, "publish");
     const post = this.requireScheduledPost(state, input.workspaceId, input.businessId, input.batchId, input.scheduledPostId);
     if (post.status === "publicada" || post.status === "cancelada") throw this.scheduledPostStateError("scheduled_post_not_editable");
     if (post.remoteStatus !== "no_enviado") {
@@ -2401,14 +1472,6 @@ export class LocalDataStore implements DataStore {
       runAfter: post.scheduledFor,
       payload: { scheduledPostId: post.id, deliveryMode: post.deliveryMode }
     });
-    await this.createOutboxEvent({
-      eventType: "post_reprogramado",
-      aggregateType: "scheduled_post",
-      aggregateId: post.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId, scheduledFor: input.scheduledFor }
-    });
     await this.persist();
     return { scheduledPost: post, job };
   }
@@ -2426,19 +1489,9 @@ export class LocalDataStore implements DataStore {
     if (post.status === "publicada") throw this.scheduledPostStateError("scheduled_post_already_published");
     if (post.remoteStatus !== "no_enviado" || post.facebookPostId) {
       post.status = "estado_incierto";
-      post.remoteStatus = "cancelacion_pendiente";
       post.updatedAt = now();
-      const job = await this.createJob({
-        type: "cancel_remote_post",
-        workspaceId: post.workspaceId,
-        businessId: post.businessId,
-        batchId: post.batchId,
-        variantId: post.variantId,
-        dedupeKey: `cancel_remote_post:${post.id}:${post.facebookPostId ?? "unknown"}`,
-        payload: { scheduledPostId: post.id }
-      });
       await this.persist();
-      return { scheduledPost: post, job };
+      return { scheduledPost: post };
     }
     post.status = "cancelada";
     post.updatedAt = now();
@@ -2447,14 +1500,6 @@ export class LocalDataStore implements DataStore {
       variant.status = "aprobada";
       variant.updatedAt = post.updatedAt;
     }
-    await this.createOutboxEvent({
-      eventType: "post_cancelado",
-      aggregateType: "scheduled_post",
-      aggregateId: post.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return { scheduledPost: post };
   }
@@ -2506,14 +1551,6 @@ export class LocalDataStore implements DataStore {
     }
     variant.caption = input.caption;
     variant.updatedAt = now();
-    await this.createOutboxEvent({
-      eventType: "caption_editado_por_usuario",
-      aggregateType: "variant",
-      aggregateId: variant.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { batchId: input.batchId, actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return variant;
   }
@@ -2557,14 +1594,6 @@ export class LocalDataStore implements DataStore {
     }
     variant.status = "aprobada";
     variant.updatedAt = timestamp;
-    await this.createOutboxEvent({
-      eventType: "variante_aprobada",
-      aggregateType: "variant",
-      aggregateId: variant.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { batchId: input.batchId, actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return variant;
   }
@@ -2584,14 +1613,6 @@ export class LocalDataStore implements DataStore {
     }
     variant.status = "rechazada";
     variant.updatedAt = now();
-    await this.createOutboxEvent({
-      eventType: "variante_rechazada",
-      aggregateType: "variant",
-      aggregateId: variant.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { batchId: input.batchId, actorId: input.actorId, requestId: input.requestId }
-    });
     await this.persist();
     return variant;
   }
@@ -2652,39 +1673,6 @@ export class LocalDataStore implements DataStore {
     return record;
   }
 
-  async createOutboxEvent(input: {
-    eventType: string;
-    aggregateType: string;
-    aggregateId: string;
-    workspaceId: string;
-    businessId?: string;
-    payload?: Record<string, unknown>;
-  }): Promise<OutboxEvent> {
-    const state = await this.load();
-    const timestamp = now();
-    const event: OutboxEvent = {
-      id: randomUUID(),
-      eventType: input.eventType,
-      aggregateType: input.aggregateType,
-      aggregateId: input.aggregateId,
-      workspaceId: input.workspaceId,
-      payload: input.payload ?? {},
-      status: "pending",
-      availableAt: timestamp,
-      attempts: 0,
-      createdAt: timestamp
-    };
-    if (input.businessId !== undefined) event.businessId = input.businessId;
-    state.outboxEvents.push(event);
-    await this.persist();
-    return event;
-  }
-
-  async listOutboxEvents(workspaceId: string): Promise<OutboxEvent[]> {
-    const state = await this.load();
-    return state.outboxEvents.filter((event) => event.workspaceId === workspaceId);
-  }
-
   async upsertExternalOperation(input: {
     operationKey: string;
     workspaceId: string;
@@ -2731,252 +1719,21 @@ export class LocalDataStore implements DataStore {
     return business;
   }
 
-  private metricDefinition(state: LocalState, provider: MetricDefinition["provider"], canonicalMetric: MetricDefinition["canonicalMetric"]) {
-    const definition = state.metricDefinitions.find(
-      (item) => item.provider === provider && item.canonicalMetric === canonicalMetric && item.status === "active"
-    );
-    if (!definition) throw new Error(`Metric definition not found: ${provider}:${canonicalMetric}`);
-    return definition;
-  }
-
-  private businessAutonomy(business: Business): BusinessAutonomySettings {
-    const timestamp = now();
-    const raw = business.autonomySettings as Partial<BusinessAutonomySettings>;
-    return this.normalizedAutonomy(raw, timestamp);
-  }
-
-  private normalizedAutonomy(input: Partial<BusinessAutonomySettings>, timestamp: string): BusinessAutonomySettings {
-    const base = defaultAutonomySettings(timestamp);
-    const incomingActions = input.actions ?? {};
-    for (const action of autonomyActions) {
-      const current = incomingActions[action] as Partial<ActionAutonomyState> | undefined;
-      if (!current) continue;
-      const merged = { ...base.actions[action]!, ...current, action, updatedAt: timestamp };
-      if (action === "FACEBOOK_PUBLISH" && !merged.explicitOptIn) {
-        merged.mode = "human_approval";
-        merged.paused = true;
-        merged.pauseReasons = [...new Set([...(merged.pauseReasons ?? []), "explicit_opt_in_required"])];
-      }
-      base.actions[action] = merged;
-    }
-    return { schemaVersion: "business_autonomy.v1", actions: base.actions, updatedAt: timestamp };
-  }
-
-  private hasBudgetPressure(state: LocalState, workspaceId: string) {
-    return state.usageMeters.some(
-      (meter) =>
-        meter.workspaceId === workspaceId &&
-        meter.limitValue !== undefined &&
-        this.money(meter.usedValue + meter.reservedValue) >= meter.limitValue
-    );
-  }
-
-  private hasSensitivePublishRisk(state: LocalState, workspaceId: string, businessId: string) {
-    const riskyPhotoIds = new Set(
-      state.photos
-        .filter((photo) => {
-          const sensitive = photo.visionAnalysis?.sensitiveElements as
-            | { personVisible?: boolean; priceVisible?: boolean; promotionVisible?: boolean }
-            | undefined;
-          return (
-            photo.workspaceId === workspaceId &&
-            photo.businessId === businessId &&
-            Boolean(sensitive?.personVisible || sensitive?.priceVisible || sensitive?.promotionVisible)
-          );
-        })
-        .map((photo) => photo.id)
-    );
-    if (riskyPhotoIds.size === 0) return false;
-    return state.variants.some(
-      (variant) =>
-        variant.workspaceId === workspaceId &&
-        variant.businessId === businessId &&
-        riskyPhotoIds.has(variant.photoId) &&
-        ["aprobada", "programada", "publicada"].includes(variant.status)
-    );
-  }
-
-  private recalculatePerformanceSummaries(
-    state: LocalState,
-    workspaceId: string,
-    businessId: string,
-    periodStart: string,
-    periodEnd: string,
-    generatedAt: string
-  ): PerformanceSummary[] {
-    const published = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === workspaceId &&
-        post.businessId === businessId &&
-        post.status === "publicada" &&
-        post.scheduledFor >= periodStart &&
-        post.scheduledFor <= periodEnd
-    );
-    const failed = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === workspaceId &&
-        post.businessId === businessId &&
-        ["fallida", "estado_incierto"].includes(post.status) &&
-        post.scheduledFor >= periodStart &&
-        post.scheduledFor <= periodEnd
-    );
-    const scheduled = state.scheduledPosts.filter(
-      (post) =>
-        post.workspaceId === workspaceId &&
-        post.businessId === businessId &&
-        post.scheduledFor >= periodStart &&
-        post.scheduledFor <= periodEnd
-    );
-    const sampleSize = published.length;
-    const confidence = this.confidenceForSample(sampleSize);
-    const reasonCodes = [
-      ...(sampleSize < 20 ? ["sample_size_low"] : []),
-      ...state.metricDefinitions.some((definition) => definition.provider === "meta" && definition.status !== "active")
-        ? ["meta_insights_unavailable"]
-        : []
-    ];
-    const businessSummary: PerformanceSummary = {
-      id: randomUUID(),
-      workspaceId,
-      businessId,
-      scope: "business_week",
-      scopeKey: periodStart.slice(0, 10),
-      periodStart,
-      periodEnd,
-      sampleSize,
-      metrics: {
-        publish_success: published.length,
-        publish_failure: failed.length,
-        week_coverage: Math.min(1, scheduled.length / 7)
-      },
-      confidence,
-      reasonCodes,
-      generatedAt
-    };
-    const byStyle = new Map<string, { label: string; published: number; scheduled: number }>();
-    for (const post of scheduled) {
-      const key = post.styleId ?? "sin_estilo";
-      const entry = byStyle.get(key) ?? { label: post.styleName ?? key, published: 0, scheduled: 0 };
-      entry.scheduled += 1;
-      if (post.status === "publicada") entry.published += 1;
-      byStyle.set(key, entry);
-    }
-    const styleSummaries = [...byStyle.entries()].map(([styleId, entry]) => ({
-      id: randomUUID(),
-      workspaceId,
-      businessId,
-      scope: "style" as const,
-      scopeKey: styleId,
-      periodStart,
-      periodEnd,
-      sampleSize: entry.published,
-      metrics: {
-        publish_success: entry.published,
-        scheduled_posts: entry.scheduled,
-        acceptance_proxy: entry.scheduled === 0 ? 0 : entry.published / entry.scheduled
-      },
-      confidence: this.confidenceForSample(entry.published),
-      reasonCodes: entry.published < 20 ? ["sample_size_low", "style_label:" + entry.label] : ["style_label:" + entry.label],
-      generatedAt
-    }));
-    const summaries = [businessSummary, ...styleSummaries];
-    state.performanceSummaries = state.performanceSummaries.filter(
-      (summary) =>
-        !(
-          summary.workspaceId === workspaceId &&
-          summary.businessId === businessId &&
-          summary.periodStart === periodStart &&
-          summary.periodEnd === periodEnd
-        )
-    );
-    state.performanceSummaries.push(...summaries);
-    return summaries;
-  }
-
-  private confidenceForSample(sampleSize: number): PerformanceSummary["confidence"] {
-    if (sampleSize < 20) return "exploratoria";
-    if (sampleSize < 100) return "media";
-    return "alta";
-  }
-
-  private weekStart(date: Date) {
-    const copy = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
-    const day = copy.getUTCDay() || 7;
-    copy.setUTCDate(copy.getUTCDate() - day + 1);
-    return copy;
-  }
-
   private requireBatch(state: LocalState, workspaceId: string, businessId: string, batchId: string) {
     const batch = state.batches.find(
-      (item) => item.workspaceId === workspaceId && item.businessId === businessId && item.id === batchId
+      (item) => item.id === batchId && item.workspaceId === workspaceId && item.businessId === businessId
     );
     if (!batch) {
       throw new AppError({
         code: "batch_not_found",
         statusCode: 404,
-        message: "Batch not found in business",
+        message: "Batch not found",
         userMessage: "No encontramos ese lote.",
         retryable: false,
         action: "refresh"
       });
     }
     return batch;
-  }
-
-  private requireWorkspace(state: LocalState, workspaceId: string) {
-    const workspace = state.workspaces.find((item) => item.id === workspaceId);
-    if (!workspace) {
-      throw new AppError({
-        code: "workspace_not_found",
-        statusCode: 404,
-        message: "Workspace not found",
-        userMessage: "No encontramos tu workspace.",
-        retryable: false,
-        action: "refresh"
-      });
-    }
-    return workspace;
-  }
-
-  private assertWorkspaceBillingAllows(state: LocalState, workspaceId: string, action: "costly" | "publish") {
-    const workspace = this.requireWorkspace(state, workspaceId);
-    if (!["trial", "active"].includes(workspace.billingStatus)) {
-      throw new AppError({
-        code: "billing_status_blocked",
-        statusCode: 402,
-        message: `Workspace billing status blocks ${action}: ${workspace.billingStatus}`,
-        userMessage:
-          action === "publish"
-            ? "Tu plan necesita atencion antes de publicar."
-            : "Tu plan necesita atencion antes de usar funciones con costo.",
-        retryable: false,
-        action: "contact_support"
-      });
-    }
-  }
-
-  private activePricingRule(state: LocalState) {
-    const timestamp = now();
-    const rule = state.pricingRules
-      .filter(
-        (item) =>
-          item.active &&
-          item.operation === "generated_variant" &&
-          item.effectiveFrom <= timestamp &&
-          (item.effectiveTo === undefined || item.effectiveTo > timestamp)
-      )
-      .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))[0];
-    if (!rule) {
-      throw new AppError({
-        code: "pricing_rule_missing",
-        statusCode: 503,
-        message: "No active pricing rule for generated variants",
-        userMessage: "No pudimos calcular el costo en este momento.",
-        retryable: true,
-        action: "retry"
-      });
-    }
-    return rule;
   }
 
   private validPhotosForGeneration(state: LocalState, workspaceId: string, businessId: string, batchId: string) {
@@ -2988,162 +1745,6 @@ export class LocalDataStore implements DataStore {
         photo.status === "validada" &&
         photo.visionAnalysis
     );
-  }
-
-  private usageSnapshot(
-    state: LocalState,
-    workspace: Workspace,
-    metric: UsageMeter["metric"],
-    requestedValue: number
-  ): { metric: UsageMeter["metric"]; limitValue?: number | null; usedValue: number; reservedValue: number; availableValue?: number | null } {
-    const meter = this.ensureUsageMeter(state, workspace.id, metric, this.entitlementLimit(workspace, metric));
-    const limitValue = meter.limitValue ?? null;
-    const availableValue = limitValue === null ? null : this.money(limitValue - meter.usedValue - meter.reservedValue - requestedValue);
-    return {
-      metric,
-      limitValue,
-      usedValue: meter.usedValue,
-      reservedValue: meter.reservedValue,
-      availableValue
-    };
-  }
-
-  private entitlementLimit(workspace: Workspace, metric: UsageMeter["metric"]) {
-    const entitlements = (workspace.entitlements ?? {}) as Record<string, unknown>;
-    const fromKey = (key: string) => {
-      const value = entitlements[key];
-      return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-    };
-    if (metric === "generated_variants") return fromKey("monthlyGeneratedVariants");
-    if (metric === "ai_customer_spend_usd") return fromKey("monthlyAiBudgetUsd") ?? fromKey("includedAiCreditsUsd");
-    if (metric === "ai_provider_cost_usd") return fromKey("monthlyProviderBudgetUsd");
-    if (metric === "photo_uploads") return fromKey("monthlyPhotoUploads");
-    if (metric === "scheduled_posts") return fromKey("monthlyScheduledPosts");
-    return undefined;
-  }
-
-  private ensureUsageMeter(state: LocalState, workspaceId: string, metric: UsageMeter["metric"], limitValue?: number) {
-    const periodStart = this.currentPeriodStart();
-    let meter = state.usageMeters.find(
-      (item) => item.workspaceId === workspaceId && item.metric === metric && item.periodStart === periodStart
-    );
-    if (!meter) {
-      meter = {
-        id: randomUUID(),
-        workspaceId,
-        metric,
-        periodStart,
-        periodEnd: this.currentPeriodEnd(),
-        reservedValue: 0,
-        usedValue: 0,
-        updatedAt: now()
-      };
-      if (limitValue !== undefined) meter.limitValue = limitValue;
-      state.usageMeters.push(meter);
-    } else if (limitValue !== undefined) {
-      meter.limitValue = limitValue;
-    }
-    return meter;
-  }
-
-  private reserveUsage(state: LocalState, workspaceId: string, metric: UsageMeter["metric"], value: number) {
-    const workspace = this.requireWorkspace(state, workspaceId);
-    const meter = this.ensureUsageMeter(state, workspaceId, metric, this.entitlementLimit(workspace, metric));
-    const nextReserved = this.money(meter.reservedValue + value);
-    if (meter.limitValue !== undefined && this.money(meter.usedValue + nextReserved) > meter.limitValue) {
-      throw new AppError({
-        code: "usage_limit_exceeded",
-        statusCode: 409,
-        message: `Usage limit exceeded for ${metric}`,
-        userMessage: "Este lote supera el limite disponible del plan.",
-        retryable: false,
-        action: "contact_support"
-      });
-    }
-    meter.reservedValue = nextReserved;
-    meter.updatedAt = now();
-  }
-
-  private consumeUsage(state: LocalState, workspaceId: string, metric: UsageMeter["metric"], value: number) {
-    const workspace = this.requireWorkspace(state, workspaceId);
-    const meter = this.ensureUsageMeter(state, workspaceId, metric, this.entitlementLimit(workspace, metric));
-    meter.reservedValue = Math.max(0, this.money(meter.reservedValue - value));
-    meter.usedValue = this.money(meter.usedValue + value);
-    meter.updatedAt = now();
-  }
-
-  private hasReservation(state: LocalState, workspaceId: string, batchId: string, priceVersion: string) {
-    return state.costLedger.some(
-      (entry) =>
-        entry.workspaceId === workspaceId &&
-        entry.batchId === batchId &&
-        entry.priceVersion === priceVersion &&
-        entry.entryType === "reservation" &&
-        entry.status === "reserved"
-    );
-  }
-
-  private consumeVariantReservation(state: LocalState, variant: Variant, jobId: string, generatedAssetId: string) {
-    const batch = state.batches.find((item) => item.id === variant.batchId && item.workspaceId === variant.workspaceId);
-    if (!batch?.confirmedPriceVersion) return;
-    const operationKey = `openai_image:${variant.id}`;
-    const existingActual = state.costLedger.find((entry) => entry.operationKey === operationKey && entry.entryType === "actual");
-    if (existingActual) return;
-    const rule = state.pricingRules.find((item) => item.priceVersion === batch.confirmedPriceVersion) ?? this.activePricingRule(state);
-    const customerCost = this.money(rule.customerUnitPriceUsd / rule.unitSize);
-    const providerCost = this.money(rule.unitCostUsd / rule.unitSize);
-    this.consumeUsage(state, variant.workspaceId, "generated_variants", 1);
-    this.consumeUsage(state, variant.workspaceId, "ai_customer_spend_usd", customerCost);
-    this.consumeUsage(state, variant.workspaceId, "ai_provider_cost_usd", providerCost);
-    state.costLedger.push({
-      id: randomUUID(),
-      workspaceId: variant.workspaceId,
-      businessId: variant.businessId,
-      batchId: variant.batchId,
-      jobId,
-      variantId: variant.id,
-      operation: "generated_variant",
-      operationKey,
-      entryType: "actual",
-      usageMetric: "generated_variants",
-      quantity: 1,
-      priceVersion: rule.priceVersion,
-      customerCostUsd: customerCost,
-      providerCostUsd: providerCost,
-      status: "used",
-      createdAt: now()
-    });
-    state.costLedger.push({
-      id: randomUUID(),
-      workspaceId: variant.workspaceId,
-      businessId: variant.businessId,
-      batchId: variant.batchId,
-      jobId,
-      variantId: variant.id,
-      operation: "generated_asset",
-      operationKey: `asset:${generatedAssetId}`,
-      entryType: "actual",
-      quantity: 1,
-      priceVersion: rule.priceVersion,
-      customerCostUsd: 0,
-      providerCostUsd: 0,
-      status: "used",
-      createdAt: now()
-    });
-  }
-
-  private currentPeriodStart() {
-    const date = new Date();
-    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
-  }
-
-  private currentPeriodEnd() {
-    const date = new Date();
-    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1, 0, 0, 0, 0)).toISOString();
-  }
-
-  private money(value: number) {
-    return Math.round(value * 1_000_000) / 1_000_000;
   }
 
   private requireVariant(
@@ -3364,7 +1965,7 @@ export class LocalDataStore implements DataStore {
     if (this.state) return this.state;
     try {
       const content = await readFile(this.path, "utf8");
-      this.state = { ...emptyState(), ...(JSON.parse(content) as Partial<LocalState>) };
+      this.state = mergeLocalState(emptyState(), { ...emptyState(), ...(JSON.parse(content) as Partial<LocalState>) });
     } catch {
       this.state = emptyState();
       await this.persist();

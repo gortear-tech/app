@@ -27,11 +27,9 @@ const requiredEnv = [
   "SUPABASE_URL",
   "SUPABASE_SERVICE_ROLE",
   "DATABASE_URL",
-  "BILLING_WEBHOOK_SECRET",
   "FEATURE_META_PUBLISHING",
   "FEATURE_OPENAI_VISION",
-  "FEATURE_OPENAI_IMAGE_GENERATION",
-  "FEATURE_AUTONOMY"
+  "FEATURE_OPENAI_IMAGE_GENERATION"
 ];
 
 for (const key of requiredEnv) {
@@ -46,8 +44,8 @@ if (!renderYaml.includes("ALLOW_LOCAL_DATASTORE") || !renderYaml.includes('value
   fail("render.yaml must disable local datastore for deployed services");
 }
 
-if (!packageJson.includes('"smoke:deploy"') || !deploySmoke.includes("/ready") || !deploySmoke.includes("worker")) {
-  fail("deploy smoke script must verify deployed /ready including worker readiness");
+if (!packageJson.includes('"smoke:deploy"') || !deploySmoke.includes("/ready")) {
+  fail("deploy smoke script must verify deployed /ready");
 }
 
 if (
@@ -82,8 +80,6 @@ for (const method of [
   "createUploadIntent",
   "completeUpload",
   "completeAnalyzePhoto",
-  "estimateBatchCost",
-  "confirmBatchCost",
   "requestGenerateBatch",
   "completeGenerateVariant",
   "approveVariant",
@@ -91,17 +87,6 @@ for (const method of [
   "completeSchedulePosts",
   "publishScheduledPost",
   "publishScheduledPostNow",
-  "requestCollectMetrics",
-  "completeCollectMetrics",
-  "requestWeeklyReport",
-  "completeWeeklyReport",
-  "evaluateBusinessAutonomy",
-  "requestBatchCaptionEval",
-  "completeBatchCaptionEval",
-  "listAiEvaluations",
-  "getBillingStatus",
-  "createUpgradeIntent",
-  "processBillingProviderEvent"
 ]) {
   if (!supabaseStore.includes(`async ${method}`)) fail(`Supabase datastore missing ${method}`);
 }
@@ -112,12 +97,8 @@ const expectedMigrationPrefixes = [
   "0003_",
   "0004_",
   "0005_",
-  "0006_",
   "0007_",
-  "0008_",
-  "0009_",
-  "0010_",
-  "0011_"
+  "0015_",
 ];
 
 for (const prefix of expectedMigrationPrefixes) {
@@ -132,12 +113,11 @@ for (const [name, content] of migrationContents) {
 
 for (const path of ["apps/mobile/App.tsx", "apps/mobile/src/api/client.ts"]) {
   const content = read(path);
-  if (/SUPABASE_SERVICE_ROLE|META_APP_SECRET|OPENAI_API_KEY|BILLING_WEBHOOK_SECRET/.test(content)) {
+  if (/SUPABASE_SERVICE_ROLE|META_APP_SECRET|OPENAI_API_KEY/.test(content)) {
     fail(`${path} contains server-only secret reference`);
   }
 }
 
-if (!renderYaml.includes("REQUIRE_WORKER_HEARTBEAT")) warn("worker heartbeat readiness is not configured in render.yaml");
 if (!envExample.includes("SENTRY_DSN=")) warn("SENTRY_DSN is missing from .env.example");
 
 for (const message of warnings) console.warn(`warning: ${message}`);

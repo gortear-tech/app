@@ -26,31 +26,22 @@ import {
 import {
   approveVariant,
   cancelScheduledPost,
-  collectMetrics,
-  confirmBatchCost,
   confirmCalendar,
   connectMeta,
   createBatch,
   clearStoredSession,
   ensureSessionForMeta,
-  estimateBatchCost,
   generateBatchVariants,
-  generateWeeklyReport,
   getActiveBatch,
   getBatchDetail,
-  getBillingStatus,
   getBootstrapStatus,
   getBusinessDetail,
-  getPerformance,
   getStoredSessionToken,
-  getWeeklyReport,
   listMetaPages,
   listScheduledPosts,
   publishScheduledPost,
   rejectVariant,
-  runCaptionEval,
   selectMetaPage,
-  updateBusinessAutonomy,
   updateVariantCaption,
   uploadPhoto
 } from "./src/api/client";
@@ -181,25 +172,10 @@ function BootScreen() {
     queryFn: async () => listScheduledPosts(token, selectedBusinessId ?? ""),
     enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
   });
-  const performance = useQuery({
-    queryKey: ["performance", selectedBusinessId],
-    queryFn: async () => getPerformance(token, selectedBusinessId ?? ""),
-    enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
-  });
-  const weeklyReport = useQuery({
-    queryKey: ["weekly-report", selectedBusinessId],
-    queryFn: async () => getWeeklyReport(token, selectedBusinessId ?? ""),
-    enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
-  });
   const businessDetail = useQuery({
     queryKey: ["business-detail", selectedBusinessId],
     queryFn: async () => getBusinessDetail(token, selectedBusinessId ?? ""),
     enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
-  });
-  const billing = useQuery({
-    queryKey: ["billing-status"],
-    queryFn: async () => getBillingStatus(token),
-    enabled: Boolean(token && bootstrap.data?.nextStep === "home")
   });
   const pages = useQuery({
     queryKey: ["pages"],
@@ -235,10 +211,7 @@ function BootScreen() {
     await queryClient.invalidateQueries({ queryKey: ["active-batch"] });
     await queryClient.invalidateQueries({ queryKey: ["batch-detail"] });
     await queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] });
-    await queryClient.invalidateQueries({ queryKey: ["performance"] });
-    await queryClient.invalidateQueries({ queryKey: ["weekly-report"] });
     await queryClient.invalidateQueries({ queryKey: ["business-detail"] });
-    await queryClient.invalidateQueries({ queryKey: ["billing-status"] });
   };
 
   const connect = useMutation({
@@ -346,9 +319,6 @@ function BootScreen() {
     mutationFn: async () => {
       const businessId = selectedBusinessId ?? "";
       const batchId = activeBatch.data?.id ?? "";
-      const estimate = await estimateBatchCost(token, businessId, batchId, 1);
-      if (!estimate.canConfirm) throw new Error("Este lote supera el limite disponible.");
-      await confirmBatchCost(token, businessId, batchId, 1, estimate.priceVersion);
       return generateBatchVariants(token, businessId, batchId, 1);
     },
     onSuccess: invalidateWork
@@ -381,43 +351,6 @@ function BootScreen() {
     mutationFn: async (post: { id: string; batchId: string }) => cancelScheduledPost(token, selectedBusinessId ?? "", post.batchId, post.id),
     onSuccess: invalidateWork
   });
-  const collect = useMutation({ mutationFn: async () => collectMetrics(token, selectedBusinessId ?? ""), onSuccess: invalidateWork });
-  const reportGenerate = useMutation({
-    mutationFn: async () => generateWeeklyReport(token, selectedBusinessId ?? ""),
-    onSuccess: invalidateWork
-  });
-  const resetAutonomy = useMutation({
-    mutationFn: async () => {
-      const settings = businessDetail.data?.business.autonomySettings as
-        | { actions?: Record<string, Record<string, unknown>> }
-        | undefined;
-      const timestamp = new Date().toISOString();
-      return updateBusinessAutonomy(token, selectedBusinessId ?? "", {
-        schemaVersion: "business_autonomy.v1",
-        actions: Object.fromEntries(
-          Object.entries(settings?.actions ?? {}).map(([action, value]) => [
-            action,
-            {
-              ...value,
-              mode: action === "FACEBOOK_PUBLISH" ? "human_approval" : "suggest_only",
-              paused: action === "FACEBOOK_PUBLISH",
-              explicitOptIn: false,
-              score: 0,
-              approvals: 0,
-              consecutiveApprovals: 0,
-              consecutiveRejections: 0,
-              pauseReasons: action === "FACEBOOK_PUBLISH" ? ["explicit_opt_in_required"] : [],
-              updatedAt: timestamp
-            }
-          ])
-        ),
-        updatedAt: timestamp
-      });
-    },
-    onSuccess: invalidateWork
-  });
-  const captionEval = useMutation({ mutationFn: async () => runCaptionEval(token, selectedBusinessId ?? ""), onSuccess: invalidateWork });
-
   const openPage = (page: MetaPage) => {
     if (page.id === selectedPage?.id || page.isSelected) {
       setTab("create");
@@ -443,10 +376,7 @@ function BootScreen() {
       queryClient.invalidateQueries({ queryKey: ["active-batch"] }),
       queryClient.invalidateQueries({ queryKey: ["batch-detail"] }),
       queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] }),
-      queryClient.invalidateQueries({ queryKey: ["performance"] }),
-      queryClient.invalidateQueries({ queryKey: ["weekly-report"] }),
-      queryClient.invalidateQueries({ queryKey: ["business-detail"] }),
-      queryClient.invalidateQueries({ queryKey: ["billing-status"] })
+      queryClient.invalidateQueries({ queryKey: ["business-detail"] })
     ]);
   };
 
@@ -459,10 +389,7 @@ function BootScreen() {
     activeBatch.error ??
     batchDetail.error ??
     scheduledPosts.error ??
-    performance.error ??
-    weeklyReport.error ??
     businessDetail.error ??
-    billing.error ??
     startBatch.error ??
     uploadSelectedPhotos.error ??
     generateVariants.error ??
@@ -471,11 +398,7 @@ function BootScreen() {
     reject.error ??
     schedule.error ??
     publishNow.error ??
-    cancelPost.error ??
-    collect.error ??
-    reportGenerate.error ??
-    resetAutonomy.error ??
-    captionEval.error;
+    cancelPost.error;
 
   const photos = batchDetail.data?.photos ?? [];
   const variants = batchDetail.data?.variants ?? [];
@@ -485,7 +408,6 @@ function BootScreen() {
   const failedPosts = posts.filter((post) => post.status === "fallida" || post.status === "estado_incierto");
   const activePosts = posts.filter((post) => post.status !== "cancelada");
   const weekCoverage = Math.min(100, Math.round((activePosts.length / 7) * 100));
-  const latestBusinessSummary = (performance.data?.summaries ?? []).find((summary) => summary.scope === "business_week");
   const needsReconnect = bootstrap.data?.authenticated && bootstrap.data.facebookTokenStatus === "expirado";
   const refreshing =
     tokenQuery.isFetching ||
@@ -494,10 +416,7 @@ function BootScreen() {
     activeBatch.isFetching ||
     batchDetail.isFetching ||
     scheduledPosts.isFetching ||
-    performance.isFetching ||
-    weeklyReport.isFetching ||
-    businessDetail.isFetching ||
-    billing.isFetching;
+    businessDetail.isFetching;
   const nextAction = !activeBatch.data
     ? "Crear lote"
     : photos.some((photo) => photo.status === "validada") && variants.length === 0
@@ -572,7 +491,7 @@ function BootScreen() {
       <View style={styles.progressTrack}>
         <View style={[styles.progressFill, { width: `${weekCoverage}%` }]} />
       </View>
-      <MetricGrid
+      <SummaryGrid
         items={[
           { label: "Fotos", value: String(activeBatch.data?.photosCount ?? 0) },
           { label: "Variantes", value: String(activeBatch.data?.variantsCount ?? 0) },
@@ -595,11 +514,6 @@ function BootScreen() {
           }}
           disabled={startBatch.isPending || !selectedBusinessId}
         />
-      </Panel>
-      <Panel title="Aprendizaje">
-        <Text style={styles.muted}>Confianza: {latestBusinessSummary?.confidence ?? "exploratoria"}</Text>
-        <Text style={styles.muted}>Muestra: {latestBusinessSummary?.sampleSize ?? 0} publicaciones.</Text>
-        <Text style={styles.muted}>No se declaran ganadores con muestra pequena.</Text>
       </Panel>
     </Screen>
   );
@@ -701,69 +615,36 @@ function BootScreen() {
     </Screen>
   );
 
-  const renderBusiness = () => {
-    const report = weeklyReport.data?.report ?? null;
-    return (
-      <Screen>
-        <Panel title="Negocio">
-          <Text style={styles.muted}>Workspace: {bootstrap.data?.authenticated ? bootstrap.data.workspace?.name : "Sin sesion"}</Text>
-          <Text style={styles.muted}>Plan: {billing.data?.workspace.plan ?? "piloto"} / {billing.data?.workspace.billingStatus ?? "trial"}</Text>
-          <View style={styles.policyRow}>
-            <Ionicons name="shield-checkmark-outline" size={18} color={palette.good} />
-            <View style={styles.flex}>
-              <Text style={styles.rowTitle}>Publicacion con confirmacion</Text>
-              <Text style={styles.muted}>Nada se envia a Facebook sin que lo apruebes.</Text>
-            </View>
+  const renderBusiness = () => (
+    <Screen>
+      <Panel title="Negocio">
+        <Text style={styles.muted}>Workspace: {bootstrap.data?.authenticated ? bootstrap.data.workspace?.name : "Sin sesion"}</Text>
+        <View style={styles.policyRow}>
+          <Ionicons name="shield-checkmark-outline" size={18} color={palette.good} />
+          <View style={styles.flex}>
+            <Text style={styles.rowTitle}>Publicacion con confirmacion</Text>
+            <Text style={styles.muted}>Nada se envia a Facebook sin que lo apruebes.</Text>
           </View>
-          <Button label={signOut.isPending ? "Saliendo..." : "Cerrar sesion"} icon="log-out-outline" variant="secondary" disabled={signOut.isPending} onPress={() => signOut.mutate()} />
-        </Panel>
-        <Panel title="Paginas de Facebook">
-          {(pages.data ?? []).length === 0 ? (
-            <Text style={styles.muted}>Conecta Facebook para ver tus paginas.</Text>
-          ) : null}
-          {(pages.data ?? []).map((page) => (
-            <PageCard
-              key={page.id}
-              page={page}
-              selected={page.isSelected}
-              disabled={selectPage.isPending}
-              onPress={() => openPage(page)}
-            />
-          ))}
-          <Button label={connect.isPending ? "Conectando..." : "Reconectar Facebook"} icon="logo-facebook" variant="secondary" disabled={connect.isPending} onPress={() => connect.mutate()} />
-        </Panel>
-        <Panel title="Reporte semanal">
-          {report ? (
-            <>
-              <Text style={styles.muted}>{report.sections.worked[0]}</Text>
-              <Text style={styles.muted}>{report.sections.didNotWork[0]}</Text>
-              <Text style={styles.muted}>{report.sections.nextActions[0]}</Text>
-            </>
-          ) : (
-            <Text style={styles.muted}>{weeklyReport.data?.emptyReason ?? "Genera un reporte cuando haya actividad."}</Text>
-          )}
-          <ActionPair
-            primaryLabel={reportGenerate.isPending ? "Generando..." : "Reporte"}
-            primaryDisabled={reportGenerate.isPending || !selectedBusinessId}
-            onPrimary={() => reportGenerate.mutate()}
-            primaryIcon="document-text-outline"
-            secondaryLabel={collect.isPending ? "Recolectando..." : "Metricas"}
-            secondaryDisabled={collect.isPending || !selectedBusinessId}
-            onSecondary={() => collect.mutate()}
-            secondaryIcon="analytics-outline"
+        </View>
+        <Button label={signOut.isPending ? "Saliendo..." : "Cerrar sesion"} icon="log-out-outline" variant="secondary" disabled={signOut.isPending} onPress={() => signOut.mutate()} />
+      </Panel>
+      <Panel title="Paginas de Facebook">
+        {(pages.data ?? []).length === 0 ? (
+          <Text style={styles.muted}>Conecta Facebook para ver tus paginas.</Text>
+        ) : null}
+        {(pages.data ?? []).map((page) => (
+          <PageCard
+            key={page.id}
+            page={page}
+            selected={page.isSelected}
+            disabled={selectPage.isPending}
+            onPress={() => openPage(page)}
           />
-        </Panel>
-        <Panel title="Autonomia">
-          <Text style={styles.muted}>FACEBOOK_PUBLISH requiere opt-in explicito, token sano y presupuesto disponible.</Text>
-          <Button label={resetAutonomy.isPending ? "Reseteando..." : "Resetear autonomia"} icon="shield-checkmark-outline" variant="secondary" disabled={resetAutonomy.isPending} onPress={() => resetAutonomy.mutate()} />
-        </Panel>
-        <Panel title="Evaluaciones IA">
-          <Text style={styles.muted}>Las evaluaciones de captions corren como job y no bloquean aprobaciones en vivo.</Text>
-          <Button label={captionEval.isPending ? "Encolando..." : "Ejecutar eval de captions"} icon="flask-outline" disabled={captionEval.isPending} onPress={() => captionEval.mutate()} />
-        </Panel>
-      </Screen>
-    );
-  };
+        ))}
+        <Button label={connect.isPending ? "Conectando..." : "Reconectar Facebook"} icon="logo-facebook" variant="secondary" disabled={connect.isPending} onPress={() => connect.mutate()} />
+      </Panel>
+    </Screen>
+  );
 
   const renderCurrent = () => {
     if (bootstrap.data?.nextStep !== "home") return renderOnboarding();
@@ -1085,13 +966,13 @@ function MiniButton({ label, onPress, disabled, tone }: { label: string; onPress
   );
 }
 
-function MetricGrid({ items }: { items: Array<{ label: string; value: string }> }) {
+function SummaryGrid({ items }: { items: Array<{ label: string; value: string }> }) {
   return (
-    <View style={styles.metricGrid}>
+    <View style={styles.summaryGrid}>
       {items.map((item) => (
-        <View key={item.label} style={styles.metricCell}>
-          <Text style={styles.metricValue}>{item.value}</Text>
-          <Text style={styles.metricLabel}>{item.label}</Text>
+        <View key={item.label} style={styles.summaryCell}>
+          <Text style={styles.summaryValue}>{item.value}</Text>
+          <Text style={styles.summaryLabel}>{item.label}</Text>
         </View>
       ))}
     </View>
@@ -1348,8 +1229,8 @@ const styles = StyleSheet.create({
   },
   progressTrack: { height: 8, borderRadius: 4, overflow: "hidden", backgroundColor: "#332f2b" },
   progressFill: { height: 8, borderRadius: 4, backgroundColor: palette.facebook },
-  metricGrid: { flexDirection: "row", gap: 8 },
-  metricCell: {
+  summaryGrid: { flexDirection: "row", gap: 8 },
+  summaryCell: {
     flex: 1,
     minHeight: 76,
     justifyContent: "center",
@@ -1359,8 +1240,8 @@ const styles = StyleSheet.create({
     padding: 12,
     backgroundColor: palette.panel
   },
-  metricValue: { color: palette.text, fontSize: 24, fontWeight: "900" },
-  metricLabel: { color: palette.muted, fontSize: 12, fontWeight: "700" },
+  summaryValue: { color: palette.text, fontSize: 24, fontWeight: "900" },
+  summaryLabel: { color: palette.muted, fontSize: 12, fontWeight: "700" },
   button: {
     minHeight: 50,
     flexDirection: "row",

@@ -1,27 +1,18 @@
 import {
   BatchDetail,
   BatchSummary,
-  BatchCaptionEvalResponse,
   BootstrapStatus,
   Business,
   BusinessDetailResponse,
-  BusinessMutationResponse,
-  BillingStatusResponse,
-  ConfirmCostResponse,
   ConfirmCalendarResponse,
-  EstimateCostResponse,
   GenerateBatchResponse,
-  MetricsCollectResponse,
   MetaConnectResponse,
   MetaPage,
   MobileAuthSessionResponse,
-  PerformanceResponse,
   ScheduledPost,
   ScheduledPostMutationResponse,
   ScheduledPostsResponse,
-  VariantMutationResponse,
-  WeeklyReportGenerateResponse,
-  WeeklyReportResponse
+  VariantMutationResponse
 } from "@fbmaniaco/shared";
 import * as SecureStore from "expo-secure-store";
 import { getMobileConfig } from "../config";
@@ -284,27 +275,6 @@ export const getBusinessDetail = async (token: string, businessId: string): Prom
   return json as BusinessDetailResponse;
 };
 
-export const updateBusinessAutonomy = async (
-  token: string,
-  businessId: string,
-  autonomySettings: Business["autonomySettings"]
-): Promise<BusinessMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}`, {
-    method: "PATCH",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey("business-autonomy"),
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({ autonomySettings })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos actualizar la autonomia.");
-  return json as BusinessMutationResponse;
-};
-
 export const getActiveBatch = async (token: string, businessId: string): Promise<BatchSummary | null> => {
   const { apiUrl } = getMobileConfig();
   const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/active`, {
@@ -431,50 +401,6 @@ export const generateBatchVariants = async (
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos generar variantes.");
   return json as GenerateBatchResponse;
-};
-
-export const estimateBatchCost = async (
-  token: string,
-  businessId: string,
-  batchId: string,
-  variantsPerPhoto: number
-): Promise<EstimateCostResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/estimate-cost`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({ variantsPerPhoto })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos estimar el costo.");
-  return json as EstimateCostResponse;
-};
-
-export const confirmBatchCost = async (
-  token: string,
-  businessId: string,
-  batchId: string,
-  variantsPerPhoto: number,
-  priceVersion: string
-): Promise<ConfirmCostResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/confirm-cost`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey("confirm-cost"),
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({ variantsPerPhoto, priceVersion })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos confirmar el costo.");
-  return json as ConfirmCostResponse;
 };
 
 export const updateVariantCaption = async (
@@ -621,98 +547,4 @@ export const cancelScheduledPost = async (
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos cancelar la publicacion.");
   return json as ScheduledPostMutationResponse;
-};
-
-export const collectMetrics = async (token: string, businessId: string): Promise<MetricsCollectResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/metrics/collect`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey("collect-metrics"),
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({ window: "7d" })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos recolectar metricas.");
-  return json as MetricsCollectResponse;
-};
-
-export const getPerformance = async (token: string, businessId: string): Promise<PerformanceResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/performance`, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      "x-request-id": `mobile-${Date.now()}`
-    }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer el aprendizaje.");
-  return json as PerformanceResponse;
-};
-
-export const getWeeklyReport = async (token: string, businessId: string): Promise<WeeklyReportResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/reports/weekly`, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      "x-request-id": `mobile-${Date.now()}`
-    }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer el reporte semanal.");
-  return json as WeeklyReportResponse;
-};
-
-export const generateWeeklyReport = async (token: string, businessId: string): Promise<WeeklyReportGenerateResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/reports/weekly/generate`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey("weekly-report"),
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos generar el reporte semanal.");
-  return json as WeeklyReportGenerateResponse;
-};
-
-export const runCaptionEval = async (
-  token: string,
-  businessId: string,
-  candidateCaptionEditRate = 0.18
-): Promise<BatchCaptionEvalResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/evals/caption`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "idempotency-key": idempotencyKey("caption-eval"),
-      "x-request-id": `mobile-${Date.now()}`
-    },
-    body: JSON.stringify({ candidateCaptionEditRate })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos iniciar la evaluacion.");
-  return json as BatchCaptionEvalResponse;
-};
-
-export const getBillingStatus = async (token: string): Promise<BillingStatusResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/billing/status`, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      "x-request-id": `mobile-${Date.now()}`
-    }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer tu plan.");
-  return json as BillingStatusResponse;
 };

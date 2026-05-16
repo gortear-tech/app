@@ -2,19 +2,11 @@ import { Static, Type } from "@sinclair/typebox";
 import { JobStatus } from "./states.js";
 
 export const JobType = Type.Union([
-  Type.Literal("mock_job"),
   Type.Literal("analyze_photo"),
   Type.Literal("generate_batch"),
   Type.Literal("generate_variant"),
   Type.Literal("schedule_posts"),
-  Type.Literal("publish_post"),
-  Type.Literal("retry_post"),
-  Type.Literal("sync_remote_post"),
-  Type.Literal("cancel_remote_post"),
-  Type.Literal("reconcile_external_operation"),
-  Type.Literal("collect_metrics"),
-  Type.Literal("weekly_report"),
-  Type.Literal("batch_caption_eval")
+  Type.Literal("publish_post")
 ]);
 
 export type JobType = Static<typeof JobType>;

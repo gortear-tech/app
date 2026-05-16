@@ -3,7 +3,6 @@ import pg from "pg";
 import {
   AppError,
   forbiddenError,
-  PLAN_ENTITLEMENTS,
   User,
   Workspace,
   WorkspaceMember,
@@ -14,24 +13,10 @@ import {
   Photo,
   UploadIntent,
   VisionAnalysis,
-  BusinessAutonomySettings,
-  ActionAutonomyState,
-  AutonomyAction,
   Variant,
   AssignedStyle,
   ScheduledPost,
-  MetricDefinition,
-  MetricWindow,
-  PerformanceSummary,
-  PostMetricSnapshot,
-  WeeklyReport,
-  AutonomyEvaluation,
-  AiEvaluation,
-  BillingAccount,
-  BillingProvider,
-  BillingProviderEvent,
-  CaptionResult,
-  CommercialPlan
+  CaptionResult
 } from "@fbmaniaco/shared";
 import {
   AiRun,
@@ -42,12 +27,8 @@ import {
   JobAttempt,
   MediaAsset,
   MetaAuthorization,
-  OutboxEvent,
   PersistedMetaAuthorizationInput,
-  PricingRule,
   StoredJob,
-  UsageMeter,
-  WorkerHeartbeat
 } from "./types.js";
 import { publishFacebookPagePost } from "@fbmaniaco/providers";
 
@@ -71,36 +52,6 @@ const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
-const autonomyActions: AutonomyAction[] = [
-  "STYLE_ASSIGNMENT",
-  "VARIANT_COUNT",
-  "SCHEDULING",
-  "CAPTION_GENERATION",
-  "FACEBOOK_PUBLISH"
-];
-const defaultAutonomySettings = (timestamp: string): BusinessAutonomySettings => ({
-  schemaVersion: "business_autonomy.v1",
-  actions: Object.fromEntries(
-    autonomyActions.map((action) => [
-      action,
-      {
-        action,
-        mode: action === "FACEBOOK_PUBLISH" ? "human_approval" : "suggest_only",
-        score: 0,
-        approvals: 0,
-        threshold: action === "FACEBOOK_PUBLISH" ? 0.95 : 0.75,
-        paused: action === "FACEBOOK_PUBLISH",
-        consecutiveApprovals: 0,
-        consecutiveRejections: 0,
-        requiresExplicitOptIn: action === "FACEBOOK_PUBLISH",
-        explicitOptIn: false,
-        pauseReasons: action === "FACEBOOK_PUBLISH" ? ["explicit_opt_in_required"] : [],
-        updatedAt: timestamp
-      } satisfies ActionAutonomyState
-    ])
-  ) as Record<string, ActionAutonomyState>,
-  updatedAt: timestamp
-});
 const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "photo";
 const extensionMimeHints = new Map([
   [".jpg", "image/jpeg"],
@@ -133,9 +84,6 @@ const toWorkspace = (row: Record<string, any>): Workspace => ({
   id: row.id,
   name: row.name,
   ownerUserId: row.owner_user_id,
-  plan: row.plan,
-  billingStatus: row.billing_status,
-  entitlements: json(row.entitlements, {}),
   status: row.status,
   createdAt: new Date(row.created_at).toISOString(),
   updatedAt: new Date(row.updated_at).toISOString()
@@ -198,7 +146,6 @@ const toBusiness = (row: Record<string, any>): Business => ({
   timezone: row.timezone,
   tokenStatus: row.token_status,
   metadata: json(row.metadata, {}),
-  autonomySettings: json(row.autonomy_settings, {}),
   createdAt: new Date(row.created_at).toISOString(),
   updatedAt: new Date(row.updated_at).toISOString()
 });
@@ -250,11 +197,6 @@ const toBatch = (row: Record<string, any>): BatchSummary => {
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString()
   };
-  if (row.estimated_cost_usd !== undefined) batch.estimatedCostUsd = row.estimated_cost_usd;
-  if (row.estimated_provider_cost_usd !== undefined) batch.estimatedProviderCostUsd = row.estimated_provider_cost_usd;
-  if (row.confirmed_cost_usd !== undefined) batch.confirmedCostUsd = row.confirmed_cost_usd;
-  if (row.confirmed_price_version !== undefined) batch.confirmedPriceVersion = row.confirmed_price_version;
-  if (row.confirmed_cost_breakdown !== undefined) batch.confirmedCostBreakdown = row.confirmed_cost_breakdown;
   if (row.variants_per_photo !== undefined) batch.variantsPerPhoto = row.variants_per_photo;
   return batch;
 };
@@ -347,26 +289,6 @@ const toVariant = (row: Record<string, any>): Variant => {
   return variant;
 };
 
-const toPricingRule = (row: Record<string, any>): PricingRule => {
-  const rule: PricingRule = {
-    id: row.id,
-    provider: row.provider,
-    model: row.model,
-    operation: row.operation,
-    unitType: row.unit_type,
-    unitSize: Number(row.unit_size),
-    currency: row.currency,
-    unitCostUsd: Number(row.unit_cost_usd),
-    customerUnitPriceUsd: Number(row.customer_unit_price_usd),
-    priceVersion: row.price_version,
-    effectiveFrom: new Date(row.effective_from).toISOString(),
-    active: row.active
-  };
-  if (row.dimensions !== undefined) rule.dimensions = row.dimensions;
-  if (row.effective_to) rule.effectiveTo = new Date(row.effective_to).toISOString();
-  return rule;
-};
-
 const toScheduledPost = (row: Record<string, any>): ScheduledPost => {
   const post: ScheduledPost = {
     id: row.id,
@@ -399,145 +321,6 @@ const toScheduledPost = (row: Record<string, any>): ScheduledPost => {
   if (row.style_id !== undefined) post.styleId = row.style_id;
   if (row.style_name !== undefined) post.styleName = row.style_name;
   return post;
-};
-
-const toMetricDefinition = (row: Record<string, any>): MetricDefinition => {
-  const definition: MetricDefinition = {
-    id: row.id,
-    provider: row.provider,
-    canonicalMetric: row.canonical_metric,
-    valueType: row.value_type,
-    status: row.status,
-    effectiveFrom: new Date(row.effective_from).toISOString()
-  };
-  if (row.provider_metric_name !== undefined) definition.providerMetricName = row.provider_metric_name;
-  if (row.graph_api_version !== undefined) definition.graphApiVersion = row.graph_api_version;
-  if (row.effective_to !== undefined) definition.effectiveTo = row.effective_to ? new Date(row.effective_to).toISOString() : null;
-  if (row.notes !== undefined) definition.notes = row.notes;
-  return definition;
-};
-
-const toPostMetricSnapshot = (row: Record<string, any>): PostMetricSnapshot => {
-  const snapshot: PostMetricSnapshot = {
-    id: row.id,
-    workspaceId: row.workspace_id,
-    businessId: row.business_id,
-    scheduledPostId: row.scheduled_post_id,
-    metricDefinitionId: row.metric_definition_id,
-    provider: row.provider,
-    canonicalMetric: row.canonical_metric,
-    window: row.metric_window,
-    value: Number(row.value),
-    collectedAt: new Date(row.collected_at).toISOString(),
-    observedUntil: new Date(row.observed_until).toISOString(),
-    collectionStatus: row.collection_status
-  };
-  if (row.facebook_post_id !== undefined) snapshot.facebookPostId = row.facebook_post_id;
-  if (row.provider_metric_name !== undefined) snapshot.providerMetricName = row.provider_metric_name;
-  if (row.source_version !== undefined) snapshot.sourceVersion = row.source_version;
-  if (row.raw_ref !== undefined) snapshot.rawRef = row.raw_ref;
-  return snapshot;
-};
-
-const toPerformanceSummary = (row: Record<string, any>): PerformanceSummary => ({
-  id: row.id,
-  workspaceId: row.workspace_id,
-  businessId: row.business_id,
-  scope: row.scope,
-  scopeKey: row.scope_key,
-  periodStart: new Date(row.period_start).toISOString(),
-  periodEnd: new Date(row.period_end).toISOString(),
-  sampleSize: row.sample_size,
-  metrics: json(row.metrics, {}),
-  confidence: row.confidence,
-  reasonCodes: row.reason_codes ?? [],
-  generatedAt: new Date(row.generated_at).toISOString()
-});
-
-const toWeeklyReport = (row: Record<string, any>): WeeklyReport => ({
-  id: row.id,
-  workspaceId: row.workspace_id,
-  businessId: row.business_id,
-  periodStart: new Date(row.period_start).toISOString(),
-  periodEnd: new Date(row.period_end).toISOString(),
-  confidence: row.confidence,
-  sampleSize: row.sample_size,
-  sections: json(row.sections, {
-    worked: [],
-    didNotWork: [],
-    styleAcceptance: [],
-    captionEdits: [],
-    recommendedTimes: [],
-    metaHealth: [],
-    calendarCoverage: [],
-    aiCost: [],
-    nextActions: []
-  }),
-  reasonCodes: row.reason_codes ?? [],
-  generatedAt: new Date(row.generated_at).toISOString()
-});
-
-const toAiEvaluation = (row: Record<string, any>): AiEvaluation => ({
-  id: row.id,
-  workspaceId: row.workspace_id,
-  businessId: row.business_id,
-  task: row.task,
-  datasetId: row.dataset_id,
-  baselinePromptTemplateId: row.baseline_prompt_template_id,
-  candidatePromptTemplateId: row.candidate_prompt_template_id,
-  status: row.status,
-  metrics: json(row.metrics, {}),
-  failedCriteria: row.failed_criteria ?? [],
-  rolloutRecommendation: row.rollout_recommendation,
-  usedBatchMode: row.used_batch_mode,
-  createdAt: new Date(row.created_at).toISOString()
-});
-
-const toBillingAccount = (row: Record<string, any>): BillingAccount => ({
-  id: row.id,
-  workspaceId: row.workspace_id,
-  provider: row.provider,
-  providerCustomerId: row.provider_customer_id ?? null,
-  providerSubscriptionId: row.provider_subscription_id ?? null,
-  providerSubscriptionItemId: row.provider_subscription_item_id ?? null,
-  providerPriceId: row.provider_price_id ?? null,
-  plan: row.plan,
-  billingStatus: row.billing_status,
-  currentPeriodStart: row.current_period_start ? new Date(row.current_period_start).toISOString() : null,
-  currentPeriodEnd: row.current_period_end ? new Date(row.current_period_end).toISOString() : null,
-  createdAt: new Date(row.created_at).toISOString(),
-  updatedAt: new Date(row.updated_at).toISOString()
-});
-
-const toBillingProviderEvent = (row: Record<string, any>): BillingProviderEvent => ({
-  id: row.id,
-  provider: row.provider,
-  providerEventId: row.provider_event_id,
-  workspaceId: row.workspace_id ?? null,
-  type: row.type,
-  status: row.status,
-  receivedAt: new Date(row.received_at).toISOString(),
-  processedAt: row.processed_at ? new Date(row.processed_at).toISOString() : null,
-  lastError: row.last_error ?? null
-});
-
-const toOutboxEvent = (row: Record<string, any>): OutboxEvent => {
-  const event: OutboxEvent = {
-    id: row.id,
-    eventType: row.event_type,
-    aggregateType: row.aggregate_type,
-    aggregateId: row.aggregate_id,
-    workspaceId: row.workspace_id,
-    payload: json(row.payload, {}),
-    status: row.status,
-    availableAt: new Date(row.available_at).toISOString(),
-    attempts: row.attempts,
-    createdAt: new Date(row.created_at).toISOString()
-  };
-  if (row.business_id) event.businessId = row.business_id;
-  if (row.processed_at) event.processedAt = new Date(row.processed_at).toISOString();
-  if (row.last_error) event.lastError = row.last_error;
-  return event;
 };
 
 export class SupabaseDataStoreCore {
@@ -600,10 +383,10 @@ export class SupabaseDataStoreCore {
       await client.query("begin");
       const workspaceId = randomUUID();
       const workspaceResult = await client.query(
-        `insert into public.workspaces (id, name, owner_user_id, plan, billing_status, entitlements, status, created_at, updated_at)
-         values ($1, 'Mi workspace FBmaniaco', $2, 'piloto', 'trial', $3::jsonb, 'activo', now(), now())
+        `insert into public.workspaces (id, name, owner_user_id, status, created_at, updated_at)
+         values ($1, 'Mi workspace FBmaniaco', $2, 'activo', now(), now())
          returning *`,
-        [workspaceId, userId, JSON.stringify(PLAN_ENTITLEMENTS.piloto)]
+        [workspaceId, userId]
       );
       const memberResult = await client.query(
         `insert into public.workspace_members (workspace_id, user_id, role, status, created_at)
@@ -762,45 +545,6 @@ export class SupabaseDataStoreCore {
     return result.rows.map(toAttempt);
   }
 
-  async recordWorkerHeartbeat(input: Parameters<DataStore["recordWorkerHeartbeat"]>[0]): Promise<WorkerHeartbeat> {
-    const result = await this.pool.query(
-      `insert into public.worker_heartbeats (worker_id, service, environment, release, status, last_beat_at, metadata)
-       values ($1, 'worker', $2, $3, $4, now(), $5::jsonb)
-       on conflict (worker_id) do update
-       set environment = excluded.environment, release = excluded.release, status = excluded.status,
-           last_beat_at = now(), metadata = excluded.metadata
-       returning *`,
-      [input.workerId, input.environment, input.release, input.status ?? "alive", JSON.stringify(input.metadata ?? {})]
-    );
-    const row = result.rows[0];
-    return {
-      workerId: row.worker_id,
-      service: "worker",
-      environment: row.environment,
-      release: row.release,
-      status: row.status,
-      lastBeatAt: new Date(row.last_beat_at).toISOString(),
-      metadata: json(row.metadata, {})
-    };
-  }
-
-  async getLatestWorkerHeartbeat(): Promise<WorkerHeartbeat | null> {
-    const result = await this.pool.query(
-      "select * from public.worker_heartbeats where status = 'alive' order by last_beat_at desc limit 1"
-    );
-    if (!result.rows[0]) return null;
-    const row = result.rows[0];
-    return {
-      workerId: row.worker_id,
-      service: "worker",
-      environment: row.environment,
-      release: row.release,
-      status: row.status,
-      lastBeatAt: new Date(row.last_beat_at).toISOString(),
-      metadata: json(row.metadata, {})
-    };
-  }
-
   async getBootstrapContext(userId: string): Promise<Awaited<ReturnType<DataStore["getBootstrapContext"]>>> {
     const memberships = await this.listMemberships(userId);
     const workspace = memberships[0]?.workspace;
@@ -840,498 +584,17 @@ export class SupabaseDataStoreCore {
     };
   }
 
-  async listMetricDefinitions(): Promise<MetricDefinition[]> {
-    const result = await this.pool.query("select * from public.metric_definitions order by canonical_metric asc");
-    return result.rows.map(toMetricDefinition);
-  }
-
-  async listPerformanceSummaries(input: Parameters<DataStore["listPerformanceSummaries"]>[0]): Promise<PerformanceSummary[]> {
-    await this.requireBusiness(input.workspaceId, input.businessId);
-    const result = await this.pool.query(
-      `select * from public.performance_summaries
-       where workspace_id = $1 and business_id = $2
-         and ($3::text is null or scope = $3)
-         and ($4::timestamptz is null or period_end >= $4::timestamptz)
-         and ($5::timestamptz is null or period_start <= $5::timestamptz)
-       order by generated_at desc`,
-      [input.workspaceId, input.businessId, input.scope ?? null, input.from ?? null, input.to ?? null]
-    );
-    return result.rows.map(toPerformanceSummary);
-  }
-
-  async requestCollectMetrics(input: Parameters<DataStore["requestCollectMetrics"]>[0]): Promise<{ job: StoredJob }> {
-    await this.requireBusiness(input.workspaceId, input.businessId);
-    const from = input.from ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const to = input.to ?? now();
-    const window = input.window ?? "7d";
-    const job = await this.createJob({
-      type: "collect_metrics",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      dedupeKey: `collect_metrics:${input.businessId}:${from}:${to}:${window}`,
-      payload: { from, to, window, actorId: input.actorId, requestId: input.requestId }
-    });
-    await this.createOutboxEvent({
-      eventType: "metricas_recoleccion_solicitada",
-      aggregateType: "business",
-      aggregateId: input.businessId,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { from, to, window, actorId: input.actorId, requestId: input.requestId }
-    });
-    return { job };
-  }
-
-  async completeCollectMetrics(input: { jobId: string }): ReturnType<DataStore["completeCollectMetrics"]> {
-    const job = await this.requireJob(input.jobId);
-    if (!job.businessId) throw new Error("collect_metrics job is missing businessId");
-    const from = typeof job.payload.from === "string" ? job.payload.from : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const to = typeof job.payload.to === "string" ? job.payload.to : now();
-    const window = (typeof job.payload.window === "string" ? job.payload.window : "7d") as MetricWindow;
-    const timestamp = now();
-    const successDefinition = await this.metricDefinition("fbmaniaco", "publish_success");
-    const failureDefinition = await this.metricDefinition("fbmaniaco", "publish_failure");
-    const metaDefinitions = (
-      await this.pool.query("select * from public.metric_definitions where provider = 'meta' and status <> 'active'")
-    ).rows.map(toMetricDefinition);
-    const snapshots: PostMetricSnapshot[] = [];
-    const published = await this.pool.query(
-      `select * from public.scheduled_posts
-       where workspace_id = $1 and business_id = $2 and status = 'publicada'
-         and scheduled_for >= $3::timestamptz and scheduled_for <= $4::timestamptz`,
-      [job.workspaceId, job.businessId, from, to]
-    );
-    for (const post of published.rows.map(toScheduledPost)) {
-      snapshots.push(
-        await this.insertMetricSnapshot({
-          workspaceId: post.workspaceId,
-          businessId: post.businessId,
-          scheduledPostId: post.id,
-          facebookPostId: post.facebookPostId ?? null,
-          definition: successDefinition,
-          window,
-          value: 1,
-          collectedAt: timestamp,
-          observedUntil: to
-        })
-      );
-    }
-    const failed = await this.pool.query(
-      `select * from public.scheduled_posts
-       where workspace_id = $1 and business_id = $2 and status in ('fallida', 'estado_incierto')
-         and scheduled_for >= $3::timestamptz and scheduled_for <= $4::timestamptz`,
-      [job.workspaceId, job.businessId, from, to]
-    );
-    for (const post of failed.rows.map(toScheduledPost)) {
-      snapshots.push(
-        await this.insertMetricSnapshot({
-          workspaceId: post.workspaceId,
-          businessId: post.businessId,
-          scheduledPostId: post.id,
-          facebookPostId: post.facebookPostId ?? null,
-          definition: failureDefinition,
-          window,
-          value: 1,
-          collectedAt: timestamp,
-          observedUntil: to
-        })
-      );
-    }
-    const summaries = await this.recalculatePerformanceSummaries(job.workspaceId, job.businessId, from, to, timestamp);
-    await this.createOutboxEvent({
-      eventType: "metricas_recolectadas",
-      aggregateType: "business",
-      aggregateId: job.businessId,
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      payload: {
-        jobId: job.id,
-        snapshotCount: snapshots.length,
-        unavailableMetricIds: metaDefinitions.map((definition) => definition.id)
-      }
-    });
-    for (const definition of metaDefinitions) {
-      await this.createOutboxEvent({
-        eventType: "metrica_no_disponible",
-        aggregateType: "metric_definition",
-        aggregateId: definition.id,
-        workspaceId: job.workspaceId,
-        businessId: job.businessId,
-        payload: { status: definition.status, canonicalMetric: definition.canonicalMetric }
-      });
-    }
-    return { snapshots, summaries, unavailableMetrics: metaDefinitions };
-  }
-
-  async requestWeeklyReport(input: Parameters<DataStore["requestWeeklyReport"]>[0]): Promise<{ job: StoredJob }> {
-    await this.requireBusiness(input.workspaceId, input.businessId);
-    const periodStart = input.weekStart ?? this.weekStart(new Date()).toISOString();
-    const periodEnd = new Date(new Date(periodStart).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    const job = await this.createJob({
-      type: "weekly_report",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      dedupeKey: `weekly_report:${input.businessId}:${periodStart}`,
-      payload: { periodStart, periodEnd, actorId: input.actorId, requestId: input.requestId }
-    });
-    return { job };
-  }
-
-  async completeWeeklyReport(input: { jobId: string }): Promise<WeeklyReport> {
-    const job = await this.requireJob(input.jobId);
-    if (!job.businessId) throw new Error("weekly_report job is missing businessId");
-    const periodStart = typeof job.payload.periodStart === "string" ? job.payload.periodStart : this.weekStart(new Date()).toISOString();
-    const periodEnd =
-      typeof job.payload.periodEnd === "string"
-        ? job.payload.periodEnd
-        : new Date(new Date(periodStart).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    const timestamp = now();
-    const summaries = await this.recalculatePerformanceSummaries(job.workspaceId, job.businessId, periodStart, periodEnd, timestamp);
-    const published = await this.countScheduledPosts(job.workspaceId, job.businessId, periodStart, periodEnd, ["publicada"]);
-    const failed = await this.countScheduledPosts(job.workspaceId, job.businessId, periodStart, periodEnd, ["fallida", "estado_incierto"]);
-    const summary = summaries.find((item) => item.scope === "business_week");
-    const sampleSize = summary?.sampleSize ?? published;
-    const confidence = this.confidenceForSample(sampleSize);
-    const sections = {
-      worked: published > 0 ? [`${published} publicaciones quedaron confirmadas.`] : ["Aun no hay publicaciones confirmadas esta semana."],
-      didNotWork: failed > 0 ? [`${failed} publicaciones requieren revision.`] : ["No se detectaron fallas propias en la ventana."],
-      styleAcceptance: confidence === "exploratoria" ? ["Muestra pequena: no se declara un estilo ganador."] : ["Hay muestra suficiente para comparar estilos."],
-      captionEdits: ["Se separan ediciones de caption de metricas externas para no mezclar senales."],
-      recommendedTimes: confidence === "exploratoria" ? ["Mantener horarios conservadores hasta tener 20 posts publicados."] : ["Revisar horarios con snapshots comparables."],
-      metaHealth: ["Insights de Meta degradados en modo local; se usan senales propias de FBmaniaco."],
-      calendarCoverage: [`Cobertura semanal estimada: ${Math.round((summary?.metrics.week_coverage ?? 0) * 100)}%.`],
-      aiCost: ["Costos IA se leen del ledger interno; no se infieren desde el reporte."],
-      nextActions: published === 0 ? ["Publicar al menos un post para empezar aprendizaje real."] : ["Recolectar snapshots comparables antes del siguiente reporte."]
-    };
-    const result = await this.pool.query(
-      `insert into public.weekly_reports
-       (id, workspace_id, business_id, period_start, period_end, confidence, sample_size, sections, reason_codes, generated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
-       returning *`,
-      [
-        randomUUID(),
-        job.workspaceId,
-        job.businessId,
-        periodStart,
-        periodEnd,
-        confidence,
-        sampleSize,
-        JSON.stringify(sections),
-        summary?.reasonCodes ?? ["sample_size_low", "meta_insights_unavailable"],
-        timestamp
-      ]
-    );
-    const report = toWeeklyReport(result.rows[0]);
-    await this.createOutboxEvent({
-      eventType: "performance_summary_generado",
-      aggregateType: "business",
-      aggregateId: job.businessId,
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      payload: { jobId: job.id, reportId: report.id, confidence: report.confidence, sampleSize: report.sampleSize }
-    });
-    return report;
-  }
-
-  async getLatestWeeklyReport(input: Parameters<DataStore["getLatestWeeklyReport"]>[0]): Promise<WeeklyReport | null> {
-    await this.requireBusiness(input.workspaceId, input.businessId);
-    const result = await this.pool.query(
-      "select * from public.weekly_reports where workspace_id = $1 and business_id = $2 order by generated_at desc limit 1",
-      [input.workspaceId, input.businessId]
-    );
-    return result.rows[0] ? toWeeklyReport(result.rows[0]) : null;
-  }
-
   async updateBusiness(input: Parameters<DataStore["updateBusiness"]>[0]): Promise<Business> {
     const current = await this.requireBusiness(input.workspaceId, input.businessId);
-    const timestamp = now();
     const nextMetadata = input.metadata !== undefined ? { ...current.metadata, ...input.metadata } : current.metadata;
-    const nextAutonomy =
-      input.autonomySettings !== undefined ? this.normalizedAutonomy(input.autonomySettings, timestamp) : current.autonomySettings;
     const result = await this.pool.query(
       `update public.businesses
-       set name = coalesce($3, name),
-           timezone = coalesce($4, timezone),
-           metadata = $5::jsonb,
-           autonomy_settings = $6::jsonb,
-           updated_at = $7
+       set name = coalesce($3, name), timezone = coalesce($4, timezone), metadata = $5::jsonb, updated_at = now()
        where workspace_id = $1 and id = $2
        returning *`,
-      [
-        input.workspaceId,
-        input.businessId,
-        input.name ?? null,
-        input.timezone ?? null,
-        JSON.stringify(nextMetadata),
-        JSON.stringify(nextAutonomy),
-        timestamp
-      ]
+      [input.workspaceId, input.businessId, input.name ?? null, input.timezone ?? null, JSON.stringify(nextMetadata)]
     );
-    await this.createOutboxEvent({
-      eventType: input.autonomySettings !== undefined ? "autonomia_actualizada" : "negocio_actualizado",
-      aggregateType: "business",
-      aggregateId: input.businessId,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     return toBusiness(result.rows[0]);
-  }
-
-  async evaluateBusinessAutonomy(input: Parameters<DataStore["evaluateBusinessAutonomy"]>[0]): Promise<AutonomyEvaluation> {
-    const business = await this.requireBusiness(input.workspaceId, input.businessId);
-    const settings = this.businessAutonomy(business);
-    const publish = settings.actions.FACEBOOK_PUBLISH;
-    const reasons = new Set<string>();
-    if (!input.autonomyFeatureEnabled) reasons.add("kill_switch_autonomy");
-    if (!publish?.explicitOptIn) reasons.add("explicit_opt_in_required");
-    if (publish?.mode !== "autonomous") reasons.add("publish_not_autonomous");
-    if (business.tokenStatus === "expirado" || business.tokenStatus === "requiere_reconexion") reasons.add("meta_token_unhealthy");
-    if (await this.hasUncertainPost(input.businessId)) reasons.add("uncertain_post_exists");
-    if (await this.hasBudgetPressure(input.workspaceId)) reasons.add("budget_limit_reached");
-    if (await this.hasSensitivePublishRisk(input.workspaceId, input.businessId)) reasons.add("sensitive_content_requires_review");
-    const publishedCount = await this.countScheduledPosts(input.workspaceId, input.businessId, "1970-01-01T00:00:00.000Z", now(), [
-      "publicada"
-    ]);
-    if (publishedCount < 20) reasons.add("insufficient_history");
-    return {
-      schemaVersion: "autonomy_evaluation.v1",
-      businessId: business.id,
-      canAutopublish: reasons.size === 0,
-      blockingReasons: [...reasons],
-      warnings: publishedCount < 100 ? ["La confianza seguira siendo conservadora hasta tener mas historial."] : [],
-      evaluatedAt: now()
-    };
-  }
-
-  async requestBatchCaptionEval(input: Parameters<DataStore["requestBatchCaptionEval"]>[0]): Promise<{ job: StoredJob }> {
-    await this.requireBusiness(input.workspaceId, input.businessId);
-    const datasetId = input.datasetId ?? "golden-caption-local-v1";
-    const candidate = input.candidatePromptTemplateId ?? "caption-template-canary-v1";
-    const baseline = input.baselinePromptTemplateId ?? "caption-template-active-v1";
-    const job = await this.createJob({
-      type: "batch_caption_eval",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      dedupeKey: `batch_caption_eval:${input.businessId}:${candidate}:${baseline}:${datasetId}`,
-      payload: {
-        datasetId,
-        candidatePromptTemplateId: candidate,
-        baselinePromptTemplateId: baseline,
-        candidateCaptionEditRate: input.candidateCaptionEditRate,
-        actorId: input.actorId,
-        requestId: input.requestId,
-        executionMode: "batch_flex_compatible"
-      }
-    });
-    return { job };
-  }
-
-  async completeBatchCaptionEval(input: { jobId: string }): Promise<AiEvaluation> {
-    const job = await this.requireJob(input.jobId);
-    if (!job.businessId) throw new Error("batch_caption_eval job is missing businessId");
-    const baselineEditRate = 0.1;
-    const candidateEditRate =
-      typeof job.payload.candidateCaptionEditRate === "number" ? job.payload.candidateCaptionEditRate : 0.08;
-    const failedCriteria = [
-      ...(candidateEditRate > baselineEditRate ? ["caption_edit_rate_regression"] : []),
-      ...(candidateEditRate > 0.2 ? ["manual_edit_rate_too_high"] : [])
-    ];
-    const result = await this.pool.query(
-      `insert into public.ai_evaluations
-       (id, workspace_id, business_id, task, dataset_id, baseline_prompt_template_id, candidate_prompt_template_id,
-        status, metrics, failed_criteria, rollout_recommendation, used_batch_mode, created_at)
-       values ($1, $2, $3, 'caption', $4, $5, $6, $7, $8::jsonb, $9, $10, true, now())
-       returning *`,
-      [
-        randomUUID(),
-        job.workspaceId,
-        job.businessId,
-        typeof job.payload.datasetId === "string" ? job.payload.datasetId : "golden-caption-local-v1",
-        typeof job.payload.baselinePromptTemplateId === "string" ? job.payload.baselinePromptTemplateId : "caption-template-active-v1",
-        typeof job.payload.candidatePromptTemplateId === "string" ? job.payload.candidatePromptTemplateId : "caption-template-canary-v1",
-        failedCriteria.length === 0 ? "passed" : "failed",
-        JSON.stringify({
-          schema_valid_rate: 1,
-          refusal_rate: 0,
-          baseline_caption_edit_rate: baselineEditRate,
-          candidate_caption_edit_rate: candidateEditRate,
-          cost_per_approved_variant_usd: 0.01,
-          latency_p95_ms: 1200
-        }),
-        failedCriteria,
-        failedCriteria.length === 0 ? "promote_canary" : "retain_baseline"
-      ]
-    );
-    const evaluation = toAiEvaluation(result.rows[0]);
-    await this.createOutboxEvent({
-      eventType: "ai_eval_completada",
-      aggregateType: "ai_evaluation",
-      aggregateId: evaluation.id,
-      workspaceId: job.workspaceId,
-      businessId: job.businessId,
-      payload: {
-        status: evaluation.status,
-        rolloutRecommendation: evaluation.rolloutRecommendation,
-        failedCriteria: evaluation.failedCriteria
-      }
-    });
-    return evaluation;
-  }
-
-  async listAiEvaluations(input: Parameters<DataStore["listAiEvaluations"]>[0]): Promise<AiEvaluation[]> {
-    await this.requireBusiness(input.workspaceId, input.businessId);
-    const result = await this.pool.query(
-      "select * from public.ai_evaluations where workspace_id = $1 and business_id = $2 order by created_at desc",
-      [input.workspaceId, input.businessId]
-    );
-    return result.rows.map(toAiEvaluation);
-  }
-
-  async getBillingStatus(input: Parameters<DataStore["getBillingStatus"]>[0]): Promise<Awaited<ReturnType<DataStore["getBillingStatus"]>>> {
-    const workspace = await this.requireWorkspace(input.workspaceId);
-    const account = await this.pool.query(
-      "select * from public.billing_accounts where workspace_id = $1 order by updated_at desc limit 1",
-      [input.workspaceId]
-    );
-    return { workspace, billingAccount: account.rows[0] ? toBillingAccount(account.rows[0]) : null };
-  }
-
-  async createUpgradeIntent(
-    input: Parameters<DataStore["createUpgradeIntent"]>[0]
-  ): Promise<Awaited<ReturnType<DataStore["createUpgradeIntent"]>>> {
-    await this.requireWorkspace(input.workspaceId);
-    await this.createOutboxEvent({
-      eventType: "billing_upgrade_intent_created",
-      aggregateType: "workspace",
-      aggregateId: input.workspaceId,
-      workspaceId: input.workspaceId,
-      payload: { actorId: input.actorId, requestId: input.requestId, plan: input.plan, provider: input.provider }
-    });
-    return {
-      provider: input.provider,
-      targetPlan: input.plan,
-      checkoutUrl:
-        input.provider === "manual"
-          ? null
-          : `https://billing.example/${input.provider}/checkout?workspace=${encodeURIComponent(input.workspaceId)}&plan=${input.plan}`,
-      message:
-        input.provider === "manual"
-          ? "Solicitud de upgrade registrada para piloto privado."
-          : "Checkout mock preparado. No se ha cobrado nada."
-    };
-  }
-
-  async processBillingProviderEvent(
-    input: Parameters<DataStore["processBillingProviderEvent"]>[0]
-  ): Promise<Awaited<ReturnType<DataStore["processBillingProviderEvent"]>>> {
-    const existing = await this.pool.query(
-      "select * from public.billing_provider_events where provider = $1 and provider_event_id = $2 limit 1",
-      [input.provider, input.providerEventId]
-    );
-    if (existing.rows[0]) return { event: toBillingProviderEvent(existing.rows[0]), duplicate: true };
-
-    const client = await this.pool.connect();
-    let event: BillingProviderEvent;
-    try {
-      await client.query("begin");
-      const eventResult = await client.query(
-        `insert into public.billing_provider_events
-         (id, provider, provider_event_id, workspace_id, type, status, received_at)
-         values ($1, $2, $3, $4, $5, 'received', now())
-         returning *`,
-        [randomUUID(), input.provider, input.providerEventId, input.workspaceId ?? null, input.type]
-      );
-      event = toBillingProviderEvent(eventResult.rows[0]);
-
-      try {
-        if (!input.workspaceId) {
-          const ignored = await client.query(
-            "update public.billing_provider_events set status = 'ignored', processed_at = now() where id = $1 returning *",
-            [event.id]
-          );
-          event = toBillingProviderEvent(ignored.rows[0]);
-        } else {
-          const workspaceResult = await client.query("select * from public.workspaces where id = $1 for update", [input.workspaceId]);
-          if (!workspaceResult.rows[0]) {
-            throw new AppError({
-              code: "workspace_not_found",
-              statusCode: 404,
-              message: "Workspace not found",
-              userMessage: "No encontramos tu workspace.",
-              retryable: false,
-              action: "refresh"
-            });
-          }
-
-          const workspace = toWorkspace(workspaceResult.rows[0]);
-          const nextPlan = (input.plan ?? workspace.plan ?? "piloto") as CommercialPlan;
-          const nextStatus = input.billingStatus ?? workspace.billingStatus;
-          await client.query(
-            `update public.workspaces
-             set plan = $2, billing_status = $3, entitlements = $4::jsonb, updated_at = now()
-             where id = $1`,
-            [workspace.id, nextPlan, nextStatus, JSON.stringify(PLAN_ENTITLEMENTS[nextPlan])]
-          );
-
-          const accountResult = await client.query(
-            `insert into public.billing_accounts
-             (id, workspace_id, provider, plan, billing_status, current_period_start, current_period_end, created_at, updated_at)
-             values ($1, $2, $3, $4, $5, $6, $7, now(), now())
-             on conflict (workspace_id, provider) do update
-             set plan = excluded.plan, billing_status = excluded.billing_status, updated_at = now()
-             returning *`,
-            [
-              randomUUID(),
-              workspace.id,
-              input.provider,
-              nextPlan,
-              nextStatus,
-              this.currentPeriodStart(),
-              this.currentPeriodEnd()
-            ]
-          );
-          void toBillingAccount(accountResult.rows[0]);
-
-          await client.query(
-            `insert into public.outbox_events
-             (id, event_type, aggregate_type, aggregate_id, workspace_id, payload, status, available_at, attempts, created_at)
-             values ($1, 'billing_updated', 'workspace', $2, $3, $4::jsonb, 'pending', now(), 0, now())`,
-            [
-              randomUUID(),
-              workspace.id,
-              workspace.id,
-              JSON.stringify({
-                provider: input.provider,
-                providerEventId: input.providerEventId,
-                plan: nextPlan,
-                billingStatus: nextStatus
-              })
-            ]
-          );
-
-          const processed = await client.query(
-            "update public.billing_provider_events set status = 'processed', processed_at = now() where id = $1 returning *",
-            [event.id]
-          );
-          event = toBillingProviderEvent(processed.rows[0]);
-        }
-      } catch (error) {
-        const failed = await client.query(
-          "update public.billing_provider_events set status = 'failed', last_error = $2 where id = $1 returning *",
-          [event.id, error instanceof Error ? error.message : "Unknown billing event error"]
-        );
-        event = toBillingProviderEvent(failed.rows[0]);
-      }
-
-      await client.query("commit");
-      return { event, duplicate: false };
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
   }
 
   async upsertMockMetaAuthorization(input: { workspaceId: string; actorId: string }): Promise<MetaAuthorization> {
@@ -1482,16 +745,6 @@ export class SupabaseDataStoreCore {
           ]
         );
       }
-      await client.query(
-        `insert into public.outbox_events (id, event_type, aggregate_type, aggregate_id, workspace_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'meta_autorizacion_actualizada', 'meta_authorization', $2, $3, $4::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          authorization.id,
-          input.workspaceId,
-          JSON.stringify({ status: input.authorization.status, grantedScopes: input.authorization.grantedScopes })
-        ]
-      );
       await client.query("commit");
       return toMetaAuthorization(authorization);
     } catch (error) {
@@ -1554,8 +807,8 @@ export class SupabaseDataStoreCore {
           )
         : await client.query(
             `insert into public.businesses
-             (id, workspace_id, facebook_page_id, name, timezone, token_status, metadata, autonomy_settings, created_at, updated_at)
-             values ($1, $2, $3, $4, 'America/Mexico_City', $5, $6::jsonb, $7::jsonb, now(), now())
+             (id, workspace_id, facebook_page_id, name, timezone, token_status, metadata, created_at, updated_at)
+             values ($1, $2, $3, $4, 'America/Mexico_City', $5, $6::jsonb, now(), now())
              returning *`,
             [
               randomUUID(),
@@ -1567,23 +820,10 @@ export class SupabaseDataStoreCore {
                 pageName: page.page_name,
                 category: page.category ?? "Facebook Page",
                 facebookSeo: { keywords: [], context: null }
-              }),
-              JSON.stringify(defaultAutonomySettings(now()))
+              })
             ]
           );
       const business = businessResult.rows[0];
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'pagina_seleccionada', 'facebook_page', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          page.id,
-          input.workspaceId,
-          business.id,
-          JSON.stringify({ actorId: input.actorId, requestId: input.requestId })
-        ]
-      );
       await client.query("commit");
       return toBusiness(business);
     } catch (error) {
@@ -1616,14 +856,6 @@ export class SupabaseDataStoreCore {
       [randomUUID(), input.workspaceId, input.businessId]
     );
     const batch = toBatch(result.rows[0]);
-    await this.createOutboxEvent({
-      eventType: "lote_creado",
-      aggregateType: "batch",
-      aggregateId: batch.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     return batch;
   }
 
@@ -1802,18 +1034,6 @@ export class SupabaseDataStoreCore {
             `analyze_photo:${photoId}`
           ])
         ).rows[0];
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'foto_subida', 'photo', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          photoId,
-          input.workspaceId,
-          input.businessId,
-          JSON.stringify({ batchId: input.batchId, actorId: input.actorId, requestId: input.requestId })
-        ]
-      );
       await client.query("commit");
       return { photo: toPhoto(photoResult.rows[0]), job: toJob(job) };
     } catch (error) {
@@ -1850,18 +1070,6 @@ export class SupabaseDataStoreCore {
         "update public.batches set status = 'pendiente_confirmacion', last_activity_at = now(), updated_at = now() where id = $1",
         [photo.batch_id]
       );
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'foto_validada', 'photo', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          photo.id,
-          photo.workspace_id,
-          photo.business_id,
-          JSON.stringify({ batchId: photo.batch_id, jobId: input.jobId, aiRunId: input.aiRunId ?? null })
-        ]
-      );
       await client.query("commit");
       return toPhoto(updated.rows[0]);
     } catch (error) {
@@ -1875,164 +1083,6 @@ export class SupabaseDataStoreCore {
   async getMediaAsset(input: { assetId: string }): Promise<MediaAsset | null> {
     const result = await this.pool.query("select * from public.media_assets where id = $1", [input.assetId]);
     return result.rows[0] ? toMediaAsset(result.rows[0]) : null;
-  }
-
-  async estimateBatchCost(input: Parameters<DataStore["estimateBatchCost"]>[0]): ReturnType<DataStore["estimateBatchCost"]> {
-    await this.assertWorkspaceBillingAllows(input.workspaceId, "costly");
-    const batch = await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
-    const workspace = await this.requireWorkspace(input.workspaceId);
-    const rule = await this.activePricingRule();
-    const validPhotos = await this.validPhotosForGeneration(input.workspaceId, input.businessId, input.batchId);
-    const variantCount = validPhotos.length * input.variantsPerPhoto;
-    const customerCost = this.money(variantCount * (rule.customerUnitPriceUsd / rule.unitSize));
-    const providerCost = this.money(variantCount * (rule.unitCostUsd / rule.unitSize));
-    const usage = [
-      await this.usageSnapshot(workspace, "generated_variants", variantCount),
-      await this.usageSnapshot(workspace, "ai_customer_spend_usd", customerCost),
-      await this.usageSnapshot(workspace, "ai_provider_cost_usd", providerCost)
-    ];
-    const blocked = usage.find((item) => item.availableValue !== null && item.availableValue !== undefined && item.availableValue < 0);
-    return {
-      batchId: batch.id,
-      variantsPerPhoto: input.variantsPerPhoto,
-      photoCount: validPhotos.length,
-      variantCount,
-      priceVersion: rule.priceVersion,
-      estimatedCostUsd: customerCost,
-      estimatedProviderCostUsd: providerCost,
-      breakdown: [
-        {
-          operation: rule.operation,
-          provider: rule.provider,
-          model: rule.model,
-          unitType: rule.unitType,
-          quantity: variantCount,
-          unitPriceUsd: rule.customerUnitPriceUsd,
-          estimatedCostUsd: customerCost,
-          priceVersion: rule.priceVersion
-        }
-      ],
-      canConfirm: variantCount > 0 && !blocked,
-      blockedReason: variantCount === 0 ? "no_valid_photos" : blocked ? `limit_exceeded:${blocked.metric}` : null,
-      usage
-    };
-  }
-
-  async confirmBatchCost(input: Parameters<DataStore["confirmBatchCost"]>[0]): ReturnType<DataStore["confirmBatchCost"]> {
-    await this.assertWorkspaceBillingAllows(input.workspaceId, "costly");
-    const estimate = await this.estimateBatchCost(input);
-    if (!estimate.canConfirm) {
-      throw new AppError({
-        code: "cost_limit_exceeded",
-        statusCode: 409,
-        message: `Cost confirmation blocked: ${estimate.blockedReason ?? "unknown"}`,
-        userMessage: "Este lote supera el limite disponible del plan.",
-        retryable: false,
-        action: "contact_support"
-      });
-    }
-    if (estimate.priceVersion !== input.priceVersion) {
-      throw new AppError({
-        code: "price_version_changed",
-        statusCode: 409,
-        message: "Price version no longer matches active pricing",
-        userMessage: "El calculo de costo cambio. Vuelve a revisar la estimacion.",
-        retryable: false,
-        action: "refresh"
-      });
-    }
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
-      const existing = await client.query(
-        `select * from public.cost_ledger
-         where workspace_id = $1 and batch_id = $2 and entry_type = 'reservation'
-           and operation = 'generated_variant' and price_version = $3
-         limit 1`,
-        [input.workspaceId, input.batchId, input.priceVersion]
-      );
-      if (!existing.rows[0]) {
-        await this.reserveUsage(client, input.workspaceId, "generated_variants", estimate.variantCount);
-        await this.reserveUsage(client, input.workspaceId, "ai_customer_spend_usd", estimate.estimatedCostUsd);
-        await this.reserveUsage(client, input.workspaceId, "ai_provider_cost_usd", estimate.estimatedProviderCostUsd);
-        await client.query(
-          `insert into public.cost_ledger
-           (id, workspace_id, business_id, batch_id, operation, operation_key, entry_type, usage_metric, quantity,
-            price_version, customer_cost_usd, provider_cost_usd, status, created_at)
-           values ($1, $2, $3, $4, 'generated_variant', $5, 'reservation', 'generated_variants', $6,
-                   $7, $8, $9, 'reserved', now())`,
-          [
-            randomUUID(),
-            input.workspaceId,
-            input.businessId,
-            input.batchId,
-            `batch_generation:${input.batchId}:${input.priceVersion}`,
-            estimate.variantCount,
-            input.priceVersion,
-            estimate.estimatedCostUsd,
-            estimate.estimatedProviderCostUsd
-          ]
-        );
-      }
-      const batchResult = await client.query(
-        `update public.batches
-         set status = 'confirmado',
-             estimated_cost_usd = $2,
-             estimated_provider_cost_usd = $3,
-             confirmed_cost_usd = $2,
-             confirmed_price_version = $4,
-             confirmed_cost_breakdown = $5::jsonb,
-             variants_per_photo = $6,
-             last_activity_at = now(),
-             updated_at = now()
-         where id = $1 and workspace_id = $7 and business_id = $8
-         returning *`,
-        [
-          input.batchId,
-          estimate.estimatedCostUsd,
-          estimate.estimatedProviderCostUsd,
-          input.priceVersion,
-          JSON.stringify({
-            schemaVersion: "cost_breakdown.v1",
-            breakdown: estimate.breakdown,
-            providerCostUsd: estimate.estimatedProviderCostUsd
-          }),
-          input.variantsPerPhoto,
-          input.workspaceId,
-          input.businessId
-        ]
-      );
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'costo_confirmado', 'batch', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          input.batchId,
-          input.workspaceId,
-          input.businessId,
-          JSON.stringify({
-            actorId: input.actorId,
-            requestId: input.requestId,
-            priceVersion: input.priceVersion,
-            variantCount: estimate.variantCount
-          })
-        ]
-      );
-      await client.query("commit");
-      return {
-        batch: toBatch(batchResult.rows[0]),
-        variantCount: estimate.variantCount,
-        customerCostUsd: estimate.estimatedCostUsd,
-        providerCostUsd: estimate.estimatedProviderCostUsd,
-        priceVersion: input.priceVersion
-      };
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
   }
 
   async recordAiRun(input: Omit<AiRun, "id" | "createdAt">): Promise<AiRun> {
@@ -2089,29 +1139,13 @@ export class SupabaseDataStoreCore {
   }
 
   async requestGenerateBatch(input: Parameters<DataStore["requestGenerateBatch"]>[0]): ReturnType<DataStore["requestGenerateBatch"]> {
-    await this.assertWorkspaceBillingAllows(input.workspaceId, "publish");
     const batch = await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
-    if (!["confirmado", "generado_parcial"].includes(batch.status)) {
+    if (!["pendiente_confirmacion", "confirmado", "generado_parcial"].includes(batch.status)) {
       throw new AppError({
         code: "batch_not_ready_for_generation",
         statusCode: 409,
         message: `Batch cannot generate variants from status ${batch.status}`,
-        userMessage: "Primero confirma el costo del lote antes de generar variantes.",
-        retryable: false,
-        action: "refresh"
-      });
-    }
-    if (
-      !batch.confirmedPriceVersion ||
-      !batch.confirmedCostUsd ||
-      batch.variantsPerPhoto !== input.variantsPerPhoto ||
-      !(await this.hasReservation(input.workspaceId, input.batchId, batch.confirmedPriceVersion))
-    ) {
-      throw new AppError({
-        code: "cost_not_confirmed",
-        statusCode: 409,
-        message: "Batch generation requires a confirmed cost reservation",
-        userMessage: "Confirma el costo del lote antes de generar variantes.",
+        userMessage: "Primero termina de subir y analizar las fotos antes de generar variantes.",
         retryable: false,
         action: "refresh"
       });
@@ -2197,18 +1231,6 @@ export class SupabaseDataStoreCore {
              updated_at = now()
          where id = $1`,
         [input.batchId]
-      );
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'generacion_solicitada', 'batch', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          input.batchId,
-          input.workspaceId,
-          input.businessId,
-          JSON.stringify({ actorId: input.actorId, requestId: input.requestId, variantsPerPhoto: input.variantsPerPhoto, created, available })
-        ]
       );
       await client.query("commit");
       return { job, created, available, variants };
@@ -2374,19 +1396,6 @@ export class SupabaseDataStoreCore {
          where id = $1`,
         [current.batchId]
       );
-      await this.consumeVariantReservation(client, toVariant(updated.rows[0]), input.jobId, photo.originalAssetId);
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'variante_generada', 'variant', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          current.id,
-          current.workspaceId,
-          current.businessId,
-          JSON.stringify({ batchId: current.batchId, photoId: current.photoId, jobId: input.jobId })
-        ]
-      );
       await client.query("commit");
       return toVariant(updated.rows[0]);
     } catch (error) {
@@ -2406,14 +1415,6 @@ export class SupabaseDataStoreCore {
       input.variantId,
       input.caption
     ]);
-    await this.createOutboxEvent({
-      eventType: "caption_editado_por_usuario",
-      aggregateType: "variant",
-      aggregateId: input.variantId,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { batchId: input.batchId, actorId: input.actorId, requestId: input.requestId }
-    });
     return toVariant(result.rows[0]);
   }
 
@@ -2443,18 +1444,6 @@ export class SupabaseDataStoreCore {
         "update public.variants set status = 'aprobada', publishable_asset_id = $2, updated_at = now() where id = $1 returning *",
         [variant.id, publishableAssetId]
       );
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'variante_aprobada', 'variant', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          variant.id,
-          input.workspaceId,
-          input.businessId,
-          JSON.stringify({ batchId: input.batchId, actorId: input.actorId, requestId: input.requestId })
-        ]
-      );
       await client.query("commit");
       return toVariant(result.rows[0]);
     } catch (error) {
@@ -2473,14 +1462,6 @@ export class SupabaseDataStoreCore {
     const result = await this.pool.query("update public.variants set status = 'rechazada', updated_at = now() where id = $1 returning *", [
       variant.id
     ]);
-    await this.createOutboxEvent({
-      eventType: "variante_rechazada",
-      aggregateType: "variant",
-      aggregateId: variant.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { batchId: input.batchId, actorId: input.actorId, requestId: input.requestId }
-    });
     return toVariant(result.rows[0]);
   }
 
@@ -2560,18 +1541,6 @@ export class SupabaseDataStoreCore {
       await client.query(
         "update public.batches set status = 'completado', last_activity_at = now(), updated_at = now() where id = $1",
         [batch.id]
-      );
-      await client.query(
-        `insert into public.outbox_events
-         (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-         values ($1, 'calendario_confirmado', 'batch', $2, $3, $4, $5::jsonb, 'pending', now(), 0, now())`,
-        [
-          randomUUID(),
-          batch.id,
-          input.workspaceId,
-          input.businessId,
-          JSON.stringify({ actorId: input.actorId, requestId: input.requestId, scheduledPostIds: scheduledPosts.map((post) => post.id) })
-        ]
       );
       await client.query("commit");
       return { scheduledPosts, job };
@@ -2747,19 +1716,10 @@ export class SupabaseDataStoreCore {
       operation: "publish_post",
       status: "succeeded"
     });
-    await this.createOutboxEvent({
-      eventType: "post_publicado",
-      aggregateType: "scheduled_post",
-      aggregateId: post.id,
-      workspaceId: post.workspaceId,
-      businessId: post.businessId,
-      payload: { facebookPostId: publishResult.facebookPostId, jobId: job.id }
-    });
     return toScheduledPost(result.rows[0]);
   }
 
   async updateScheduledPost(input: Parameters<DataStore["updateScheduledPost"]>[0]): ReturnType<DataStore["updateScheduledPost"]> {
-    await this.assertWorkspaceBillingAllows(input.workspaceId, "publish");
     const post = await this.requireScheduledPost(input.workspaceId, input.businessId, input.batchId, input.scheduledPostId);
     if (post.status === "publicada" || post.status === "cancelada") throw this.scheduledPostStateError("scheduled_post_not_editable");
     if (post.remoteStatus !== "no_enviado") {
@@ -2785,14 +1745,6 @@ export class SupabaseDataStoreCore {
       runAfter: input.scheduledFor,
       payload: { scheduledPostId: post.id, deliveryMode: post.deliveryMode }
     });
-    await this.createOutboxEvent({
-      eventType: "post_reprogramado",
-      aggregateType: "scheduled_post",
-      aggregateId: post.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId, scheduledFor: input.scheduledFor }
-    });
     return { scheduledPost: toScheduledPost(result.rows[0]), job };
   }
 
@@ -2801,19 +1753,10 @@ export class SupabaseDataStoreCore {
     if (post.status === "publicada") throw this.scheduledPostStateError("scheduled_post_already_published");
     if (post.remoteStatus !== "no_enviado" || post.facebookPostId) {
       const updated = await this.pool.query(
-        "update public.scheduled_posts set status = 'estado_incierto', remote_status = 'cancelacion_pendiente', updated_at = now() where id = $1 returning *",
+        "update public.scheduled_posts set status = 'estado_incierto', updated_at = now() where id = $1 returning *",
         [post.id]
       );
-      const job = await this.createJob({
-        type: "cancel_remote_post",
-        workspaceId: post.workspaceId,
-        businessId: post.businessId,
-        batchId: post.batchId,
-        variantId: post.variantId,
-        dedupeKey: `cancel_remote_post:${post.id}:${post.facebookPostId ?? "unknown"}`,
-        payload: { scheduledPostId: post.id }
-      });
-      return { scheduledPost: toScheduledPost(updated.rows[0]), job };
+      return { scheduledPost: toScheduledPost(updated.rows[0]) };
     }
     const updated = await this.pool.query("update public.scheduled_posts set status = 'cancelada', updated_at = now() where id = $1 returning *", [
       post.id
@@ -2821,14 +1764,6 @@ export class SupabaseDataStoreCore {
     await this.pool.query("update public.variants set status = 'aprobada', updated_at = now() where id = $1 and status = 'programada'", [
       post.variantId
     ]);
-    await this.createOutboxEvent({
-      eventType: "post_cancelado",
-      aggregateType: "scheduled_post",
-      aggregateId: post.id,
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      payload: { actorId: input.actorId, requestId: input.requestId }
-    });
     return { scheduledPost: toScheduledPost(updated.rows[0]) };
   }
 
@@ -2912,30 +1847,6 @@ export class SupabaseDataStoreCore {
       createdAt: new Date(result.rows[0].created_at).toISOString(),
       expiresAt: new Date(result.rows[0].expires_at).toISOString()
     };
-  }
-
-  async createOutboxEvent(input: Parameters<DataStore["createOutboxEvent"]>[0]): Promise<OutboxEvent> {
-    const result = await this.pool.query(
-      `insert into public.outbox_events
-       (id, event_type, aggregate_type, aggregate_id, workspace_id, business_id, payload, status, available_at, attempts, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending', now(), 0, now())
-       returning *`,
-      [
-        randomUUID(),
-        input.eventType,
-        input.aggregateType,
-        input.aggregateId,
-        input.workspaceId,
-        input.businessId ?? null,
-        JSON.stringify(input.payload ?? {})
-      ]
-    );
-    return toOutboxEvent(result.rows[0]);
-  }
-
-  async listOutboxEvents(workspaceId: string): Promise<OutboxEvent[]> {
-    const result = await this.pool.query("select * from public.outbox_events where workspace_id = $1 order by created_at desc", [workspaceId]);
-    return result.rows.map(toOutboxEvent);
   }
 
   async upsertExternalOperation(input: Parameters<DataStore["upsertExternalOperation"]>[0]): Promise<ExternalOperation> {
@@ -3050,45 +1961,6 @@ export class SupabaseDataStoreCore {
     }
   }
 
-  private async assertWorkspaceBillingAllows(workspaceId: string, action: "costly" | "publish") {
-    const workspace = await this.requireWorkspace(workspaceId);
-    if (["past_due", "paused", "cancelled"].includes(workspace.billingStatus)) {
-      throw new AppError({
-        code: "billing_status_blocked",
-        statusCode: 402,
-        message: `Workspace billing status blocks ${action}: ${workspace.billingStatus}`,
-        userMessage:
-          action === "publish"
-            ? "Tu plan necesita atencion antes de publicar."
-            : "Tu plan necesita atencion antes de usar funciones con costo.",
-        retryable: false,
-        action: "contact_support"
-      });
-    }
-  }
-
-  private async activePricingRule(): Promise<PricingRule> {
-    const result = await this.pool.query(
-      `select * from public.pricing_rules
-       where active = true and operation = 'generated_variant'
-         and effective_from <= now()
-         and (effective_to is null or effective_to > now())
-       order by effective_from desc
-       limit 1`
-    );
-    if (!result.rows[0]) {
-      throw new AppError({
-        code: "pricing_rule_missing",
-        statusCode: 503,
-        message: "No active pricing rule for generated variants",
-        userMessage: "No pudimos calcular el costo en este momento.",
-        retryable: true,
-        action: "retry"
-      });
-    }
-    return toPricingRule(result.rows[0]);
-  }
-
   private async validPhotosForGeneration(workspaceId: string, businessId: string, batchId: string): Promise<Photo[]> {
     const result = await this.pool.query(
       `select * from public.photos
@@ -3098,180 +1970,6 @@ export class SupabaseDataStoreCore {
       [workspaceId, businessId, batchId]
     );
     return result.rows.map(toPhoto);
-  }
-
-  private async usageSnapshot(
-    workspace: Workspace,
-    metric: UsageMeter["metric"],
-    requestedValue: number
-  ): Promise<{
-    metric: UsageMeter["metric"];
-    limitValue?: number | null;
-    usedValue: number;
-    reservedValue: number;
-    availableValue?: number | null;
-  }> {
-    const meter = await this.ensureUsageMeter(this.pool, workspace, metric);
-    const limitValue = meter.limitValue ?? null;
-    const availableValue = limitValue === null ? null : this.money(limitValue - meter.usedValue - meter.reservedValue - requestedValue);
-    return {
-      metric,
-      limitValue,
-      usedValue: meter.usedValue,
-      reservedValue: meter.reservedValue,
-      availableValue
-    };
-  }
-
-  private entitlementLimit(workspace: Workspace, metric: UsageMeter["metric"]) {
-    const entitlements = (workspace.entitlements ?? {}) as Record<string, unknown>;
-    const fromKey = (key: string) => {
-      const value = entitlements[key];
-      return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-    };
-    if (metric === "generated_variants") return fromKey("monthlyGeneratedVariants");
-    if (metric === "ai_customer_spend_usd") return fromKey("monthlyAiBudgetUsd") ?? fromKey("includedAiCreditsUsd");
-    if (metric === "ai_provider_cost_usd") return fromKey("monthlyProviderBudgetUsd");
-    if (metric === "photo_uploads") return fromKey("monthlyPhotoUploads");
-    if (metric === "scheduled_posts") return fromKey("monthlyScheduledPosts");
-    return undefined;
-  }
-
-  private async ensureUsageMeter(
-    executor: pg.Pool | pg.PoolClient,
-    workspace: Workspace,
-    metric: UsageMeter["metric"]
-  ): Promise<UsageMeter> {
-    const periodStart = this.currentPeriodStart();
-    const periodEnd = this.currentPeriodEnd();
-    const limitValue = this.entitlementLimit(workspace, metric);
-    const id = `${workspace.id}:${metric}:${periodStart}`;
-    const result = await executor.query(
-      `insert into public.usage_meters
-       (id, workspace_id, metric, period_start, period_end, limit_value, reserved_value, used_value, updated_at)
-       values ($1, $2, $3, $4, $5, $6, 0, 0, now())
-       on conflict (workspace_id, metric, period_start) do update
-       set limit_value = coalesce(excluded.limit_value, public.usage_meters.limit_value), updated_at = now()
-       returning *`,
-      [id, workspace.id, metric, periodStart, periodEnd, limitValue ?? null]
-    );
-    const row = result.rows[0];
-    const meter: UsageMeter = {
-      id: row.id,
-      workspaceId: row.workspace_id,
-      metric: row.metric,
-      periodStart: new Date(row.period_start).toISOString(),
-      periodEnd: new Date(row.period_end).toISOString(),
-      reservedValue: Number(row.reserved_value),
-      usedValue: Number(row.used_value),
-      updatedAt: new Date(row.updated_at).toISOString()
-    };
-    if (row.limit_value !== null && row.limit_value !== undefined) meter.limitValue = Number(row.limit_value);
-    return meter;
-  }
-
-  private async reserveUsage(client: pg.PoolClient, workspaceId: string, metric: UsageMeter["metric"], value: number) {
-    const workspace = await this.requireWorkspace(workspaceId);
-    const meter = await this.ensureUsageMeter(client, workspace, metric);
-    const nextReserved = this.money(meter.reservedValue + value);
-    if (meter.limitValue !== undefined && this.money(meter.usedValue + nextReserved) > meter.limitValue) {
-      throw new AppError({
-        code: "usage_limit_exceeded",
-        statusCode: 409,
-        message: `Usage limit exceeded for ${metric}`,
-        userMessage: "Este lote supera el limite disponible del plan.",
-        retryable: false,
-        action: "contact_support"
-      });
-    }
-    await client.query(
-      "update public.usage_meters set reserved_value = $2, updated_at = now() where id = $1",
-      [meter.id, nextReserved]
-    );
-  }
-
-  private async hasReservation(workspaceId: string, batchId: string, priceVersion: string): Promise<boolean> {
-    const result = await this.pool.query(
-      `select 1 from public.cost_ledger
-       where workspace_id = $1 and batch_id = $2 and price_version = $3
-         and entry_type = 'reservation' and status = 'reserved'
-       limit 1`,
-      [workspaceId, batchId, priceVersion]
-    );
-    return Boolean(result.rows[0]);
-  }
-
-  private async consumeUsage(client: pg.PoolClient, workspaceId: string, metric: UsageMeter["metric"], value: number) {
-    const workspace = await this.requireWorkspace(workspaceId);
-    const meter = await this.ensureUsageMeter(client, workspace, metric);
-    await client.query(
-      `update public.usage_meters
-       set reserved_value = greatest(0, reserved_value - $2),
-           used_value = used_value + $2,
-           updated_at = now()
-       where id = $1`,
-      [meter.id, value]
-    );
-  }
-
-  private async consumeVariantReservation(client: pg.PoolClient, variant: Variant, jobId: string, generatedAssetId: string) {
-    const batch = await client.query("select * from public.batches where id = $1 and workspace_id = $2", [
-      variant.batchId,
-      variant.workspaceId
-    ]);
-    const confirmedPriceVersion = batch.rows[0]?.confirmed_price_version;
-    if (!confirmedPriceVersion) return;
-    const operationKey = `openai_image:${variant.id}`;
-    const existingActual = await client.query(
-      "select 1 from public.cost_ledger where operation_key = $1 and entry_type = 'actual' limit 1",
-      [operationKey]
-    );
-    if (existingActual.rows[0]) return;
-    const ruleResult = await client.query("select * from public.pricing_rules where price_version = $1 limit 1", [
-      confirmedPriceVersion
-    ]);
-    const rule = ruleResult.rows[0] ? toPricingRule(ruleResult.rows[0]) : await this.activePricingRule();
-    const customerCost = this.money(rule.customerUnitPriceUsd / rule.unitSize);
-    const providerCost = this.money(rule.unitCostUsd / rule.unitSize);
-    await this.consumeUsage(client, variant.workspaceId, "generated_variants", 1);
-    await this.consumeUsage(client, variant.workspaceId, "ai_customer_spend_usd", customerCost);
-    await this.consumeUsage(client, variant.workspaceId, "ai_provider_cost_usd", providerCost);
-    await client.query(
-      `insert into public.cost_ledger
-       (id, workspace_id, business_id, batch_id, job_id, variant_id, operation, operation_key, entry_type,
-        usage_metric, quantity, price_version, customer_cost_usd, provider_cost_usd, status, created_at)
-       values ($1, $2, $3, $4, $5, $6, 'generated_variant', $7, 'actual',
-               'generated_variants', 1, $8, $9, $10, 'used', now())`,
-      [
-        randomUUID(),
-        variant.workspaceId,
-        variant.businessId,
-        variant.batchId,
-        jobId,
-        variant.id,
-        operationKey,
-        rule.priceVersion,
-        customerCost,
-        providerCost
-      ]
-    );
-    await client.query(
-      `insert into public.cost_ledger
-       (id, workspace_id, business_id, batch_id, job_id, variant_id, operation, operation_key, entry_type,
-        quantity, price_version, customer_cost_usd, provider_cost_usd, status, created_at)
-       values ($1, $2, $3, $4, $5, $6, 'generated_asset', $7, 'actual',
-               1, $8, 0, 0, 'used', now())`,
-      [
-        randomUUID(),
-        variant.workspaceId,
-        variant.businessId,
-        variant.batchId,
-        jobId,
-        variant.id,
-        `asset:${generatedAssetId}`,
-        rule.priceVersion
-      ]
-    );
   }
 
   private assignStyle(index: number): AssignedStyle {
@@ -3460,264 +2158,6 @@ export class SupabaseDataStoreCore {
     return toScheduledPost(result.rows[0]);
   }
 
-  private async metricDefinition(provider: MetricDefinition["provider"], canonicalMetric: MetricDefinition["canonicalMetric"]) {
-    const result = await this.pool.query(
-      "select * from public.metric_definitions where provider = $1 and canonical_metric = $2 and status = 'active' limit 1",
-      [provider, canonicalMetric]
-    );
-    if (!result.rows[0]) throw new Error(`Metric definition not found: ${provider}:${canonicalMetric}`);
-    return toMetricDefinition(result.rows[0]);
-  }
-
-  private businessAutonomy(business: Business): BusinessAutonomySettings {
-    const timestamp = now();
-    const raw = business.autonomySettings as Partial<BusinessAutonomySettings>;
-    return this.normalizedAutonomy(raw, timestamp);
-  }
-
-  private normalizedAutonomy(input: Partial<BusinessAutonomySettings>, timestamp: string): BusinessAutonomySettings {
-    const base = defaultAutonomySettings(timestamp);
-    const incomingActions = input.actions ?? {};
-    for (const action of autonomyActions) {
-      const current = incomingActions[action] as Partial<ActionAutonomyState> | undefined;
-      if (!current) continue;
-      const merged = { ...base.actions[action]!, ...current, action, updatedAt: timestamp };
-      if (action === "FACEBOOK_PUBLISH" && !merged.explicitOptIn) {
-        merged.mode = "human_approval";
-        merged.paused = true;
-        merged.pauseReasons = [...new Set([...(merged.pauseReasons ?? []), "explicit_opt_in_required"])];
-      }
-      base.actions[action] = merged;
-    }
-    return { schemaVersion: "business_autonomy.v1", actions: base.actions, updatedAt: timestamp };
-  }
-
-  private async hasUncertainPost(businessId: string): Promise<boolean> {
-    const result = await this.pool.query(
-      "select 1 from public.scheduled_posts where business_id = $1 and status = 'estado_incierto' limit 1",
-      [businessId]
-    );
-    return Boolean(result.rows[0]);
-  }
-
-  private async hasBudgetPressure(workspaceId: string): Promise<boolean> {
-    const result = await this.pool.query(
-      `select 1 from public.usage_meters
-       where workspace_id = $1 and limit_value is not null and used_value + reserved_value >= limit_value
-       limit 1`,
-      [workspaceId]
-    );
-    return Boolean(result.rows[0]);
-  }
-
-  private async hasSensitivePublishRisk(workspaceId: string, businessId: string): Promise<boolean> {
-    const result = await this.pool.query(
-      `select 1
-       from public.photos p
-       join public.variants v on v.photo_id = p.id and v.workspace_id = p.workspace_id
-       where p.workspace_id = $1 and p.business_id = $2
-         and v.status in ('aprobada', 'programada', 'publicada')
-         and (
-           coalesce((p.vision_analysis #>> '{sensitiveElements,personVisible}')::boolean, false) = true
-           or coalesce((p.vision_analysis #>> '{sensitiveElements,priceVisible}')::boolean, false) = true
-           or coalesce((p.vision_analysis #>> '{sensitiveElements,promotionVisible}')::boolean, false) = true
-         )
-       limit 1`,
-      [workspaceId, businessId]
-    );
-    return Boolean(result.rows[0]);
-  }
-
-  private async insertMetricSnapshot(input: {
-    workspaceId: string;
-    businessId: string;
-    scheduledPostId: string;
-    facebookPostId: string | null;
-    definition: MetricDefinition;
-    window: MetricWindow;
-    value: number;
-    collectedAt: string;
-    observedUntil: string;
-  }): Promise<PostMetricSnapshot> {
-    const result = await this.pool.query(
-      `insert into public.post_metric_snapshots
-       (id, workspace_id, business_id, scheduled_post_id, facebook_post_id, metric_definition_id,
-        provider, canonical_metric, provider_metric_name, metric_window, value, collected_at, observed_until,
-        collection_status, source_version, raw_ref)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'ok', 'fbmaniaco-local-metrics-v1', null)
-       returning *`,
-      [
-        randomUUID(),
-        input.workspaceId,
-        input.businessId,
-        input.scheduledPostId,
-        input.facebookPostId,
-        input.definition.id,
-        input.definition.provider,
-        input.definition.canonicalMetric,
-        input.definition.providerMetricName ?? null,
-        input.window,
-        input.value,
-        input.collectedAt,
-        input.observedUntil
-      ]
-    );
-    return toPostMetricSnapshot(result.rows[0]);
-  }
-
-  private async recalculatePerformanceSummaries(
-    workspaceId: string,
-    businessId: string,
-    periodStart: string,
-    periodEnd: string,
-    generatedAt: string
-  ): Promise<PerformanceSummary[]> {
-    const published = await this.pool.query(
-      `select * from public.scheduled_posts
-       where workspace_id = $1 and business_id = $2 and status = 'publicada'
-         and scheduled_for >= $3::timestamptz and scheduled_for <= $4::timestamptz`,
-      [workspaceId, businessId, periodStart, periodEnd]
-    );
-    const failed = await this.pool.query(
-      `select * from public.scheduled_posts
-       where workspace_id = $1 and business_id = $2 and status in ('fallida', 'estado_incierto')
-         and scheduled_for >= $3::timestamptz and scheduled_for <= $4::timestamptz`,
-      [workspaceId, businessId, periodStart, periodEnd]
-    );
-    const scheduled = await this.pool.query(
-      `select * from public.scheduled_posts
-       where workspace_id = $1 and business_id = $2
-         and scheduled_for >= $3::timestamptz and scheduled_for <= $4::timestamptz`,
-      [workspaceId, businessId, periodStart, periodEnd]
-    );
-    const scheduledPosts = scheduled.rows.map(toScheduledPost);
-    const sampleSize = published.rows.length;
-    const confidence = this.confidenceForSample(sampleSize);
-    const metaUnavailable = (
-      await this.pool.query("select 1 from public.metric_definitions where provider = 'meta' and status <> 'active' limit 1")
-    ).rows[0];
-    const reasonCodes = [...(sampleSize < 20 ? ["sample_size_low"] : []), ...(metaUnavailable ? ["meta_insights_unavailable"] : [])];
-    await this.pool.query(
-      `delete from public.performance_summaries
-       where workspace_id = $1 and business_id = $2 and period_start = $3::timestamptz and period_end = $4::timestamptz`,
-      [workspaceId, businessId, periodStart, periodEnd]
-    );
-    const summaries: PerformanceSummary[] = [];
-    const businessSummary = await this.insertPerformanceSummary({
-      workspaceId,
-      businessId,
-      scope: "business_week",
-      scopeKey: periodStart.slice(0, 10),
-      periodStart,
-      periodEnd,
-      sampleSize,
-      metrics: {
-        publish_success: published.rows.length,
-        publish_failure: failed.rows.length,
-        week_coverage: Math.min(1, scheduledPosts.length / 7)
-      },
-      confidence,
-      reasonCodes,
-      generatedAt
-    });
-    summaries.push(businessSummary);
-    const byStyle = new Map<string, { label: string; published: number; scheduled: number }>();
-    for (const post of scheduledPosts) {
-      const key = post.styleId ?? "sin_estilo";
-      const entry = byStyle.get(key) ?? { label: post.styleName ?? key, published: 0, scheduled: 0 };
-      entry.scheduled += 1;
-      if (post.status === "publicada") entry.published += 1;
-      byStyle.set(key, entry);
-    }
-    for (const [styleId, entry] of byStyle.entries()) {
-      summaries.push(
-        await this.insertPerformanceSummary({
-          workspaceId,
-          businessId,
-          scope: "style",
-          scopeKey: styleId,
-          periodStart,
-          periodEnd,
-          sampleSize: entry.published,
-          metrics: {
-            publish_success: entry.published,
-            scheduled_posts: entry.scheduled,
-            acceptance_proxy: entry.scheduled === 0 ? 0 : entry.published / entry.scheduled
-          },
-          confidence: this.confidenceForSample(entry.published),
-          reasonCodes: entry.published < 20 ? ["sample_size_low", `style_label:${entry.label}`] : [`style_label:${entry.label}`],
-          generatedAt
-        })
-      );
-    }
-    return summaries;
-  }
-
-  private async insertPerformanceSummary(input: {
-    workspaceId: string;
-    businessId: string;
-    scope: PerformanceSummary["scope"];
-    scopeKey: string;
-    periodStart: string;
-    periodEnd: string;
-    sampleSize: number;
-    metrics: Record<string, number>;
-    confidence: PerformanceSummary["confidence"];
-    reasonCodes: string[];
-    generatedAt: string;
-  }): Promise<PerformanceSummary> {
-    const result = await this.pool.query(
-      `insert into public.performance_summaries
-       (id, workspace_id, business_id, scope, scope_key, period_start, period_end, sample_size, metrics, confidence, reason_codes, generated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
-       returning *`,
-      [
-        randomUUID(),
-        input.workspaceId,
-        input.businessId,
-        input.scope,
-        input.scopeKey,
-        input.periodStart,
-        input.periodEnd,
-        input.sampleSize,
-        JSON.stringify(input.metrics),
-        input.confidence,
-        input.reasonCodes,
-        input.generatedAt
-      ]
-    );
-    return toPerformanceSummary(result.rows[0]);
-  }
-
-  private async countScheduledPosts(
-    workspaceId: string,
-    businessId: string,
-    periodStart: string,
-    periodEnd: string,
-    statuses: string[]
-  ): Promise<number> {
-    const result = await this.pool.query(
-      `select count(*)::int as count from public.scheduled_posts
-       where workspace_id = $1 and business_id = $2 and status = any($3::text[])
-         and scheduled_for >= $4::timestamptz and scheduled_for <= $5::timestamptz`,
-      [workspaceId, businessId, statuses, periodStart, periodEnd]
-    );
-    return Number(result.rows[0]?.count ?? 0);
-  }
-
-  private confidenceForSample(sampleSize: number): PerformanceSummary["confidence"] {
-    if (sampleSize < 20) return "exploratoria";
-    if (sampleSize < 100) return "media";
-    return "alta";
-  }
-
-  private weekStart(date: Date) {
-    const copy = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
-    const day = copy.getUTCDay() || 7;
-    copy.setUTCDate(copy.getUTCDate() - day + 1);
-    return copy;
-  }
-
   private variantStateError(code: string, userMessage: string) {
     return new AppError({
       code,
@@ -3753,20 +2193,6 @@ export class SupabaseDataStoreCore {
     if (row.error_code) run.errorCode = row.error_code;
     if (row.request_id) run.requestId = row.request_id;
     return run;
-  }
-
-  private currentPeriodStart() {
-    const date = new Date();
-    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 0, 0, 0, 0)).toISOString();
-  }
-
-  private currentPeriodEnd() {
-    const date = new Date();
-    return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1, 0, 0, 0, 0)).toISOString();
-  }
-
-  private money(value: number) {
-    return Math.round(value * 1_000_000) / 1_000_000;
   }
 
   private async ensureDerivedMediaAsset(

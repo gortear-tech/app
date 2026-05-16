@@ -6,14 +6,6 @@ export const WorkspaceStatus = Type.Union([
   Type.Literal("eliminado")
 ]);
 
-export const BillingStatus = Type.Union([
-  Type.Literal("trial"),
-  Type.Literal("active"),
-  Type.Literal("past_due"),
-  Type.Literal("paused"),
-  Type.Literal("cancelled")
-]);
-
 export const WorkspaceRole = Type.Union([
   Type.Literal("owner"),
   Type.Literal("admin"),

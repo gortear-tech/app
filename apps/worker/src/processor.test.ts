@@ -7,22 +7,6 @@ import { VisionAnalysisProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 describe("worker processor", () => {
-  it("claims, attempts and completes a mock job", async () => {
-    const path = join(tmpdir(), `fbmaniaco-worker-test-${Date.now()}.json`);
-    const store = new LocalDataStore(path);
-    await store.upsertLocalUser({ userId: "u1", email: "u1@example.com" });
-    const { workspace } = await store.ensureDefaultWorkspace("u1");
-    const job = await store.createJob({ type: "mock_job", workspaceId: workspace.id, dedupeKey: "one" });
-
-    const result = await processOneJob({ store, workerId: "test-worker" });
-
-    expect(result.processed).toBe(true);
-    expect(result.job?.id).toBe(job.id);
-    expect(result.job?.status).toBe("succeeded");
-    expect(await store.listAttempts(job.id)).toHaveLength(1);
-    await rm(path, { force: true });
-  });
-
   it("validates an uploaded photo through an analyze_photo job", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-photo-${Date.now()}.json`);
     const store = new LocalDataStore(path);
@@ -107,21 +91,6 @@ describe("worker processor", () => {
     expect(aiRuns[0]?.promptTemplateId).toBe("photo-vision-analysis");
     expect(aiRuns[0]?.schemaVersion).toBe("vision_analysis.v1");
 
-    const estimate = await store.estimateBatchCost({
-      workspaceId: workspace.id,
-      businessId: business.id,
-      batchId: batch.id,
-      variantsPerPhoto: 2
-    });
-    await store.confirmBatchCost({
-      workspaceId: workspace.id,
-      businessId: business.id,
-      batchId: batch.id,
-      variantsPerPhoto: 2,
-      priceVersion: estimate.priceVersion,
-      actorId: "u2",
-      requestId: "test-confirm"
-    });
     const generation = await store.requestGenerateBatch({
       workspaceId: workspace.id,
       businessId: business.id,
@@ -183,46 +152,6 @@ describe("worker processor", () => {
     expect(published?.status).toBe("publicada");
     expect(published?.remoteStatus).toBe("confirmado_meta");
     expect(published?.facebookPostId).toBeTruthy();
-
-    const metricsRequest = await store.requestCollectMetrics({
-      workspaceId: workspace.id,
-      businessId: business.id,
-      window: "7d",
-      actorId: "u2",
-      requestId: "test-metrics"
-    });
-    const metricsResult = await processOneJob({ store, workerId: "metrics-worker" });
-    expect(metricsResult.job?.id).toBe(metricsRequest.job.id);
-    expect(metricsResult.job?.status).toBe("succeeded");
-    expect(metricsResult.job?.result.snapshotsCount).toBe(1);
-    const summaries = await store.listPerformanceSummaries({ workspaceId: workspace.id, businessId: business.id });
-    expect(summaries[0]?.confidence).toBe("exploratoria");
-    expect(summaries[0]?.reasonCodes).toContain("sample_size_low");
-
-    const reportRequest = await store.requestWeeklyReport({
-      workspaceId: workspace.id,
-      businessId: business.id,
-      actorId: "u2",
-      requestId: "test-report"
-    });
-    const reportResult = await processOneJob({ store, workerId: "report-worker" });
-    const report = await store.getLatestWeeklyReport({ workspaceId: workspace.id, businessId: business.id });
-    expect(reportResult.job?.id).toBe(reportRequest.job.id);
-    expect(report?.confidence).toBe("exploratoria");
-    expect(report?.sections.metaHealth[0]).toContain("Insights de Meta");
-
-    const evalRequest = await store.requestBatchCaptionEval({
-      workspaceId: workspace.id,
-      businessId: business.id,
-      actorId: "u2",
-      requestId: "test-eval",
-      candidateCaptionEditRate: 0.18
-    });
-    const evalResult = await processOneJob({ store, workerId: "eval-worker" });
-    const evaluations = await store.listAiEvaluations({ workspaceId: workspace.id, businessId: business.id });
-    expect(evalResult.job?.id).toBe(evalRequest.job.id);
-    expect(evaluations[0]?.status).toBe("failed");
-    expect(evaluations[0]?.rolloutRecommendation).toBe("retain_baseline");
     if (previousPublicApiUrl === undefined) delete process.env.PUBLIC_API_URL;
     else process.env.PUBLIC_API_URL = previousPublicApiUrl;
     await rm(path, { force: true });

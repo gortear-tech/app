@@ -33,15 +33,10 @@ const makeConfig = (path: string): ApiConfig => ({
   openaiVisionModel: "gpt-5.5",
   openaiVisionTimeoutMs: 30000,
   release: "test",
-  workerHeartbeatMaxAgeMs: 120000,
-  requireWorkerHeartbeat: false,
-  billingWebhookSecret: undefined,
   featureFlags: {
     metaPublishing: true,
     openaiVision: true,
-    openaiImageGeneration: true,
-    remoteSchedule: false,
-    autonomy: false
+    openaiImageGeneration: true
   }
 });
 
@@ -67,13 +62,19 @@ describe("api bootstrap and tenancy", () => {
     });
     expect(second.statusCode).toBe(200);
 
-    const forbidden = await app.inject({
-      method: "POST",
-      url: "/internal/jobs/mock",
-      headers: { authorization: "Bearer dev:user-b:b@example.com" },
-      payload: { workspaceId, dedupeKey: "cross-tenant" }
+    const job = await store.createJob({
+      type: "analyze_photo",
+      workspaceId,
+      dedupeKey: "cross-tenant",
+      payload: { photoId: "photo-cross-tenant" }
     });
-    expect(forbidden.statusCode).toBe(403);
+
+    const hidden = await app.inject({
+      method: "GET",
+      url: `/jobs/${job.id}`,
+      headers: { authorization: "Bearer dev:user-b:b@example.com" }
+    });
+    expect(hidden.statusCode).toBe(404);
 
     await app.close();
     await rm(path, { force: true });
@@ -314,17 +315,7 @@ describe("api bootstrap and tenancy", () => {
       headers: { authorization }
     });
     expect(businessDetail.statusCode).toBe(200);
-    expect(businessDetail.json().autonomy.canAutopublish).toBe(false);
-    expect(businessDetail.json().autonomy.blockingReasons).toContain("explicit_opt_in_required");
-
-    const resetAutonomy = await app.inject({
-      method: "PATCH",
-      url: `/businesses/${businessId}`,
-      headers: { authorization, "idempotency-key": "business-autonomy-1" },
-      payload: { autonomySettings: businessDetail.json().business.autonomySettings }
-    });
-    expect(resetAutonomy.statusCode).toBe(200);
-    expect(resetAutonomy.json().changed.queryKeys).toContain(`settings:${businessId}`);
+    expect(businessDetail.json().business.id).toBe(businessId);
 
     const createBatch = await app.inject({
       method: "POST",
@@ -406,25 +397,6 @@ describe("api bootstrap and tenancy", () => {
     expect(preview.statusCode).toBe(409);
     expect(preview.json().code).toBe("real_media_required");
 
-    const estimate = await app.inject({
-      method: "POST",
-      url: `/businesses/${businessId}/batches/${batchId}/estimate-cost`,
-      headers: { authorization },
-      payload: { variantsPerPhoto: 1 }
-    });
-    expect(estimate.statusCode).toBe(200);
-    expect(estimate.json().canConfirm).toBe(true);
-    expect(estimate.json().priceVersion).toBeTruthy();
-
-    const confirm = await app.inject({
-      method: "POST",
-      url: `/businesses/${businessId}/batches/${batchId}/confirm-cost`,
-      headers: { authorization, "idempotency-key": "confirm-cost-1" },
-      payload: { variantsPerPhoto: 1, priceVersion: estimate.json().priceVersion }
-    });
-    expect(confirm.statusCode).toBe(200);
-    expect(confirm.json().batch.status).toBe("confirmado");
-
     const generate = await app.inject({
       method: "POST",
       url: `/businesses/${businessId}/batches/${batchId}/generate`,
@@ -503,107 +475,6 @@ describe("api bootstrap and tenancy", () => {
     });
     expect(afterPublish.json().scheduledPosts[0].status).toBe("publicada");
     expect(afterPublish.json().scheduledPosts[0].facebookPostId).toBeTruthy();
-
-    const collectMetrics = await app.inject({
-      method: "POST",
-      url: `/businesses/${businessId}/metrics/collect`,
-      headers: { authorization, "idempotency-key": "collect-metrics-1" },
-      payload: { window: "7d" }
-    });
-    expect(collectMetrics.statusCode).toBe(200);
-    expect(collectMetrics.json().job.type).toBe("collect_metrics");
-    const metricsJobId = collectMetrics.json().job.id as string;
-    await store.completeCollectMetrics({ jobId: metricsJobId });
-
-    const performance = await app.inject({
-      method: "GET",
-      url: `/businesses/${businessId}/performance`,
-      headers: { authorization }
-    });
-    expect(performance.statusCode).toBe(200);
-    expect(performance.json().summaries[0].confidence).toBe("exploratoria");
-    expect(JSON.stringify(performance.json())).not.toMatch(/raw_payload|access_token/i);
-
-    const generateReport = await app.inject({
-      method: "POST",
-      url: `/businesses/${businessId}/reports/weekly/generate`,
-      headers: { authorization, "idempotency-key": "weekly-report-1" },
-      payload: {}
-    });
-    expect(generateReport.statusCode).toBe(200);
-    await store.completeWeeklyReport({ jobId: generateReport.json().job.id });
-
-    const weeklyReport = await app.inject({
-      method: "GET",
-      url: `/businesses/${businessId}/reports/weekly`,
-      headers: { authorization }
-    });
-    expect(weeklyReport.statusCode).toBe(200);
-    expect(weeklyReport.json().report.confidence).toBe("exploratoria");
-
-    const captionEval = await app.inject({
-      method: "POST",
-      url: `/businesses/${businessId}/evals/caption`,
-      headers: { authorization, "idempotency-key": "caption-eval-1" },
-      payload: { candidateCaptionEditRate: 0.18 }
-    });
-    expect(captionEval.statusCode).toBe(200);
-    expect(captionEval.json().job.type).toBe("batch_caption_eval");
-    await store.completeBatchCaptionEval({ jobId: captionEval.json().job.id });
-
-    const evals = await app.inject({
-      method: "GET",
-      url: `/businesses/${businessId}/evals`,
-      headers: { authorization }
-    });
-    expect(evals.statusCode).toBe(200);
-    expect(evals.json().evaluations[0].status).toBe("failed");
-    expect(evals.json().evaluations[0].rolloutRecommendation).toBe("retain_baseline");
-
-    const billingStatus = await app.inject({
-      method: "GET",
-      url: "/billing/status",
-      headers: { authorization }
-    });
-    expect(billingStatus.statusCode).toBe(200);
-    expect(billingStatus.json().workspace.plan).toBe("piloto");
-
-    const billingEvent = await app.inject({
-      method: "POST",
-      url: "/billing/webhooks/manual",
-      payload: {
-        providerEventId: "evt-manual-past-due-1",
-        type: "subscription.updated",
-        workspaceId,
-        plan: "pro",
-        billingStatus: "past_due"
-      }
-    });
-    expect(billingEvent.statusCode).toBe(200);
-    expect(billingEvent.json().duplicate).toBe(false);
-
-    const duplicateBillingEvent = await app.inject({
-      method: "POST",
-      url: "/billing/webhooks/manual",
-      payload: {
-        providerEventId: "evt-manual-past-due-1",
-        type: "subscription.updated",
-        workspaceId,
-        plan: "pro",
-        billingStatus: "active"
-      }
-    });
-    expect(duplicateBillingEvent.statusCode).toBe(200);
-    expect(duplicateBillingEvent.json().duplicate).toBe(true);
-
-    const blockedByBilling = await app.inject({
-      method: "POST",
-      url: `/businesses/${businessId}/batches/${batchId}/confirm-cost`,
-      headers: { authorization, "idempotency-key": "confirm-cost-past-due-1" },
-      payload: { variantsPerPhoto: 1, priceVersion: estimate.json().priceVersion }
-    });
-    expect(blockedByBilling.statusCode).toBe(402);
-    expect(blockedByBilling.json().code).toBe("billing_status_blocked");
 
     const replay = await app.inject({
       method: "POST",

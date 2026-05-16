@@ -6,7 +6,21 @@ import { createDataStore } from "./db/index.js";
 import { buildServer } from "./server.js";
 
 const localDbPath = join(tmpdir(), `fbmaniaco-api-smoke-${Date.now()}.json`);
+process.env.APP_ENV = "development";
+process.env.DATA_STORE_MODE = "local";
+process.env.ALLOW_LOCAL_DATASTORE = "true";
+process.env.LOCAL_AUTH_ENABLED = "true";
 process.env.LOCAL_DB_PATH = localDbPath;
+process.env.SUPABASE_URL = "";
+process.env.SUPABASE_SERVICE_ROLE = "";
+process.env.DATABASE_URL = "";
+process.env.META_APP_ID = "";
+process.env.META_APP_SECRET = "";
+process.env.META_REDIRECT_URI = "";
+process.env.META_TEST_USER_ACCESS_TOKEN = "";
+process.env.META_BOOTSTRAP_TOKEN = "";
+process.env.META_USER_ACCESS_TOKEN = "";
+process.env.META_ACCESS_TOKEN = "";
 const config = loadConfig();
 const store = createDataStore(config);
 const app = await buildServer({ config, store });
@@ -22,6 +36,7 @@ const bootstrap = await app.inject({
 if (health.statusCode !== 200) throw new Error(`health failed: ${health.statusCode}`);
 if (ready.statusCode !== 200) throw new Error(`ready failed: ${ready.statusCode} ${ready.body}`);
 if (bootstrap.statusCode !== 200) throw new Error(`bootstrap failed: ${bootstrap.statusCode} ${bootstrap.body}`);
+const workspaceId = bootstrap.json().workspace.id as string;
 
 const connect = await app.inject({
   method: "POST",
@@ -67,9 +82,17 @@ const uploadIntent = await app.inject({
   },
   payload: { originalFileName: "smoke.jpg", contentType: "image/jpeg", fileSize: 1024 }
 });
-if (uploadIntent.statusCode !== 200) {
-  throw new Error(`upload intent failed: ${uploadIntent.statusCode} ${uploadIntent.body}`);
+if (uploadIntent.statusCode !== 409 || uploadIntent.json().code !== "real_storage_required") {
+  throw new Error(`upload intent storage gate failed: ${uploadIntent.statusCode} ${uploadIntent.body}`);
 }
+const localIntent = await store.createUploadIntent({
+  workspaceId,
+  businessId,
+  batchId,
+  originalFileName: "smoke.jpg",
+  contentType: "image/jpeg",
+  fileSize: 1024
+});
 
 const completeUpload = await app.inject({
   method: "POST",
@@ -79,7 +102,7 @@ const completeUpload = await app.inject({
     "idempotency-key": "smoke-complete-upload-key"
   },
   payload: {
-    storageKey: uploadIntent.json().uploadIntent.storageKey,
+    storageKey: localIntent.storageKey,
     originalFileName: "smoke.jpg",
     contentType: "image/jpeg",
     fileSize: 1024
