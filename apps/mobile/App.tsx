@@ -25,7 +25,8 @@ import {
   type StyleProp,
   Text,
   TextInput,
-  View
+  View,
+  type ViewStyle
 } from "react-native";
 import {
   approveVariant,
@@ -56,7 +57,7 @@ import { getMobileConfig } from "./src/config";
 const queryClient = new QueryClient();
 WebBrowser.maybeCompleteAuthSession();
 
-type FlowStep = "home" | "upload" | "styles" | "generate" | "review" | "schedule" | "calendar" | "settings";
+type FlowStep = "home" | "styles" | "generate" | "review" | "schedule" | "calendar" | "settings";
 type IconName = ComponentProps<typeof Ionicons>["name"];
 type PeriodDays = 7 | 14 | 30;
 
@@ -77,7 +78,9 @@ const styleCatalog = [
 ];
 
 type PhotoStylePreference = { styleId: string; intensity: number };
+type LocalPhotoPreview = { id: string; uri: string; name: string };
 const asImageStyle = (style: unknown) => style as StyleProp<ImageStyle>;
+const asViewStyle = (style: unknown) => style as StyleProp<ViewStyle>;
 
 const mimeFromFileName = (fileName?: string | null) => {
   const lower = fileName?.toLowerCase() ?? "";
@@ -213,6 +216,7 @@ function BootScreen() {
   const [metaReturnMessage, setMetaReturnMessage] = useState<string | null>(null);
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const [localUploadPreviews, setLocalUploadPreviews] = useState<LocalPhotoPreview[]>([]);
   const [photoPrefs, setPhotoPrefs] = useState<Record<string, PhotoStylePreference>>({});
   const [stylePhotoId, setStylePhotoId] = useState<string | null>(null);
   const [detailPhotoId, setDetailPhotoId] = useState<string | null>(null);
@@ -363,16 +367,6 @@ function BootScreen() {
     }
   });
 
-  const startBatch = useMutation({
-    mutationFn: async () => createBatch(token, selectedBusinessId ?? ""),
-    onSuccess: async (batch) => {
-      setSelectedBatchId(batch.id);
-      setUploadNotice(null);
-      setFlow("upload");
-      await invalidateWork();
-    }
-  });
-
   const uploadSelectedPhotos = useMutation({
     mutationFn: async () => {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -384,6 +378,7 @@ function BootScreen() {
         selectionLimit: MAX_PHOTOS_PER_PICK
       });
       if (selection.canceled || selection.assets.length === 0) return { uploaded: 0, failed: 0, total: 0, errors: [] as string[] };
+      const assets = selection.assets.slice(0, MAX_PHOTOS_PER_PICK);
 
       const businessId = selectedBusinessId ?? "";
       if (!businessId) throw new Error("Selecciona una pagina antes de subir fotos.");
@@ -395,11 +390,18 @@ function BootScreen() {
         queryClient.setQueryData(["batches", businessId], (current: BatchSummary[] | undefined) => [batch, ...(current ?? [])]);
       }
 
-      const assets = selection.assets.slice(0, MAX_PHOTOS_PER_PICK);
       const errors: string[] = [];
       let uploaded = 0;
       setUploadNotice(null);
       setUploadProgress({ done: 0, total: assets.length });
+      setLocalUploadPreviews(
+        assets.map((asset, index) => ({
+          id: `${Date.now()}-${index}`,
+          uri: asset.uri,
+          name: asset.fileName ?? `Foto ${index + 1}`
+        }))
+      );
+      setFlow("styles");
 
       for (const [index, asset] of assets.entries()) {
         try {
@@ -424,7 +426,7 @@ function BootScreen() {
             ? `Subimos ${result.uploaded} de ${result.total} fotos. ${result.failed} necesita reintento.`
             : `Subimos ${result.uploaded} foto${result.uploaded === 1 ? "" : "s"} y ya se estan analizando.`
         );
-        setFlow("home");
+        setFlow("styles");
       }
       setUploadProgress(null);
       await invalidateWork();
@@ -510,6 +512,19 @@ function BootScreen() {
     setReviewIndex(0);
   }, [reviewQueue.length]);
 
+  useEffect(() => {
+    if (!uploadSelectedPhotos.isPending && photos.length > 0) {
+      setLocalUploadPreviews([]);
+    }
+  }, [photos.length, uploadSelectedPhotos.isPending]);
+
+  useEffect(() => {
+    const generationBusy = generateVariants.isPending || variants.some(isVariantBusy) || jobs.some((job) => ["queued", "running"].includes(job.status));
+    if (flow === "generate" && !generationBusy && reviewQueue.length > 0) {
+      setFlow("review");
+    }
+  }, [flow, generateVariants.isPending, jobs, reviewQueue.length, variants]);
+
   const visibleError =
     bootstrap.error ??
     connect.error ??
@@ -518,7 +533,6 @@ function BootScreen() {
     batches.error ??
     batchDetail.error ??
     scheduledPosts.error ??
-    startBatch.error ??
     uploadSelectedPhotos.error ??
     generateVariants.error ??
     saveCaption.error ??
@@ -619,10 +633,10 @@ function BootScreen() {
         body="Sube fotos, deja que la IA trabaje y vuelve al lote cuando este listo para revisar."
       />
       <ActionPair
-        primaryLabel={startBatch.isPending ? "Creando..." : "Subir lote"}
+        primaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir fotos"}
         primaryIcon="cloud-upload-outline"
-        primaryDisabled={startBatch.isPending || !selectedBusinessId}
-        onPrimary={() => startBatch.mutate()}
+        primaryDisabled={uploadSelectedPhotos.isPending || !selectedBusinessId}
+        onPrimary={() => uploadSelectedPhotos.mutate()}
         secondaryLabel="Ajustes"
         secondaryIcon="settings-outline"
         onSecondary={() => setFlow("settings")}
@@ -647,31 +661,28 @@ function BootScreen() {
     </Screen>
   );
 
-  const renderUpload = () => (
-    <Screen>
-      <Hero title="Subir fotos" eyebrow="Paso 1" body="JPG, PNG o WEBP. La app ajusta peso y ancho antes de subir para evitar fallos." />
-      <UploadDropZone
-        busy={uploadSelectedPhotos.isPending || startBatch.isPending}
-        progress={uploadProgress}
-        onPress={() => uploadSelectedPhotos.mutate()}
-      />
-      {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
-      <Panel title="Limites">
-        <SpecRow icon="images-outline" label="Maximo 10 fotos por seleccion" />
-        <SpecRow icon="resize-outline" label="Imagenes grandes se optimizan automaticamente" />
-        <SpecRow icon="shield-checkmark-outline" label="Los secretos se quedan en el servidor" />
-      </Panel>
-    </Screen>
-  );
-
   const renderStyles = () => (
     <Screen>
       <Hero
         title="Fotos y estilos"
         eyebrow="Paso 3"
-        body="Toca una foto para ver detalle. Mantener presionado abre estilos e intensidad."
+        body="Tus fotos aparecen aqui desde que las eliges. Ajusta estilos, espera el analisis y genera cuando esten listas."
       />
-      {photos.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para iniciar el analisis." /> : null}
+      {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
+      {analysisTotal > 0 && analyzedCount < analysisTotal ? (
+        <Panel title="Analizando fotos" eyebrow={`${analyzedCount} de ${analysisTotal}`}>
+          <ProgressBar progress={pct(analyzedCount, analysisTotal)} />
+          <Text style={styles.muted}>Puedes quedarte aqui o moverte; el lote seguira avanzando.</Text>
+        </Panel>
+      ) : null}
+      {photos.length === 0 && localUploadPreviews.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para iniciar el analisis." /> : null}
+      {localUploadPreviews.length > 0 && photos.length === 0 ? (
+        <Panel title="Fotos seleccionadas" eyebrow="Subiendo">
+          <View style={styles.photoGrid}>
+            {localUploadPreviews.map((preview, index) => <PendingPhotoTile key={preview.id} preview={preview} index={index} />)}
+          </View>
+        </Panel>
+      ) : null}
       <View style={styles.photoGrid}>
         {photos.map((photo, index) => (
           <PhotoTile
@@ -699,11 +710,15 @@ function BootScreen() {
           onClose={() => setDetailPhotoId(null)}
         />
       ) : null}
-      <Button
-        label="Generar variantes"
-        icon="sparkles-outline"
-        disabled={photos.filter(isPhotoAnalyzed).length === 0}
-        onPress={() => setFlow("generate")}
+      <ActionPair
+        primaryLabel="Generar variantes"
+        primaryIcon="sparkles-outline"
+        primaryDisabled={photos.filter(isPhotoAnalyzed).length === 0}
+        onPrimary={() => setFlow("generate")}
+        secondaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir mas"}
+        secondaryIcon="add-circle-outline"
+        secondaryDisabled={uploadSelectedPhotos.isPending}
+        onSecondary={() => uploadSelectedPhotos.mutate()}
       />
     </Screen>
   );
@@ -712,9 +727,33 @@ function BootScreen() {
     const done = generatedTotal > 0 ? generatedDone : 0;
     const total = generatedTotal > 0 ? generatedTotal : photos.filter(isPhotoAnalyzed).length * variantsPerPhoto;
     const busy = generateVariants.isPending || variants.some(isVariantBusy) || jobs.some((job) => ["queued", "running"].includes(job.status));
+    if (busy) {
+      return (
+        <Screen>
+          <Hero title="Generando" eyebrow="Paso 5" body="Estamos editando imagenes y preparando captions. Puedes salir; el trabajo sigue en segundo plano." />
+          <Panel title="Progreso">
+            <View style={styles.spinnerMark}>
+              <ActivityIndicator color={palette.blue} />
+              <Text style={styles.panelTitle}>{done} de {Math.max(total, done)} generadas</Text>
+            </View>
+            <ProgressBar progress={pct(done, Math.max(total, done))} />
+            <Text style={styles.muted}>Aplicando estilo, preparando imagen y escribiendo caption.</Text>
+            <ActionPair
+              primaryLabel="Ver lote"
+              primaryIcon="grid-outline"
+              onPrimary={() => setFlow("styles")}
+              secondaryLabel="Inicio"
+              secondaryIcon="home-outline"
+              onSecondary={() => setFlow("home")}
+            />
+          </Panel>
+        </Screen>
+      );
+    }
+
     return (
       <Screen>
-        <Hero title={busy ? "Generando" : "Cantidad"} eyebrow="Paso 4" body="Elige cuantas variantes generar por foto validada." />
+        <Hero title="Cantidad" eyebrow="Paso 4" body="Elige cuantas variantes generar por foto validada." />
         <Panel title="Cuantas variantes?">
           <Stepper value={variantsPerPhoto} min={1} max={5} onChange={setVariantsPerPhoto} />
           <Text style={styles.muted}>
@@ -731,16 +770,8 @@ function BootScreen() {
             onPress={() => generateVariants.mutate()}
           />
         </Panel>
-        {busy || generatedTotal > 0 ? (
-          <Panel title="Progreso">
-            <View style={styles.spinnerMark}>
-              <ActivityIndicator color={palette.blue} />
-              <Text style={styles.panelTitle}>{done} de {Math.max(total, done)} generadas</Text>
-            </View>
-            <ProgressBar progress={pct(done, Math.max(total, done))} />
-            <Text style={styles.muted}>Aplicando estilo, preparando imagen y escribiendo caption.</Text>
-            <Button label="Salir" icon="arrow-back-outline" variant="secondary" onPress={() => setFlow("home")} />
-          </Panel>
+        {reviewQueue.length > 0 ? (
+          <Button label="Revisar variantes listas" icon="checkmark-circle-outline" onPress={() => setFlow("review")} />
         ) : null}
       </Screen>
     );
@@ -861,7 +892,6 @@ function BootScreen() {
 
   const renderCurrent = () => {
     if (bootstrap.data?.nextStep !== "home") return renderOnboarding();
-    if (flow === "upload") return renderUpload();
     if (flow === "styles") return renderStyles();
     if (flow === "generate") return renderGenerate();
     if (flow === "review") return renderReview();
@@ -1149,37 +1179,55 @@ function BatchRow({ batch, selected, onPress }: { batch: BatchSummary; selected:
   );
 }
 
-function UploadDropZone({
-  busy,
-  progress,
-  onPress
+function PreviewImage({
+  uri,
+  style,
+  resizeMode = "cover",
+  label = "Vista previa"
 }: {
-  busy: boolean;
-  progress: { done: number; total: number } | null;
-  onPress: () => void;
+  uri?: string | null | undefined;
+  style: StyleProp<ViewStyle>;
+  resizeMode?: "cover" | "contain";
+  label?: string;
 }) {
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setLoaded(false);
+    setFailed(false);
+  }, [uri]);
+
   return (
-    <Pressable style={[styles.uploadZone, busy ? styles.disabled : null]} disabled={busy} onPress={onPress}>
-      <View style={styles.uploadIcon}>
-        <Ionicons name="cloud-upload-outline" size={42} color={palette.blue} />
-      </View>
-      <Text style={styles.uploadTitle}>{busy ? "Subiendo..." : "Subir fotos"}</Text>
-      <Text style={styles.muted}>JPG, PNG, WEBP - max 10 fotos - 12MB recomendado</Text>
-      {progress ? (
-        <View style={styles.fullWidth}>
-          <ProgressBar progress={pct(progress.done, progress.total)} />
-          <Text style={styles.muted}>{progress.done} de {progress.total}</Text>
+    <View style={[style, styles.previewFrame]}>
+      {uri && !failed ? (
+        <Image
+          source={{ uri }}
+          style={asImageStyle(styles.previewImageFill)}
+          resizeMode={resizeMode}
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+        />
+      ) : null}
+      {!uri || failed || !loaded ? (
+        <View style={styles.imageStateOverlay}>
+          <Ionicons name={failed ? "warning-outline" : "image-outline"} size={22} color={failed ? palette.warning : palette.muted} />
+          <Text style={styles.imageStateText}>{failed ? "No se pudo cargar" : label}</Text>
         </View>
       ) : null}
-    </Pressable>
+    </View>
   );
 }
 
-function SpecRow({ icon, label }: { icon: IconName; label: string }) {
+function PendingPhotoTile({ preview, index }: { preview: LocalPhotoPreview; index: number }) {
   return (
-    <View style={styles.specRow}>
-      <Ionicons name={icon} size={18} color={palette.green} />
-      <Text style={styles.rowTitle}>{label}</Text>
+    <View style={styles.photoTile}>
+      <Image source={{ uri: preview.uri }} style={asImageStyle(styles.photoImage)} />
+      <View style={styles.photoTileBody}>
+        <Text style={styles.rowTitle}>F{index + 1}</Text>
+        <Text style={styles.muted} numberOfLines={1}>{preview.name}</Text>
+        <Pill label="subiendo" tone="neutral" />
+      </View>
     </View>
   );
 }
@@ -1199,13 +1247,7 @@ function PhotoTile({
 }) {
   return (
     <Pressable style={styles.photoTile} onPress={onPress} onLongPress={onLongPress}>
-      {photo.thumbnailUrl || photo.mediaUrl ? (
-        <Image source={{ uri: photo.thumbnailUrl ?? photo.mediaUrl ?? undefined }} style={asImageStyle(styles.photoImage)} />
-      ) : (
-        <View style={[styles.photoImage, styles.photoPlaceholder]}>
-          <Ionicons name="image-outline" size={24} color={palette.muted} />
-        </View>
-      )}
+      <PreviewImage uri={photo.thumbnailUrl ?? photo.mediaUrl} style={asViewStyle(styles.photoImage)} label="Procesando" />
       <View style={styles.photoTileBody}>
         <Text style={styles.rowTitle}>F{index + 1}</Text>
         <Text style={styles.muted} numberOfLines={1}>{styleName}</Text>
@@ -1261,7 +1303,7 @@ function PhotoDetail({ photo, prompt, onClose }: { photo: Photo | null; prompt: 
   const labels = visionLabels(photo);
   return (
     <Panel title="Detalle de foto" eyebrow={photo.fileName ?? "Foto"}>
-      {photo.mediaUrl || photo.thumbnailUrl ? <Image source={{ uri: photo.mediaUrl ?? photo.thumbnailUrl ?? undefined }} style={asImageStyle(styles.detailImage)} resizeMode="contain" /> : null}
+      <PreviewImage uri={photo.mediaUrl ?? photo.thumbnailUrl} style={asViewStyle(styles.detailImage)} resizeMode="contain" label="Foto" />
       <Text style={styles.rowTitle}>Analisis IA</Text>
       <View style={styles.tagWrap}>
         {labels.length === 0 ? <Pill label="pendiente" tone="neutral" /> : labels.map((label) => <Pill key={label} label={label} tone="neutral" />)}
@@ -1326,7 +1368,7 @@ function SwipeReviewCard({
         <Text style={styles.muted}>{position}</Text>
       </View>
       <Animated.View style={[styles.swipeCard, { transform: [{ translateX: pan.x }] }]} {...responder.panHandlers}>
-        {variant.imageUrl ? <Image source={{ uri: variant.imageUrl }} style={asImageStyle(styles.swipeImage)} resizeMode="contain" /> : <View style={styles.swipeImage} />}
+        <PreviewImage uri={variant.imageUrl} style={asViewStyle(styles.swipeImage)} resizeMode="contain" label="Variante" />
         <TextInput multiline style={styles.captionInput} value={caption} onChangeText={onCaptionChange} />
         <ActionPair
           primaryLabel="Aceptar"
@@ -1471,7 +1513,7 @@ function WorkBanner({
   if (uploadProgress) {
     label = `Subiendo ${uploadProgress.done} de ${uploadProgress.total}...`;
     progress = pct(uploadProgress.done, uploadProgress.total);
-    target = "upload";
+    target = "styles";
   } else if (photos.some(isPhotoBusy)) {
     const done = photos.filter(isPhotoAnalyzed).length;
     label = `Analizando ${done} de ${photos.length}...`;
@@ -1512,7 +1554,7 @@ function WorkBanner({
 function BottomTabs({ active, onChange, failedPosts }: { active: FlowStep; onChange: (flow: FlowStep) => void; failedPosts: number }) {
   const tabs: Array<{ key: FlowStep; label: string; icon: IconName; activeIcon: IconName }> = [
     { key: "home", label: "Inicio", icon: "home-outline", activeIcon: "home" },
-    { key: "upload", label: "Subir", icon: "cloud-upload-outline", activeIcon: "cloud-upload" },
+    { key: "styles", label: "Fotos", icon: "images-outline", activeIcon: "images" },
     { key: "review", label: "Swipe", icon: "albums-outline", activeIcon: "albums" },
     { key: "calendar", label: "Agenda", icon: "calendar-outline", activeIcon: "calendar" },
     { key: "settings", label: "Ajustes", icon: "settings-outline", activeIcon: "settings" }
@@ -1585,6 +1627,8 @@ const palette = {
   border: "#2d343d",
   text: "#f8fafc",
   muted: "#aab4c0",
+  mediaBg: "#eef4fb",
+  mediaText: "#475569",
   blue: "#6aa7ff",
   green: "#48d597",
   amber: "#f6c35f",
@@ -1600,7 +1644,6 @@ const styles = StyleSheet.create({
   container: { flexGrow: 1, gap: 14, padding: 16, paddingBottom: Platform.OS === "android" ? 210 : 190 },
   screen: { gap: 14 },
   flex: { flex: 1 },
-  fullWidth: { width: "100%", gap: 8 },
   topBar: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 12, paddingTop: 4 },
   productKicker: { color: palette.blue, fontSize: 12, fontWeight: "900", textTransform: "uppercase" },
   productTitle: { color: palette.text, fontSize: 27, fontWeight: "900", letterSpacing: 0 },
@@ -1687,13 +1730,13 @@ const styles = StyleSheet.create({
   batchRow: { minHeight: 72, flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 8, backgroundColor: palette.surface },
   batchRowSelected: { borderWidth: 1, borderColor: palette.blue },
   batchIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: palette.panel2 },
-  uploadZone: { minHeight: 240, alignItems: "center", justifyContent: "center", gap: 12, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
-  uploadIcon: { width: 82, height: 82, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: palette.surface },
-  uploadTitle: { color: palette.text, fontSize: 24, fontWeight: "900" },
-  specRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 36 },
   photoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   photoTile: { width: "48.5%", overflow: "hidden", borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
-  photoImage: { width: "100%", aspectRatio: 1, backgroundColor: palette.surface },
+  photoImage: { width: "100%", aspectRatio: 1, backgroundColor: palette.mediaBg },
+  previewFrame: { overflow: "hidden", alignItems: "center", justifyContent: "center" },
+  previewImageFill: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, width: "100%", height: "100%" },
+  imageStateOverlay: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: palette.mediaBg },
+  imageStateText: { color: palette.mediaText, fontSize: 11, fontWeight: "900", textAlign: "center" },
   photoPlaceholder: { alignItems: "center", justifyContent: "center" },
   photoTileBody: { gap: 5, padding: 10 },
   styleRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 58, padding: 10, borderRadius: 8, backgroundColor: palette.surface },
@@ -1704,7 +1747,7 @@ const styles = StyleSheet.create({
   sliderText: { color: palette.muted, fontWeight: "900" },
   sliderTextActive: { color: palette.ink },
   promptBox: { color: palette.text, fontSize: 13, lineHeight: 19, fontWeight: "700", padding: 10, borderRadius: 8, backgroundColor: palette.surface },
-  detailImage: { width: "100%", height: 320, borderRadius: 8, backgroundColor: palette.surface },
+  detailImage: { width: "100%", height: 320, borderRadius: 8, backgroundColor: palette.mediaBg },
   tagWrap: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   stepper: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 18, minHeight: 84 },
   stepperValue: { color: palette.text, fontSize: 42, fontWeight: "900", minWidth: 82, textAlign: "center" },
@@ -1713,7 +1756,7 @@ const styles = StyleSheet.create({
   spinnerMark: { alignItems: "center", gap: 10, paddingVertical: 10 },
   reviewTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
   swipeCard: { gap: 12, borderRadius: 8, borderWidth: 1, borderColor: palette.border, padding: 12, backgroundColor: palette.panel },
-  swipeImage: { width: "100%", height: 430, borderRadius: 8, backgroundColor: palette.surface },
+  swipeImage: { width: "100%", height: 430, borderRadius: 8, backgroundColor: palette.mediaBg },
   captionInput: {
     minHeight: 112,
     color: palette.text,

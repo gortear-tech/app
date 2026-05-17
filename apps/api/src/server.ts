@@ -648,7 +648,23 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           action: "retry"
         });
       }
-      return reply.redirect(data.signedUrl);
+      const mediaResponse = await fetch(data.signedUrl);
+      if (!mediaResponse.ok) {
+        throw new AppError({
+          code: "media_fetch_failed",
+          statusCode: 502,
+          message: `Could not fetch signed media URL (${mediaResponse.status})`,
+          userMessage: "No pudimos abrir la imagen real. Refresca e intenta de nuevo.",
+          retryable: true,
+          action: "retry"
+        });
+      }
+      const contentType = mediaResponse.headers.get("content-type") ?? asset.mimeType ?? "application/octet-stream";
+      const contentLength = mediaResponse.headers.get("content-length");
+      reply.header("content-type", contentType);
+      reply.header("cache-control", "private, max-age=300");
+      if (contentLength) reply.header("content-length", contentLength);
+      return reply.send(Buffer.from(await mediaResponse.arrayBuffer()));
     }
   );
 
