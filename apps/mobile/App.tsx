@@ -151,11 +151,6 @@ const preparePhotoForUpload = async (asset: ImagePicker.ImagePickerAsset, index:
   };
 };
 
-const isBatchActive = (batch: BatchSummary) =>
-  ["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial", "ready_to_generate", "generating", "ready_for_review"].includes(
-    batch.status
-  );
-
 const isPhotoAnalyzed = (photo: Photo) => ["validada", "validated"].includes(photo.status);
 const isPhotoBusy = (photo: Photo) => ["uploading", "uploaded", "analyzing"].includes(photo.status);
 const isVariantReviewable = (variant: Variant) => ["generada", "generated"].includes(variant.status);
@@ -227,6 +222,34 @@ const hasWorkInProgress = (detail: BatchDetail | undefined) =>
       detail?.jobs.some((job) => ["queued", "running"].includes(job.status))
   );
 
+const isWorkJob = (job: BatchDetail["jobs"][number]) =>
+  ["analyze_photo", "generate_batch", "generate_variant", "schedule_posts", "publish_post"].includes(job.type);
+
+const hasActiveWorkJobs = (jobs: BatchDetail["jobs"]) =>
+  jobs.some((job) => ["queued", "running"].includes(job.status) && isWorkJob(job));
+
+const flowForBatchSummary = (batch: BatchSummary): FlowStep => {
+  if (["completado", "completed"].includes(batch.status)) return "calendar";
+  if (["generando", "generating"].includes(batch.status)) return "generate";
+  if (batch.variantsCount > 0 || ["generado_parcial", "ready_for_review"].includes(batch.status)) return "review";
+  return "styles";
+};
+
+const flowForBatchDetail = (detail: BatchDetail, posts: ScheduledPost[] = []): FlowStep => {
+  const variants = detail.variants;
+  const photos = detail.photos;
+  if (variants.some(isVariantBusy) || hasActiveWorkJobs(detail.jobs) || ["generando", "generating"].includes(detail.batch.status)) {
+    return "generate";
+  }
+  if (variants.some(isVariantReviewable)) return "review";
+  const accepted = variants.some((variant) => ["aprobada", "approved"].includes(variant.status));
+  if (accepted) return "schedule";
+  if (posts.some((post) => post.batchId === detail.batch.id)) return "calendar";
+  if (variants.length > 0) return "review";
+  if (photos.some(isPhotoBusy)) return "styles";
+  return "styles";
+};
+
 function BootScreen() {
   const config = getMobileConfig();
   const [flow, setFlow] = useState<FlowStep>("home");
@@ -243,6 +266,7 @@ function BootScreen() {
   const [reviewIndex, setReviewIndex] = useState(0);
   const [periodDays, setPeriodDays] = useState<PeriodDays>(14);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [pendingAutoRouteBatchId, setPendingAutoRouteBatchId] = useState<string | null>(null);
 
   const handleMetaReturn = useCallback((url: string | null) => {
     if (!url?.startsWith("fbmaniaco://meta-connected")) return;
@@ -323,6 +347,7 @@ function BootScreen() {
   useEffect(() => {
     if (selectedBatchId && batches.data && !batches.data.some((batch) => batch.id === selectedBatchId)) {
       setSelectedBatchId(null);
+      setPendingAutoRouteBatchId(null);
       setFlow("home");
     }
   }, [batches.data, selectedBatchId]);
@@ -373,6 +398,7 @@ function BootScreen() {
     onSuccess: async () => {
       queryClient.clear();
       setSelectedBatchId(null);
+      setPendingAutoRouteBatchId(null);
       setFlow("home");
       await queryClient.invalidateQueries({ queryKey: ["session-token"] });
     }
@@ -383,6 +409,7 @@ function BootScreen() {
     onSuccess: async (result) => {
       queryClient.setQueryData(["bootstrap"], result.bootstrap);
       setSelectedBatchId(null);
+      setPendingAutoRouteBatchId(null);
       setFlow("home");
       await refreshAll();
     }
@@ -512,6 +539,7 @@ function BootScreen() {
     onSuccess: async (_result, batchId) => {
       if (selectedBatchId === batchId) {
         setSelectedBatchId(null);
+        setPendingAutoRouteBatchId(null);
         setFlow("home");
         setStylePhotoId(null);
         setDetailPhotoId(null);
@@ -538,6 +566,9 @@ function BootScreen() {
   const generatedTotal = variants.length;
   const analyzedCount = photos.filter(isPhotoAnalyzed).length;
   const analysisTotal = photos.length;
+  const generationBusy = generateVariants.isPending || variants.some(isVariantBusy) || hasActiveWorkJobs(jobs);
+  const readyPhotoCount = photos.filter(isPhotoAnalyzed).length;
+  const hasVariants = variants.length > 0;
   const failedPosts = posts.filter(isPostFailed);
   const refreshing =
     tokenQuery.isFetching || bootstrap.isFetching || pages.isFetching || batches.isFetching || batchDetail.isFetching || scheduledPosts.isFetching;
@@ -546,6 +577,7 @@ function BootScreen() {
     setSelectedBatchId(null);
     setStylePhotoId(null);
     setDetailPhotoId(null);
+    setPendingAutoRouteBatchId(null);
     setFlow("home");
   };
 
@@ -571,11 +603,16 @@ function BootScreen() {
   }, [photos.length, uploadSelectedPhotos.isPending]);
 
   useEffect(() => {
-    const generationBusy = generateVariants.isPending || variants.some(isVariantBusy) || jobs.some((job) => ["queued", "running"].includes(job.status));
     if (flow === "generate" && !generationBusy && reviewQueue.length > 0) {
       setFlow("review");
     }
-  }, [flow, generateVariants.isPending, jobs, reviewQueue.length, variants]);
+  }, [flow, generationBusy, reviewQueue.length]);
+
+  useEffect(() => {
+    if (!detail || pendingAutoRouteBatchId !== detail.batch.id) return;
+    setFlow(flowForBatchDetail(detail, posts));
+    setPendingAutoRouteBatchId(null);
+  }, [detail, pendingAutoRouteBatchId, posts]);
 
   const visibleError =
     bootstrap.error ??
@@ -707,7 +744,8 @@ function BootScreen() {
             deleting={removeBatch.isPending}
             onPress={() => {
               setSelectedBatchId(batch.id);
-              setFlow(isBatchActive(batch) ? "styles" : "calendar");
+              setPendingAutoRouteBatchId(batch.id);
+              setFlow(flowForBatchSummary(batch));
             }}
             onDelete={() => confirmDeleteBatch(batch)}
           />
@@ -716,77 +754,103 @@ function BootScreen() {
     </Screen>
   );
 
-  const renderStyles = () => (
-    <Screen>
-      <Hero
-        title="Fotos y estilos"
-        eyebrow="Paso 3"
-        body="Tus fotos aparecen aqui desde que las eliges. Ajusta estilos, espera el analisis y genera cuando esten listas."
-      />
-      {selectedBatch ? (
-        <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
-      ) : null}
-      {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
-      {analysisTotal > 0 && analyzedCount < analysisTotal ? (
-        <Panel title="Analizando fotos" eyebrow={`${analyzedCount} de ${analysisTotal}`}>
-          <ProgressBar progress={pct(analyzedCount, analysisTotal)} />
-          <Text style={styles.muted}>Puedes quedarte aqui o moverte; el lote seguira avanzando.</Text>
-        </Panel>
-      ) : null}
-      {photos.length === 0 && localUploadPreviews.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para iniciar el analisis." /> : null}
-      {localUploadPreviews.length > 0 && photos.length === 0 ? (
-        <Panel title="Fotos seleccionadas" eyebrow="Subiendo">
-          <View style={styles.photoGrid}>
-            {localUploadPreviews.map((preview, index) => <PendingPhotoTile key={preview.id} preview={preview} index={index} />)}
-          </View>
-        </Panel>
-      ) : null}
-      <View style={styles.photoGrid}>
-        {photos.map((photo, index) => (
-          <PhotoTile
-            key={photo.id}
-            photo={photo}
-            index={index}
-            styleName={styleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto)}
-            onPress={() => setDetailPhotoId(photo.id)}
-            onLongPress={() => setStylePhotoId(photo.id)}
+  const renderStyles = () => {
+    const primaryLabel = generationBusy
+      ? "Ver progreso"
+      : reviewQueue.length > 0
+        ? "Revisar variantes"
+        : acceptedCount > 0
+          ? "Programar"
+          : hasVariants
+            ? "Ver resumen"
+            : "Generar variantes";
+    const primaryIcon: IconName = generationBusy
+      ? "time-outline"
+      : acceptedCount > 0 && reviewQueue.length === 0
+          ? "calendar-outline"
+          : reviewQueue.length > 0 || hasVariants
+            ? "images-outline"
+            : "sparkles-outline";
+    const handlePrimary = () => {
+      if (generationBusy) setFlow("generate");
+      else if (acceptedCount > 0 && reviewQueue.length === 0) setFlow("schedule");
+      else if (reviewQueue.length > 0 || hasVariants) setFlow("review");
+      else setFlow("generate");
+    };
+
+    return (
+      <Screen>
+        <Hero
+          title="Fotos y estilos"
+          eyebrow="Paso 3"
+          body="Tus fotos aparecen aqui desde que las eliges. Ajusta estilos, espera el analisis y genera cuando esten listas."
+        />
+        {selectedBatch ? (
+          <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+        ) : null}
+        {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
+        {generationBusy ? <Alert tone="info" message="Este lote ya esta generando variantes. Puedes ver el progreso o salir sin detenerlo." /> : null}
+        {!generationBusy && reviewQueue.length > 0 ? <Alert tone="info" message="Este lote ya tiene variantes listas para revisar." /> : null}
+        {analysisTotal > 0 && analyzedCount < analysisTotal ? (
+          <Panel title="Analizando fotos" eyebrow={`${analyzedCount} de ${analysisTotal}`}>
+            <ProgressBar progress={pct(analyzedCount, analysisTotal)} />
+            <Text style={styles.muted}>Puedes quedarte aqui o moverte; el lote seguira avanzando.</Text>
+          </Panel>
+        ) : null}
+        {photos.length === 0 && localUploadPreviews.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para iniciar el analisis." /> : null}
+        {localUploadPreviews.length > 0 && photos.length === 0 ? (
+          <Panel title="Fotos seleccionadas" eyebrow="Subiendo">
+            <View style={styles.photoGrid}>
+              {localUploadPreviews.map((preview, index) => <PendingPhotoTile key={preview.id} preview={preview} index={index} />)}
+            </View>
+          </Panel>
+        ) : null}
+        <View style={styles.photoGrid}>
+          {photos.map((photo, index) => (
+            <PhotoTile
+              key={photo.id}
+              photo={photo}
+              index={index}
+              styleName={styleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto)}
+              onPress={() => setDetailPhotoId(photo.id)}
+              onLongPress={() => setStylePhotoId(photo.id)}
+            />
+          ))}
+        </View>
+        {stylePhotoId ? (
+          <StylePicker
+            photoId={stylePhotoId}
+            preference={photoPrefs[stylePhotoId] ?? { styleId: styleCatalog[0]!.id, intensity: 70 }}
+            variantsPerPhoto={variantsPerPhoto}
+            onChange={(next) => setPhotoPrefs((current) => ({ ...current, [stylePhotoId]: next }))}
+            onClose={() => setStylePhotoId(null)}
           />
-        ))}
-      </View>
-      {stylePhotoId ? (
-        <StylePicker
-          photoId={stylePhotoId}
-          preference={photoPrefs[stylePhotoId] ?? { styleId: styleCatalog[0]!.id, intensity: 70 }}
-          variantsPerPhoto={variantsPerPhoto}
-          onChange={(next) => setPhotoPrefs((current) => ({ ...current, [stylePhotoId]: next }))}
-          onClose={() => setStylePhotoId(null)}
+        ) : null}
+        {detailPhotoId ? (
+          <PhotoDetail
+            photo={photos.find((photo) => photo.id === detailPhotoId) ?? null}
+            prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto)}
+            onClose={() => setDetailPhotoId(null)}
+          />
+        ) : null}
+        <ActionPair
+          primaryLabel={primaryLabel}
+          primaryIcon={primaryIcon}
+          primaryDisabled={!generationBusy && !hasVariants && acceptedCount === 0 && readyPhotoCount === 0}
+          onPrimary={handlePrimary}
+          secondaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir mas"}
+          secondaryIcon="add-circle-outline"
+          secondaryDisabled={uploadSelectedPhotos.isPending || generationBusy}
+          onSecondary={() => uploadSelectedPhotos.mutate()}
         />
-      ) : null}
-      {detailPhotoId ? (
-        <PhotoDetail
-          photo={photos.find((photo) => photo.id === detailPhotoId) ?? null}
-          prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto)}
-          onClose={() => setDetailPhotoId(null)}
-        />
-      ) : null}
-      <ActionPair
-        primaryLabel="Generar variantes"
-        primaryIcon="sparkles-outline"
-        primaryDisabled={photos.filter(isPhotoAnalyzed).length === 0}
-        onPrimary={() => setFlow("generate")}
-        secondaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir mas"}
-        secondaryIcon="add-circle-outline"
-        secondaryDisabled={uploadSelectedPhotos.isPending}
-        onSecondary={() => uploadSelectedPhotos.mutate()}
-      />
-    </Screen>
-  );
+      </Screen>
+    );
+  };
 
   const renderGenerate = () => {
     const done = generatedTotal > 0 ? generatedDone : 0;
-    const total = generatedTotal > 0 ? generatedTotal : photos.filter(isPhotoAnalyzed).length * variantsPerPhoto;
-    const busy = generateVariants.isPending || variants.some(isVariantBusy) || jobs.some((job) => ["queued", "running"].includes(job.status));
-    if (busy) {
+    const total = generatedTotal > 0 ? generatedTotal : readyPhotoCount * variantsPerPhoto;
+    if (generationBusy) {
       return (
         <Screen>
           <Hero title="Generando" eyebrow="Paso 5" body="Estamos editando imagenes y preparando captions. Puedes salir; el trabajo sigue en segundo plano." />
@@ -822,7 +886,7 @@ function BootScreen() {
         <Panel title="Cuantas variantes?">
           <Stepper value={variantsPerPhoto} min={1} max={5} onChange={setVariantsPerPhoto} />
           <Text style={styles.muted}>
-            Total estimado: {photos.filter(isPhotoAnalyzed).length * variantsPerPhoto} variantes
+            Total estimado: {readyPhotoCount * variantsPerPhoto} variantes
           </Text>
           <View style={styles.modePill}>
             <Ionicons name="flash-outline" size={16} color={palette.amber} />
@@ -831,7 +895,7 @@ function BootScreen() {
           <Button
             label={generateVariants.isPending ? "Enviando..." : "Confirmar"}
             icon="checkmark-circle-outline"
-            disabled={generateVariants.isPending || photos.filter(isPhotoAnalyzed).length === 0}
+            disabled={generateVariants.isPending || readyPhotoCount === 0 || hasVariants}
             onPress={() => generateVariants.mutate()}
           />
         </Panel>
@@ -843,6 +907,20 @@ function BootScreen() {
   };
 
   const renderReview = () => {
+    if (selectedBatch && (batchDetail.isLoading || (selectedBatch.variantsCount > 0 && variants.length === 0))) {
+      return (
+        <Screen>
+          <Hero title="Abriendo lote" eyebrow="Revision" body="Estamos cargando las variantes de este lote." />
+          <Panel title="Preparando vista">
+            <View style={styles.spinnerMark}>
+              <ActivityIndicator color={palette.blue} />
+              <Text style={styles.muted}>Un momento...</Text>
+            </View>
+          </Panel>
+        </Screen>
+      );
+    }
+
     if (!currentReview) {
       return (
         <Screen>
