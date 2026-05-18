@@ -497,7 +497,11 @@ export class SupabaseDataStoreCore {
         `update public.jobs
          set status = 'running', locked_at = now(), locked_by = $2,
              lease_expires_at = now() + case when type = 'generate_variant' then interval '15 minutes' else interval '60 seconds' end,
-             attempts = attempts + 1, updated_at = now()
+             attempts = greatest(
+               attempts,
+               coalesce((select max(attempt_number) from public.job_attempts where job_id = public.jobs.id), 0)
+             ) + 1,
+             updated_at = now()
          where id = $1
          returning *`,
         [job.id, workerId]
