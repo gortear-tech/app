@@ -469,9 +469,19 @@ export class SupabaseDataStoreCore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('fbmaniaco:claim-due-job'))");
       const claimed = await client.query(
         `select * from public.jobs
          where status = 'queued' and run_after <= now()
+           and (
+             type <> 'generate_variant'
+             or not exists (
+               select 1 from public.jobs running
+               where running.type = 'generate_variant'
+                 and running.status = 'running'
+                 and coalesce(running.lease_expires_at, running.locked_at + interval '15 minutes') > now()
+             )
+           )
          order by run_after asc, created_at asc
          for update skip locked
          limit 1`
@@ -483,7 +493,8 @@ export class SupabaseDataStoreCore {
       const job = claimed.rows[0];
       const updated = await client.query(
         `update public.jobs
-         set status = 'running', locked_at = now(), locked_by = $2, lease_expires_at = now() + interval '60 seconds',
+         set status = 'running', locked_at = now(), locked_by = $2,
+             lease_expires_at = now() + case when type = 'generate_variant' then interval '15 minutes' else interval '60 seconds' end,
              attempts = attempts + 1, updated_at = now()
          where id = $1
          returning *`,

@@ -342,15 +342,21 @@ export class LocalDataStore implements DataStore {
   async claimDueJob(workerId: string): Promise<StoredJob | null> {
     const state = await this.load();
     const timestamp = now();
+    const hasRunningVariant = state.jobs.some(
+      (item) =>
+        item.type === "generate_variant" &&
+        item.status === "running" &&
+        (item.leaseExpiresAt === undefined || item.leaseExpiresAt > timestamp)
+    );
     const job = state.jobs
-      .filter((item) => item.status === "queued" && item.runAfter <= timestamp)
+      .filter((item) => item.status === "queued" && item.runAfter <= timestamp && (item.type !== "generate_variant" || !hasRunningVariant))
       .sort((a, b) => a.runAfter.localeCompare(b.runAfter) || a.createdAt.localeCompare(b.createdAt))[0];
     if (!job) return null;
 
     job.status = "running";
     job.lockedAt = timestamp;
     job.lockedBy = workerId;
-    job.leaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
+    job.leaseExpiresAt = new Date(Date.now() + (job.type === "generate_variant" ? 15 * 60_000 : 60_000)).toISOString();
     job.attempts += 1;
     job.updatedAt = timestamp;
     state.jobAttempts.push({

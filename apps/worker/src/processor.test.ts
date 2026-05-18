@@ -7,6 +7,35 @@ import { ImageEditProvider, VisionAnalysisProvider } from "@fbmaniaco/providers"
 import { processOneJob } from "./processor.js";
 
 describe("worker processor", () => {
+  it("claims image variant jobs one at a time", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-claim-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "claim-user", email: "claim@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("claim-user");
+    const first = await store.createJob({
+      type: "generate_variant",
+      workspaceId: workspace.id,
+      dedupeKey: "generate_variant:first",
+      payload: {}
+    });
+    const second = await store.createJob({
+      type: "generate_variant",
+      workspaceId: workspace.id,
+      dedupeKey: "generate_variant:second",
+      payload: {}
+    });
+
+    const claimedFirst = await store.claimDueJob("claim-worker-1");
+    const claimedSecond = await store.claimDueJob("claim-worker-2");
+    expect(claimedFirst?.id).toBe(first.id);
+    expect(claimedSecond).toBeNull();
+
+    await store.completeJob({ jobId: first.id, result: { ok: true } });
+    const claimedAfterComplete = await store.claimDueJob("claim-worker-2");
+    expect(claimedAfterComplete?.id).toBe(second.id);
+    await rm(path, { force: true });
+  });
+
   it("validates an uploaded photo through an analyze_photo job", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-photo-${Date.now()}.json`);
     const store = new LocalDataStore(path);

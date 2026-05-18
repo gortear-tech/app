@@ -7,6 +7,8 @@ const config = loadConfig();
 const store = createDataStore(config);
 const workerId = `worker-${randomUUID()}`;
 const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? "5000");
+let stopRequested = false;
+let sleepTimer: NodeJS.Timeout | null = null;
 
 console.log(JSON.stringify({ service: "worker", event: "started", workerId, environment: config.appEnv }));
 
@@ -25,13 +27,33 @@ const run = async () => {
   }
 };
 
-await run();
-setInterval(() => {
-  void run().catch((error) => {
-    console.error(JSON.stringify({ service: "worker", event: "loop_error", message: String(error) }));
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    sleepTimer = setTimeout(() => {
+      sleepTimer = null;
+      resolve();
+    }, ms);
   });
-}, intervalMs);
+
+const loop = async () => {
+  while (!stopRequested) {
+    try {
+      await run();
+    } catch (error) {
+      console.error(JSON.stringify({ service: "worker", event: "loop_error", message: String(error) }));
+    }
+    if (!stopRequested) await sleep(intervalMs);
+  }
+};
+
+void loop().catch((error) => {
+    console.error(JSON.stringify({ service: "worker", event: "loop_error", message: String(error) }));
+});
 
 process.once("SIGTERM", () => {
-  process.exit(0);
+  stopRequested = true;
+  if (sleepTimer) {
+    clearTimeout(sleepTimer);
+    sleepTimer = null;
+  }
 });
