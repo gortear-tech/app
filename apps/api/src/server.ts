@@ -62,6 +62,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         })
       : null;
   const app = Fastify({
+    trustProxy: true,
     logger: {
       level: process.env.LOG_LEVEL ?? "info",
       redact: ["req.headers.authorization", "req.headers.apikey"]
@@ -164,8 +165,16 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
 
   const requestHash = (body: unknown) => createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
   const mobileMetaConnectedUrl = "fbmaniaco://meta-connected";
+  const mediaPreviewTtlSeconds = 24 * 60 * 60;
   const mediaToken = (assetId: string, expires: number) =>
     createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
+  const publicRequestBaseUrl = (request: FastifyRequest) => {
+    if (input.config.publicApiUrl?.startsWith("https://")) return input.config.publicApiUrl.replace(/\/$/, "");
+    const forwardedProto = String(request.headers["x-forwarded-proto"] ?? "").split(",")[0]?.trim();
+    const protocol = forwardedProto || request.protocol;
+    const host = request.headers["x-forwarded-host"] ?? request.headers.host ?? "localhost";
+    return `${protocol}://${Array.isArray(host) ? host[0] : host}`.replace(/\/$/, "");
+  };
   const requireSupabaseClient = () => {
     if (!storageClient) {
       throw new AppError({
@@ -264,10 +273,8 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   };
   const previewUrl = (request: FastifyRequest, assetId: string | null | undefined) => {
     if (!assetId) return null;
-    const expires = Math.floor(Date.now() / 1000) + 15 * 60;
-    const protocol = request.protocol;
-    const host = request.headers.host ?? "localhost";
-    return `${protocol}://${host}/media/assets/${assetId}/preview?expires=${expires}&token=${mediaToken(assetId, expires)}`;
+    const expires = Math.floor(Date.now() / 1000) + mediaPreviewTtlSeconds;
+    return `${publicRequestBaseUrl(request)}/media/assets/${assetId}/preview?expires=${expires}&token=${mediaToken(assetId, expires)}`;
   };
   const withPhotoUrls = (request: FastifyRequest, photos: NonNullable<Awaited<ReturnType<DataStore["getBatchDetail"]>>>["photos"]) =>
     photos.map((photo) => ({

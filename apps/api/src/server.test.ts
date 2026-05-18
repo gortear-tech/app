@@ -290,6 +290,7 @@ describe("api bootstrap and tenancy", () => {
   it("creates a batch while API upload requires real storage", async () => {
     const path = join(tmpdir(), `fbmaniaco-api-batch-${Date.now()}.json`);
     const config = makeConfig(path);
+    config.publicApiUrl = "https://api.example.test";
     const store = new LocalDataStore(path);
     const app = await buildServer({ config, store });
     const authorization = "Bearer dev:user-batch:batch@example.com";
@@ -389,10 +390,13 @@ describe("api bootstrap and tenancy", () => {
     expect(detail.statusCode).toBe(200);
     expect(detail.json().photos[0].status).toBe("validada");
     expect(detail.json().photos[0].thumbnailUrl).toMatch(/\/media\/assets\/.+\/preview\?/);
+    expect(detail.json().photos[0].thumbnailUrl).toMatch(/^https:\/\/api\.example\.test\//);
+    const previewUrl = new URL(detail.json().photos[0].thumbnailUrl);
+    expect(Number(previewUrl.searchParams.get("expires")) - Math.floor(Date.now() / 1000)).toBeGreaterThan(60 * 60);
 
     const preview = await app.inject({
       method: "GET",
-      url: new URL(detail.json().photos[0].thumbnailUrl).pathname + new URL(detail.json().photos[0].thumbnailUrl).search
+      url: previewUrl.pathname + previewUrl.search
     });
     expect(preview.statusCode).toBe(409);
     expect(preview.json().code).toBe("real_media_required");
@@ -434,6 +438,7 @@ describe("api bootstrap and tenancy", () => {
     expect(variants.json().variants[0].assignedStyle.styleName).toBe("Playa");
     expect(variants.json().variants[0].assignedStyle.manualOverride).toBe(true);
     expect(variants.json().variants[0].imageUrl).toMatch(/\/media\/assets\/.+\/preview\?/);
+    expect(variants.json().variants[0].imageUrl).toMatch(/^https:\/\/api\.example\.test\//);
 
     const caption = await app.inject({
       method: "PATCH",
