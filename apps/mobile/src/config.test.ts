@@ -2,12 +2,40 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getMobileConfig } from "./config";
 
 const originalEnv = { ...process.env };
+const originalDev = (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__;
 
 afterEach(() => {
   process.env = { ...originalEnv };
+  if (originalDev === undefined) {
+    delete (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__;
+  } else {
+    (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = originalDev;
+  }
 });
 
 describe("mobile config", () => {
+  it("defaults release builds to the production API", () => {
+    delete process.env.EXPO_PUBLIC_APP_ENV;
+    delete process.env.EXPO_PUBLIC_API_URL;
+    (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false;
+
+    expect(getMobileConfig()).toEqual({
+      appEnv: "production",
+      apiUrl: "https://fbmaniaco-api.onrender.com"
+    });
+  });
+
+  it("defaults development bundles to localhost", () => {
+    delete process.env.EXPO_PUBLIC_APP_ENV;
+    delete process.env.EXPO_PUBLIC_API_URL;
+    (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = true;
+
+    expect(getMobileConfig()).toEqual({
+      appEnv: "development",
+      apiUrl: "http://localhost:4000"
+    });
+  });
+
   it("blocks localhost in production builds", () => {
     process.env.EXPO_PUBLIC_APP_ENV = "production";
     process.env.EXPO_PUBLIC_API_URL = "http://localhost:4000";
