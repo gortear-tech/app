@@ -1,6 +1,16 @@
 import { Ionicons } from "@expo/vector-icons";
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
-import type { BatchDetail, BatchSummary, GenerateBatchStyleOverride, MetaPage, Photo, ScheduledPost, Variant } from "@fbmaniaco/shared";
+import {
+  variantEditPromptForStyle,
+  variantStylePresetForIndex,
+  type BatchDetail,
+  type BatchSummary,
+  type GenerateBatchStyleOverride,
+  type MetaPage,
+  type Photo,
+  type ScheduledPost,
+  type Variant
+} from "@fbmaniaco/shared";
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
@@ -68,13 +78,13 @@ const WORK_POLL_MS = 3500;
 
 const styleCatalog = [
   { id: "atardecer", name: "Atardecer", detail: "Calido, dorado, social", icon: "sunny-outline" as IconName },
-  { id: "marmol", name: "Marmol", detail: "Limpio, elegante, claro", icon: "diamond-outline" as IconName },
+  { id: "marmol", name: "Mármol", detail: "Limpio, elegante, claro", icon: "diamond-outline" as IconName },
   { id: "madera", name: "Madera", detail: "Natural, local, cercano", icon: "cafe-outline" as IconName },
-  { id: "jardin", name: "Jardin", detail: "Fresco, verde, abierto", icon: "leaf-outline" as IconName },
+  { id: "jardin", name: "Jardín", detail: "Fresco, verde, abierto", icon: "leaf-outline" as IconName },
   { id: "playa", name: "Playa", detail: "Luz suave, relajado", icon: "water-outline" as IconName },
   { id: "estudio", name: "Estudio", detail: "Profesional, controlado", icon: "camera-outline" as IconName },
   { id: "nocturno", name: "Nocturno", detail: "Contraste, moderno", icon: "moon-outline" as IconName },
-  { id: "bambu", name: "Bambu", detail: "Organico, textura fina", icon: "flower-outline" as IconName }
+  { id: "bambu", name: "Bambú", detail: "Organico, textura fina", icon: "flower-outline" as IconName }
 ];
 
 type PhotoStylePreference = { styleId: string; intensity: number };
@@ -167,11 +177,18 @@ const styleForPhoto = (photoId: string, preferences: Record<string, PhotoStylePr
   return styleCatalog.find((style) => style.id === preference?.styleId) ?? styleCatalog[0]!;
 };
 
-const promptForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>) => {
-  const style = styleForPhoto(photoId, preferences);
-  const intensity = preferences[photoId]?.intensity ?? 70;
-  return `Corrige la iluminacion y los colores. Cambia el fondo. ${style.name}. Intensidad ${intensity}%.`;
-};
+const variantStylesForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
+  Array.from({ length: count }, (_, index) => variantStylePresetForIndex(index + 1, preferences[photoId]?.styleId));
+
+const styleSummaryForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
+  variantStylesForPhoto(photoId, preferences, count)
+    .map((style, index) => `V${index + 1} ${style.styleName}`)
+    .join(" · ");
+
+const promptsForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
+  variantStylesForPhoto(photoId, preferences, count)
+    .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName)}`)
+    .join("\n");
 
 const styleOverridesForGeneration = (photos: Photo[], preferences: Record<string, PhotoStylePreference>): GenerateBatchStyleOverride[] =>
   photos.filter(isPhotoAnalyzed).map((photo) => {
@@ -689,7 +706,7 @@ function BootScreen() {
             key={photo.id}
             photo={photo}
             index={index}
-            styleName={styleForPhoto(photo.id, photoPrefs).name}
+            styleName={styleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto)}
             onPress={() => setDetailPhotoId(photo.id)}
             onLongPress={() => setStylePhotoId(photo.id)}
           />
@@ -699,6 +716,7 @@ function BootScreen() {
         <StylePicker
           photoId={stylePhotoId}
           preference={photoPrefs[stylePhotoId] ?? { styleId: styleCatalog[0]!.id, intensity: 70 }}
+          variantsPerPhoto={variantsPerPhoto}
           onChange={(next) => setPhotoPrefs((current) => ({ ...current, [stylePhotoId]: next }))}
           onClose={() => setStylePhotoId(null)}
         />
@@ -706,7 +724,7 @@ function BootScreen() {
       {detailPhotoId ? (
         <PhotoDetail
           photo={photos.find((photo) => photo.id === detailPhotoId) ?? null}
-          prompt={promptForPhoto(detailPhotoId, photoPrefs)}
+          prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto)}
           onClose={() => setDetailPhotoId(null)}
         />
       ) : null}
@@ -1250,7 +1268,7 @@ function PhotoTile({
       <PreviewImage uri={photo.thumbnailUrl ?? photo.mediaUrl} style={asViewStyle(styles.photoImage)} label="Procesando" />
       <View style={styles.photoTileBody}>
         <Text style={styles.rowTitle}>F{index + 1}</Text>
-        <Text style={styles.muted} numberOfLines={1}>{styleName}</Text>
+        <Text style={styles.muted} numberOfLines={2}>{styleName}</Text>
         <Pill label={isPhotoAnalyzed(photo) ? "analizada" : photo.status} tone={isPhotoAnalyzed(photo) ? "good" : "neutral"} />
       </View>
     </Pressable>
@@ -1260,11 +1278,13 @@ function PhotoTile({
 function StylePicker({
   photoId,
   preference,
+  variantsPerPhoto,
   onChange,
   onClose
 }: {
   photoId: string;
   preference: PhotoStylePreference;
+  variantsPerPhoto: number;
   onChange: (next: PhotoStylePreference) => void;
   onClose: () => void;
 }) {
@@ -1292,7 +1312,7 @@ function StylePicker({
           </Pressable>
         ))}
       </View>
-      <Text style={styles.promptBox}>{promptForPhoto(photoId, { [photoId]: preference })}</Text>
+      <Text style={styles.promptBox}>{promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto)}</Text>
       <Button label="Listo" icon="checkmark-outline" variant="secondary" onPress={onClose} />
     </Panel>
   );

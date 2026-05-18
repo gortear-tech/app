@@ -16,6 +16,7 @@ import {
   UploadIntent,
   User,
   Variant,
+  variantStylePresetForIndex,
   VisionAnalysis,
   Workspace,
   WorkspaceMember,
@@ -1867,67 +1868,31 @@ export class LocalDataStore implements DataStore {
 
   private assignStyle(variantIndex: number, override?: GenerateStyleOverride): AssignedStyle {
     if (override) return this.manualStyle(variantIndex, override);
-    const styles: AssignedStyle[] = [
-      {
-        styleId: "luminoso-editorial",
-        styleName: "Luminoso editorial",
-        intensity: "media" as const,
-        contrast: 0.48,
-        saturation: 0.34,
-        warmth: 0.18,
-        sharpness: 0.42,
-        lowConfidence: false,
-        manualOverride: false
-      },
-      {
-        styleId: "moderno-limpio",
-        styleName: "Moderno limpio",
-        intensity: "ligera" as const,
-        contrast: 0.3,
-        saturation: 0.16,
-        warmth: 0.04,
-        sharpness: 0.36,
-        lowConfidence: false,
-        manualOverride: false
-      },
-      {
-        styleId: "color-local",
-        styleName: "Color local",
-        intensity: "fuerte" as const,
-        contrast: 0.58,
-        saturation: 0.52,
-        warmth: 0.26,
-        sharpness: 0.45,
-        lowConfidence: false,
-        manualOverride: false
-      }
-    ];
-    const selected = styles[(variantIndex - 1) % styles.length] ?? styles[0]!;
-    return selected;
+    const selected = variantStylePresetForIndex(variantIndex);
+    return {
+      styleId: selected.styleId,
+      styleName: selected.styleName,
+      intensity: "media" as const,
+      contrast: 0.48,
+      saturation: selected.saturation + 0.2,
+      warmth: selected.warmth,
+      sharpness: 0.42,
+      lowConfidence: false,
+      manualOverride: false
+    };
   }
 
   private manualStyle(
     variantIndex: number,
     override: GenerateStyleOverride
   ): AssignedStyle {
-    const palette = [
-      { id: "atardecer", name: "Atardecer", warmth: 0.28, saturation: 0.22 },
-      { id: "marmol", name: "Marmol", warmth: 0.02, saturation: 0.08 },
-      { id: "madera", name: "Madera", warmth: 0.2, saturation: 0.14 },
-      { id: "jardin", name: "Jardin", warmth: 0.1, saturation: 0.24 },
-      { id: "playa", name: "Playa", warmth: 0.18, saturation: 0.18 },
-      { id: "estudio", name: "Estudio", warmth: 0.04, saturation: 0.1 },
-      { id: "nocturno", name: "Nocturno", warmth: -0.04, saturation: 0.16 },
-      { id: "bambu", name: "Bambu", warmth: 0.12, saturation: 0.2 }
-    ];
-    const startIndex = Math.max(0, palette.findIndex((item) => item.id === override.styleId));
-    const selected = palette[(startIndex + variantIndex - 1) % palette.length] ?? palette[0]!;
+    const selected = variantStylePresetForIndex(variantIndex, override.styleId);
     const intensityValue = Math.max(0, Math.min(100, override.intensity));
     const intensity = intensityValue >= 80 ? "fuerte" : intensityValue <= 40 ? "ligera" : "media";
     const strength = intensityValue / 100;
     return {
-      styleId: selected.id,
-      styleName: selected.name,
+      styleId: selected.styleId,
+      styleName: selected.styleName,
       intensity,
       contrast: 0.18 + strength * 0.38,
       saturation: selected.saturation + strength * 0.24,

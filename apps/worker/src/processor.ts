@@ -9,7 +9,7 @@ import {
   VisionAnalysisProvider
 } from "@fbmaniaco/providers";
 import { createClient } from "@supabase/supabase-js";
-import type { AssignedStyle } from "@fbmaniaco/shared";
+import { variantEditPromptForStyle, variantStylePresetForIndex, type AssignedStyle } from "@fbmaniaco/shared";
 
 export type WorkerResult = {
   processed: boolean;
@@ -23,12 +23,9 @@ const envFlag = (name: string, fallback: boolean) => {
 };
 
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
-const backgroundPalette = ["Atardecer", "Marmol", "Madera", "Jardin", "Playa", "Estudio", "Nocturno", "Bambu"];
 const backgroundPromptForVariant = (variantIndex: number, style?: AssignedStyle) => {
-  const background = style?.manualOverride && style.styleName.trim().length > 0
-    ? style.styleName.trim()
-    : backgroundPalette[(variantIndex - 1) % backgroundPalette.length];
-  return `Corrige la iluminacion y los colores. Cambia el fondo. ${background}.`;
+  const background = style?.styleName.trim() || variantStylePresetForIndex(variantIndex).styleName;
+  return variantEditPromptForStyle(background);
 };
 
 const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: string; assetId: string | null | undefined }) => {

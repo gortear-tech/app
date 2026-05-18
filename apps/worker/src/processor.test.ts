@@ -110,29 +110,33 @@ describe("worker processor", () => {
       workspaceId: workspace.id,
       businessId: business.id,
       batchId: batch.id,
-      variantsPerPhoto: 2,
+      variantsPerPhoto: 3,
       styleOverrides: [{ photoId: detail?.photos[0]?.id ?? "", styleId: "playa", styleName: "Playa", intensity: 90 }],
       actorId: "u2",
       requestId: "test-generate"
     });
-    expect(generation.created).toBe(2);
+    expect(generation.created).toBe(3);
 
     const batchJob = await processOneJob({ store, workerId: "variant-worker" });
     const firstVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
     const secondVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
+    const thirdVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
     const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 
     expect(batchJob.job?.type).toBe("generate_batch");
     expect(firstVariantJob.job?.type).toBe("generate_variant");
     expect(secondVariantJob.job?.type).toBe("generate_variant");
-    expect(variants).toHaveLength(2);
+    expect(thirdVariantJob.job?.type).toBe("generate_variant");
+    expect(variants).toHaveLength(3);
     expect(variants.every((variant) => variant.status === "generada" && Boolean(variant.caption))).toBe(true);
     expect(variants.every((variant) => variant.caption?.includes("FBmaniaco Demo"))).toBe(true);
     expect(variants.every((variant) => !variant.caption?.includes("Pagina sin permiso completo"))).toBe(true);
-    expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(2);
+    expect(variants.map((variant) => variant.assignedStyle?.styleName)).toEqual(["Playa", "Estudio", "Nocturno"]);
+    expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(3);
     expect(imagePrompts).toEqual([
-      "Corrige la iluminacion y los colores. Cambia el fondo. Playa.",
-      "Corrige la iluminacion y los colores. Cambia el fondo. Estudio."
+      "Corrige la iluminación y los colores. Cambia el fondo. Playa.",
+      "Corrige la iluminación y los colores. Cambia el fondo. Estudio.",
+      "Corrige la iluminación y los colores. Cambia el fondo. Nocturno."
     ]);
     expect(variants.every((variant) => variant.generatedAssetId && variant.generatedAssetId !== detail?.photos[0]?.originalAssetId)).toBe(
       true

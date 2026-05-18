@@ -155,3 +155,22 @@ export type GenerateBatchStyleOverride = Static<typeof GenerateBatchStyleOverrid
 export type GenerateBatchResponse = Static<typeof GenerateBatchResponseSchema>;
 export type VariantsResponse = Static<typeof VariantsResponseSchema>;
 export type VariantMutationResponse = Static<typeof VariantMutationResponseSchema>;
+
+export const VARIANT_STYLE_PRESETS = [
+  { styleId: "atardecer", styleName: "Atardecer", warmth: 0.28, saturation: 0.22 },
+  { styleId: "marmol", styleName: "Mármol", warmth: 0.02, saturation: 0.08 },
+  { styleId: "madera", styleName: "Madera", warmth: 0.2, saturation: 0.14 },
+  { styleId: "jardin", styleName: "Jardín", warmth: 0.1, saturation: 0.24 },
+  { styleId: "playa", styleName: "Playa", warmth: 0.18, saturation: 0.18 },
+  { styleId: "estudio", styleName: "Estudio", warmth: 0.04, saturation: 0.1 },
+  { styleId: "nocturno", styleName: "Nocturno", warmth: -0.04, saturation: 0.16 },
+  { styleId: "bambu", styleName: "Bambú", warmth: 0.12, saturation: 0.2 }
+] as const;
+
+export const variantStylePresetForIndex = (variantIndex: number, startStyleId?: string | null) => {
+  const startIndex = Math.max(0, VARIANT_STYLE_PRESETS.findIndex((item) => item.styleId === startStyleId));
+  return VARIANT_STYLE_PRESETS[(startIndex + Math.max(1, variantIndex) - 1) % VARIANT_STYLE_PRESETS.length]!;
+};
+
+export const variantEditPromptForStyle = (styleName: string) =>
+  `Corrige la iluminación y los colores. Cambia el fondo. ${styleName}.`;
