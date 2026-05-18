@@ -72,10 +72,11 @@ const decodeServerToken = (value: string | null | undefined) => {
 };
 const mediaPreviewToken = (assetId: string, expires: number) =>
   createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
+const MEDIA_PREVIEW_TTL_SECONDS = 24 * 60 * 60;
 const publicMediaUrl = (assetId: string) => {
   const baseUrl = process.env.PUBLIC_API_URL ?? process.env.API_PUBLIC_URL;
   if (!baseUrl?.startsWith("https://")) return null;
-  const expires = Math.floor(Date.now() / 1000) + 15 * 60;
+  const expires = Math.floor(Date.now() / 1000) + MEDIA_PREVIEW_TTL_SECONDS;
   return `${baseUrl.replace(/\/$/, "")}/media/assets/${assetId}/preview?expires=${expires}&token=${mediaPreviewToken(assetId, expires)}`;
 };
 const publicMetaPage = (page: LocalMetaPage): MetaPage => {

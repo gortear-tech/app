@@ -90,6 +90,8 @@ describe("worker processor", () => {
       actorId: "u2",
       requestId: "test"
     });
+    const analyzeImageUrl = new URL(String(completed.job.payload.imageUrl));
+    expect(Number(analyzeImageUrl.searchParams.get("expires")) - Math.floor(Date.now() / 1000)).toBeGreaterThan(60 * 60);
 
     const result = await processOneJob({ store, workerId: "photo-worker", visionProvider });
     const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
