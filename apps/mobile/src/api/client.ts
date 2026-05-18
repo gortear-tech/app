@@ -1,5 +1,6 @@
 import {
   BatchDetail,
+  BatchMutationResponse,
   BatchSummary,
   BootstrapStatus,
   Business,
@@ -330,6 +331,21 @@ export const getBatchDetail = async (token: string, businessId: string, batchId:
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer ese lote.");
   return json as BatchDetail;
+};
+
+export const deleteBatch = async (token: string, businessId: string, batchId: string): Promise<BatchMutationResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}`, {
+    method: "DELETE",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "idempotency-key": idempotencyKey("delete-batch"),
+      "x-request-id": `mobile-${Date.now()}`
+    }
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos eliminar ese lote.");
+  return json as BatchMutationResponse;
 };
 
 export type PhotoUploadFile = {

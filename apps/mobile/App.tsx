@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps,
 import {
   ActivityIndicator,
   Animated,
+  Alert as NativeAlert,
   AppState,
   Image,
   ImageBackground,
@@ -45,6 +46,7 @@ import {
   confirmCalendar,
   connectMeta,
   createBatch,
+  deleteBatch,
   ensureSessionForMeta,
   generateBatchVariants,
   getBatchDetail,
@@ -287,10 +289,9 @@ function BootScreen() {
     queryFn: async () => listBatches(token, selectedBusinessId ?? ""),
     enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
   });
-  const activeBatch = useMemo(() => (batches.data ?? []).find(isBatchActive) ?? null, [batches.data]);
   const selectedBatch = useMemo(
-    () => (batches.data ?? []).find((batch) => batch.id === selectedBatchId) ?? activeBatch ?? (batches.data ?? [])[0] ?? null,
-    [activeBatch, batches.data, selectedBatchId]
+    () => (selectedBatchId ? (batches.data ?? []).find((batch) => batch.id === selectedBatchId) ?? null : null),
+    [batches.data, selectedBatchId]
   );
   const batchDetail = useQuery({
     queryKey: ["batch-detail", selectedBusinessId, selectedBatch?.id],
@@ -320,8 +321,11 @@ function BootScreen() {
   }, [handleMetaReturn]);
 
   useEffect(() => {
-    if (!selectedBatchId && selectedBatch?.id) setSelectedBatchId(selectedBatch.id);
-  }, [selectedBatch?.id, selectedBatchId]);
+    if (selectedBatchId && batches.data && !batches.data.some((batch) => batch.id === selectedBatchId)) {
+      setSelectedBatchId(null);
+      setFlow("home");
+    }
+  }, [batches.data, selectedBatchId]);
 
   const invalidateWork = async () => {
     await Promise.all([
@@ -503,6 +507,19 @@ function BootScreen() {
     onSuccess: invalidateWork
   });
 
+  const removeBatch = useMutation({
+    mutationFn: async (batchId: string) => deleteBatch(token, selectedBusinessId ?? "", batchId),
+    onSuccess: async (_result, batchId) => {
+      if (selectedBatchId === batchId) {
+        setSelectedBatchId(null);
+        setFlow("home");
+        setStylePhotoId(null);
+        setDetailPhotoId(null);
+      }
+      await invalidateWork();
+    }
+  });
+
   const reschedulePost = useMutation({
     mutationFn: async ({ post, scheduledFor }: { post: ScheduledPost; scheduledFor: string }) =>
       updateScheduledPost(token, selectedBusinessId ?? "", post.batchId, post.id, scheduledFor),
@@ -524,6 +541,24 @@ function BootScreen() {
   const failedPosts = posts.filter(isPostFailed);
   const refreshing =
     tokenQuery.isFetching || bootstrap.isFetching || pages.isFetching || batches.isFetching || batchDetail.isFetching || scheduledPosts.isFetching;
+
+  const leaveBatch = () => {
+    setSelectedBatchId(null);
+    setStylePhotoId(null);
+    setDetailPhotoId(null);
+    setFlow("home");
+  };
+
+  const confirmDeleteBatch = (batch: BatchSummary) => {
+    NativeAlert.alert(
+      "Eliminar lote",
+      "El lote saldra de tu lista y se cancelara el trabajo pendiente que todavia no se haya enviado. Las publicaciones ya publicadas no se borran de Facebook.",
+      [
+        { text: "Conservar", style: "cancel" },
+        { text: "Eliminar", style: "destructive", onPress: () => removeBatch.mutate(batch.id) }
+      ]
+    );
+  };
 
   useEffect(() => {
     setReviewIndex(0);
@@ -559,6 +594,7 @@ function BootScreen() {
     publishNow.error ??
     retryPost.error ??
     cancelPost.error ??
+    removeBatch.error ??
     reschedulePost.error;
 
   const openPage = (page: MetaPage) => {
@@ -668,10 +704,12 @@ function BootScreen() {
             key={batch.id}
             batch={batch}
             selected={batch.id === selectedBatch?.id}
+            deleting={removeBatch.isPending}
             onPress={() => {
               setSelectedBatchId(batch.id);
               setFlow(isBatchActive(batch) ? "styles" : "calendar");
             }}
+            onDelete={() => confirmDeleteBatch(batch)}
           />
         ))}
       </Panel>
@@ -685,6 +723,9 @@ function BootScreen() {
         eyebrow="Paso 3"
         body="Tus fotos aparecen aqui desde que las eliges. Ajusta estilos, espera el analisis y genera cuando esten listas."
       />
+      {selectedBatch ? (
+        <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+      ) : null}
       {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
       {analysisTotal > 0 && analyzedCount < analysisTotal ? (
         <Panel title="Analizando fotos" eyebrow={`${analyzedCount} de ${analysisTotal}`}>
@@ -749,6 +790,9 @@ function BootScreen() {
       return (
         <Screen>
           <Hero title="Generando" eyebrow="Paso 5" body="Estamos editando imagenes y preparando captions. Puedes salir; el trabajo sigue en segundo plano." />
+          {selectedBatch ? (
+            <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+          ) : null}
           <Panel title="Progreso">
             <View style={styles.spinnerMark}>
               <ActivityIndicator color={palette.blue} />
@@ -772,6 +816,9 @@ function BootScreen() {
     return (
       <Screen>
         <Hero title="Cantidad" eyebrow="Paso 4" body="Elige cuantas variantes generar por foto validada." />
+        {selectedBatch ? (
+          <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+        ) : null}
         <Panel title="Cuantas variantes?">
           <Stepper value={variantsPerPhoto} min={1} max={5} onChange={setVariantsPerPhoto} />
           <Text style={styles.muted}>
@@ -800,6 +847,9 @@ function BootScreen() {
       return (
         <Screen>
           <Hero title="Revision completa" eyebrow="Paso 6" body={`${acceptedCount} aceptadas. Puedes programar ahora o volver a editar captions.`} />
+          {selectedBatch ? (
+            <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+          ) : null}
           <Panel title="Resumen">
             <Text style={styles.bigNumber}>{acceptedCount}</Text>
             <Text style={styles.muted}>Variantes aceptadas</Text>
@@ -818,6 +868,9 @@ function BootScreen() {
     }
     return (
       <Screen>
+        {selectedBatch ? (
+          <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+        ) : null}
         <SwipeReviewCard
           variant={currentReview}
           position={`${Math.min(reviewIndex + 1, reviewQueue.length)} de ${reviewQueue.length}`}
@@ -836,6 +889,9 @@ function BootScreen() {
   const renderSchedule = () => (
     <Screen>
       <Hero title="Programar" eyebrow="Paso 7" body={`${acceptedCount} aceptadas. Elige el periodo y confirmamos los mejores huecos libres.`} />
+      {selectedBatch ? (
+        <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+      ) : null}
       <Panel title="Periodo">
         <View style={styles.periodGrid}>
           {([7, 14, 30] as PeriodDays[]).map((days) => (
@@ -1182,18 +1238,57 @@ function PageCard({
   );
 }
 
-function BatchRow({ batch, selected, onPress }: { batch: BatchSummary; selected: boolean; onPress: () => void }) {
+function BatchControls({
+  batch,
+  deleting,
+  onMinimize,
+  onDelete
+}: {
+  batch: BatchSummary;
+  deleting: boolean;
+  onMinimize: () => void;
+  onDelete: () => void;
+}) {
   return (
-    <Pressable style={[styles.batchRow, selected ? styles.batchRowSelected : null]} onPress={onPress}>
-      <View style={styles.batchIcon}>
-        <Ionicons name="albums-outline" size={20} color={palette.blue} />
+    <Panel title="Lote actual" eyebrow={batch.status}>
+      <View style={styles.batchControlRow}>
+        <View style={styles.flex}>
+          <Text style={styles.muted}>{batch.photosCount} fotos - {batch.variantsCount} variantes</Text>
+        </View>
+        <MiniButton label="Minimizar" icon="remove-circle-outline" onPress={onMinimize} disabled={deleting} />
+        <MiniButton label={deleting ? "Eliminando" : "Eliminar"} icon="trash-outline" tone="danger" onPress={onDelete} disabled={deleting} />
       </View>
-      <View style={styles.flex}>
-        <Text style={styles.rowTitle}>{formatDate(batch.createdAt)}</Text>
-        <Text style={styles.muted}>{batch.photosCount} fotos - {batch.variantsCount} variantes</Text>
-      </View>
-      <Pill label={batch.status} tone={batch.status === "completado" || batch.status === "completed" ? "good" : "neutral"} />
-    </Pressable>
+    </Panel>
+  );
+}
+
+function BatchRow({
+  batch,
+  selected,
+  deleting,
+  onPress,
+  onDelete
+}: {
+  batch: BatchSummary;
+  selected: boolean;
+  deleting: boolean;
+  onPress: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <View style={[styles.batchRow, selected ? styles.batchRowSelected : null]}>
+      <Pressable style={styles.batchRowMain} onPress={onPress}>
+        <View style={styles.batchIcon}>
+          <Ionicons name="albums-outline" size={20} color={palette.blue} />
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.rowTitle}>{formatDate(batch.createdAt)}</Text>
+          <Text style={styles.muted}>{batch.photosCount} fotos - {batch.variantsCount} variantes</Text>
+        </View>
+        <Pill label={batch.status} tone={batch.status === "completado" || batch.status === "completed" ? "good" : "neutral"} />
+      </Pressable>
+      <IconButton icon="trash-outline" label="Eliminar lote" disabled={deleting} onPress={onDelete} />
+    </View>
   );
 }
 
@@ -1748,7 +1843,9 @@ const styles = StyleSheet.create({
   pageName: { color: palette.text, fontSize: 18, fontWeight: "900" },
   pageMeta: { color: palette.muted, fontSize: 13, fontWeight: "700" },
   batchRow: { minHeight: 72, flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 8, backgroundColor: palette.surface },
+  batchRowMain: { flex: 1, minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12 },
   batchRowSelected: { borderWidth: 1, borderColor: palette.blue },
+  batchControlRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 },
   batchIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: palette.panel2 },
   photoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   photoTile: { width: "48.5%", overflow: "hidden", borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },

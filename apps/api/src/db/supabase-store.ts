@@ -55,6 +55,8 @@ const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
+const hiddenBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
+const terminalBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "photo";
 const extensionMimeHints = new Map([
   [".jpg", "image/jpeg"],
@@ -876,8 +878,11 @@ export class SupabaseDataStoreCore {
   async listBatches(input: { workspaceId: string; businessId: string }): Promise<BatchSummary[]> {
     await this.requireBusiness(input.workspaceId, input.businessId);
     const result = await this.pool.query(
-      "select * from public.batches where workspace_id = $1 and business_id = $2 order by updated_at desc",
-      [input.workspaceId, input.businessId]
+      `select * from public.batches
+       where workspace_id = $1 and business_id = $2
+         and status <> all($3::text[])
+       order by updated_at desc`,
+      [input.workspaceId, input.businessId, [...hiddenBatchStatuses]]
     );
     return result.rows.map(toBatch);
   }
@@ -885,6 +890,67 @@ export class SupabaseDataStoreCore {
   async getActiveBatch(input: { workspaceId: string; businessId: string }): Promise<BatchSummary | null> {
     const batches = await this.listBatches(input);
     return batches.find((batch) => activeBatchStatuses.has(batch.status)) ?? null;
+  }
+
+  async deleteBatch(input: Parameters<DataStore["deleteBatch"]>[0]): ReturnType<DataStore["deleteBatch"]> {
+    await this.requireBusiness(input.workspaceId, input.businessId);
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const batchResult = await client.query(
+        "select * from public.batches where workspace_id = $1 and business_id = $2 and id = $3 for update",
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      if (!batchResult.rows[0]) this.batchNotFound();
+      const cancelledJobs = await client.query(
+        `update public.jobs
+         set status = 'cancelled', last_error = 'batch_deleted', updated_at = now()
+         where workspace_id = $1 and business_id = $2 and batch_id = $3
+           and status in ('queued', 'blocked', 'needs_user_action')
+         returning id`,
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      const cancelledPosts = await client.query(
+        `update public.scheduled_posts
+         set status = 'cancelada', remote_status = 'no_enviado', remote_error_code = 'batch_deleted', updated_at = now()
+         where workspace_id = $1 and business_id = $2 and batch_id = $3
+           and status not in ('publicada', 'published', 'cancelada', 'cancelled')
+         returning id`,
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      await client.query(
+        `update public.variants
+         set status = 'eliminada', updated_at = now()
+         where workspace_id = $1 and business_id = $2 and batch_id = $3
+           and status not in ('publicada', 'eliminada')`,
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      await client.query(
+        `update public.photos
+         set status = 'eliminada', updated_at = now()
+         where workspace_id = $1 and business_id = $2 and batch_id = $3
+           and status <> 'eliminada'`,
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      const updated = await client.query(
+        `update public.batches
+         set status = 'abandonado', last_activity_at = now(), updated_at = now()
+         where workspace_id = $1 and business_id = $2 and id = $3
+         returning *`,
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      await client.query("commit");
+      return {
+        batch: toBatch(updated.rows[0]),
+        cancelledJobs: cancelledJobs.rowCount ?? 0,
+        cancelledScheduledPosts: cancelledPosts.rowCount ?? 0
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getBatchDetail(input: {
@@ -1081,8 +1147,10 @@ export class SupabaseDataStoreCore {
         [photo.id, photo.original_asset_id, photo.original_asset_id, JSON.stringify(input.analysis)]
       );
       await client.query(
-        "update public.batches set status = 'pendiente_confirmacion', last_activity_at = now(), updated_at = now() where id = $1",
-        [photo.batch_id]
+        `update public.batches
+         set status = 'pendiente_confirmacion', last_activity_at = now(), updated_at = now()
+         where id = $1 and not (status = any($2::text[]))`,
+        [photo.batch_id, [...terminalBatchStatuses]]
       );
       await client.query("commit");
       return toPhoto(updated.rows[0]);
@@ -1269,8 +1337,8 @@ export class SupabaseDataStoreCore {
              variants_count = (select count(*)::int from public.variants where batch_id = $1 and status <> 'eliminada'),
              last_activity_at = now(),
              updated_at = now()
-         where id = $1`,
-        [input.batchId]
+         where id = $1 and not (status = any($2::text[]))`,
+        [input.batchId, [...terminalBatchStatuses]]
       );
       await client.query("commit");
       return { job, created, available, variants };
@@ -1295,10 +1363,22 @@ export class SupabaseDataStoreCore {
       `update public.batches
        set variants_count = $3, status = $4, last_activity_at = now(), updated_at = now()
        where id = $1 and workspace_id = $2
+         and not (status = any($5::text[]))
        returning *`,
-      [input.batchId, job.workspaceId, variants.rows.filter((variant) => variant.status !== "eliminada").length, hasGenerated ? "generado_parcial" : "generando"]
+      [
+        input.batchId,
+        job.workspaceId,
+        variants.rows.filter((variant) => variant.status !== "eliminada").length,
+        hasGenerated ? "generado_parcial" : "generando",
+        [...terminalBatchStatuses]
+      ]
     );
-    return { batch: toBatch(batchResult.rows[0]), variants: variants.rows.map(toVariant) };
+    const batch =
+      batchResult.rows[0] ??
+      (
+        await this.pool.query("select * from public.batches where id = $1 and workspace_id = $2", [input.batchId, job.workspaceId])
+      ).rows[0];
+    return { batch: toBatch(batch), variants: variants.rows.map(toVariant) };
   }
 
   async getVariantCaptionContext(
@@ -1467,8 +1547,8 @@ export class SupabaseDataStoreCore {
              variants_count = (select count(*)::int from public.variants where batch_id = $1 and status <> 'eliminada'),
              last_activity_at = now(),
              updated_at = now()
-         where id = $1`,
-        [current.batchId]
+         where id = $1 and not (status = any($2::text[]))`,
+        [current.batchId, [...terminalBatchStatuses]]
       );
       await client.query("commit");
       return toVariant(updated.rows[0]);
@@ -1541,6 +1621,16 @@ export class SupabaseDataStoreCore {
 
   async confirmCalendar(input: Parameters<DataStore["confirmCalendar"]>[0]): ReturnType<DataStore["confirmCalendar"]> {
     const batch = await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
+    if (terminalBatchStatuses.has(batch.status)) {
+      throw new AppError({
+        code: "batch_deleted",
+        statusCode: 409,
+        message: "Batch has been deleted",
+        userMessage: "Ese lote ya fue eliminado.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
     const business = await this.requireBusiness(input.workspaceId, input.businessId);
     const approvedResult = await this.pool.query(
       `select v.* from public.variants v
@@ -1650,6 +1740,9 @@ export class SupabaseDataStoreCore {
 
   async completeSchedulePosts(input: { jobId: string; batchId: string }): ReturnType<DataStore["completeSchedulePosts"]> {
     const job = await this.requireJob(input.jobId);
+    if (!job.businessId) throw new Error("schedule_posts job is missing businessId");
+    const batch = await this.requireBatch(job.workspaceId, job.businessId, input.batchId);
+    if (terminalBatchStatuses.has(batch.status)) return { scheduledPosts: [] };
     const result = await this.pool.query("select * from public.scheduled_posts where workspace_id = $1 and batch_id = $2", [
       job.workspaceId,
       input.batchId

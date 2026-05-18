@@ -87,6 +87,8 @@ const MEDIA_BUCKET = "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
+const hiddenBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
+const terminalBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "photo";
 const extensionMimeHints = new Map([
   [".jpg", "image/jpeg"],
@@ -695,13 +697,71 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     this.requireBusiness(state, input.workspaceId, input.businessId);
     return state.batches
-      .filter((batch) => batch.workspaceId === input.workspaceId && batch.businessId === input.businessId)
+      .filter((batch) => batch.workspaceId === input.workspaceId && batch.businessId === input.businessId && !hiddenBatchStatuses.has(batch.status))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async getActiveBatch(input: { workspaceId: string; businessId: string }): Promise<BatchSummary | null> {
     const batches = await this.listBatches(input);
     return batches.find((batch) => activeBatchStatuses.has(batch.status)) ?? null;
+  }
+
+  async deleteBatch(input: Parameters<DataStore["deleteBatch"]>[0]): ReturnType<DataStore["deleteBatch"]> {
+    const state = await this.load();
+    this.requireBusiness(state, input.workspaceId, input.businessId);
+    const batch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
+    const timestamp = now();
+    let cancelledJobs = 0;
+    let cancelledScheduledPosts = 0;
+    state.jobs.forEach((job) => {
+      if (
+        job.workspaceId === input.workspaceId &&
+        job.businessId === input.businessId &&
+        job.batchId === input.batchId &&
+        ["queued", "blocked", "needs_user_action"].includes(job.status)
+      ) {
+        job.status = "cancelled";
+        job.lastError = "batch_deleted";
+        job.updatedAt = timestamp;
+        cancelledJobs += 1;
+      }
+    });
+    state.scheduledPosts.forEach((post) => {
+      if (
+        post.workspaceId === input.workspaceId &&
+        post.businessId === input.businessId &&
+        post.batchId === input.batchId &&
+        !["publicada", "published", "cancelada", "cancelled"].includes(post.status)
+      ) {
+        post.status = "cancelada";
+        post.remoteStatus = "no_enviado";
+        post.remoteErrorCode = "batch_deleted";
+        post.updatedAt = timestamp;
+        cancelledScheduledPosts += 1;
+      }
+    });
+    state.variants.forEach((variant) => {
+      if (
+        variant.workspaceId === input.workspaceId &&
+        variant.businessId === input.businessId &&
+        variant.batchId === input.batchId &&
+        !["publicada", "eliminada"].includes(variant.status)
+      ) {
+        variant.status = "eliminada";
+        variant.updatedAt = timestamp;
+      }
+    });
+    state.photos.forEach((photo) => {
+      if (photo.workspaceId === input.workspaceId && photo.businessId === input.businessId && photo.batchId === input.batchId) {
+        photo.status = "eliminada";
+        photo.updatedAt = timestamp;
+      }
+    });
+    batch.status = "abandonado";
+    batch.lastActivityAt = timestamp;
+    batch.updatedAt = timestamp;
+    await this.persist();
+    return { batch, cancelledJobs, cancelledScheduledPosts };
   }
 
   async getBatchDetail(input: {
@@ -907,7 +967,7 @@ export class LocalDataStore implements DataStore {
     photo.visionInputAssetId = visionInputAsset.id;
     photo.visionAnalysis = input.analysis;
     photo.updatedAt = timestamp;
-    if (batch) {
+    if (batch && !terminalBatchStatuses.has(batch.status)) {
       batch.status = "pendiente_confirmacion";
       batch.lastActivityAt = timestamp;
       batch.updatedAt = timestamp;
@@ -1065,10 +1125,12 @@ export class LocalDataStore implements DataStore {
         });
       }
     }
-    batch.status = "generando";
-    batch.variantsCount = state.variants.filter((variant) => variant.batchId === batch.id && variant.status !== "eliminada").length;
-    batch.lastActivityAt = timestamp;
-    batch.updatedAt = timestamp;
+    if (!terminalBatchStatuses.has(batch.status)) {
+      batch.status = "generando";
+      batch.variantsCount = state.variants.filter((variant) => variant.batchId === batch.id && variant.status !== "eliminada").length;
+      batch.lastActivityAt = timestamp;
+      batch.updatedAt = timestamp;
+    }
     await this.persist();
     return { job, created, available, variants: touched };
   }
@@ -1081,11 +1143,13 @@ export class LocalDataStore implements DataStore {
     const variants = state.variants.filter((variant) => variant.batchId === batch.id && variant.workspaceId === batch.workspaceId);
     const timestamp = now();
     batch.variantsCount = variants.filter((variant) => variant.status !== "eliminada").length;
-    batch.status = variants.some((variant) => variant.status === "generada" || variant.status === "aprobada")
-      ? "generado_parcial"
-      : "generando";
-    batch.lastActivityAt = timestamp;
-    batch.updatedAt = timestamp;
+    if (!terminalBatchStatuses.has(batch.status)) {
+      batch.status = variants.some((variant) => variant.status === "generada" || variant.status === "aprobada")
+        ? "generado_parcial"
+        : "generando";
+      batch.lastActivityAt = timestamp;
+      batch.updatedAt = timestamp;
+    }
     await this.persist();
     return { batch, variants };
   }
@@ -1228,7 +1292,7 @@ export class LocalDataStore implements DataStore {
     variant.status = "generada";
     variant.updatedAt = timestamp;
     const batch = state.batches.find((item) => item.id === variant.batchId && item.workspaceId === variant.workspaceId);
-    if (batch) {
+    if (batch && !terminalBatchStatuses.has(batch.status)) {
       batch.status = "generado_parcial";
       batch.variantsCount = state.variants.filter((item) => item.batchId === batch.id && item.status !== "eliminada").length;
       batch.lastActivityAt = timestamp;
@@ -1248,6 +1312,16 @@ export class LocalDataStore implements DataStore {
   }): Promise<{ scheduledPosts: ScheduledPost[]; job: StoredJob }> {
     const state = await this.load();
     const batch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
+    if (terminalBatchStatuses.has(batch.status)) {
+      throw new AppError({
+        code: "batch_deleted",
+        statusCode: 409,
+        message: "Batch has been deleted",
+        userMessage: "Ese lote ya fue eliminado.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
     const approved = state.variants
       .filter(
         (variant) =>
@@ -1358,6 +1432,9 @@ export class LocalDataStore implements DataStore {
   async completeSchedulePosts(input: { jobId: string; batchId: string }): Promise<{ scheduledPosts: ScheduledPost[] }> {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
+    if (!job.businessId) throw new Error("schedule_posts job is missing businessId");
+    const batch = this.requireBatch(state, job.workspaceId, job.businessId, input.batchId);
+    if (terminalBatchStatuses.has(batch.status)) return { scheduledPosts: [] };
     const scheduledPosts = state.scheduledPosts.filter((post) => post.workspaceId === job.workspaceId && post.batchId === input.batchId);
     for (const post of scheduledPosts) {
       const existingPublishJob = state.jobs.find(

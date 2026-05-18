@@ -129,6 +129,62 @@ describe("api bootstrap and tenancy", () => {
     await rm(path, { force: true });
   });
 
+  it("deletes a batch without leaving it active", async () => {
+    const path = join(tmpdir(), `fbmaniaco-api-delete-batch-${Date.now()}.json`);
+    const config = makeConfig(path);
+    const store = new LocalDataStore(path);
+    const app = await buildServer({ config, store });
+    const authorization = "Bearer dev:user-delete:delete@example.com";
+
+    const connect = await app.inject({
+      method: "POST",
+      url: "/auth/meta/connect",
+      headers: { authorization, "idempotency-key": "delete-connect-1" },
+      payload: { flow: "oauth" }
+    });
+    const page = connect.json().pages.find((item: { canPublish: boolean }) => item.canPublish);
+    const select = await app.inject({
+      method: "POST",
+      url: "/meta/pages/select",
+      headers: { authorization, "idempotency-key": "delete-select-1" },
+      payload: { pageId: page.id }
+    });
+    const businessId = select.json().business.id as string;
+    const createBatch = await app.inject({
+      method: "POST",
+      url: `/businesses/${businessId}/batches`,
+      headers: { authorization, "idempotency-key": "delete-create-batch-1" },
+      payload: {}
+    });
+    const batchId = createBatch.json().batch.id as string;
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/businesses/${businessId}/batches/${batchId}`,
+      headers: { authorization, "idempotency-key": "delete-batch-1" }
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json().batch.status).toBe("abandonado");
+
+    const list = await app.inject({
+      method: "GET",
+      url: `/businesses/${businessId}/batches`,
+      headers: { authorization }
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().batches.some((batch: { id: string }) => batch.id === batchId)).toBe(false);
+
+    const active = await app.inject({
+      method: "GET",
+      url: `/businesses/${businessId}/batches/active`,
+      headers: { authorization }
+    });
+    expect(active.statusCode).toBe(200);
+    expect(active.json().batches).toHaveLength(0);
+
+    await app.close();
+    await rm(path, { force: true });
+  });
+
   it("keeps real page import server-side and requires a configured test token", async () => {
     const path = join(tmpdir(), `fbmaniaco-api-real-page-${Date.now()}.json`);
     const config = makeConfig(path);

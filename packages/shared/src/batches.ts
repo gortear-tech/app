@@ -63,6 +63,17 @@ export const CreateBatchResponseSchema = Type.Object({
   requestId: Type.String()
 });
 
+export const BatchMutationResponseSchema = Type.Object({
+  schemaVersion: Type.Literal("batch_mutation.v1"),
+  batch: BatchSummarySchema,
+  changed: Type.Object({
+    entityIds: Type.Array(Type.String()),
+    queryKeys: Type.Array(Type.String())
+  }),
+  requestId: Type.String()
+});
+
 export type BatchSummary = Static<typeof BatchSummarySchema>;
 export type Photo = Static<typeof PhotoSchema>;
 export type BatchDetail = Static<typeof BatchDetailSchema>;
+export type BatchMutationResponse = Static<typeof BatchMutationResponseSchema>;

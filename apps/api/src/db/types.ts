@@ -236,6 +236,13 @@ export type DataStore = {
   createBatch(input: { workspaceId: string; businessId: string; actorId: string; requestId: string }): Promise<BatchSummary>;
   listBatches(input: { workspaceId: string; businessId: string }): Promise<BatchSummary[]>;
   getActiveBatch(input: { workspaceId: string; businessId: string }): Promise<BatchSummary | null>;
+  deleteBatch(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    actorId: string;
+    requestId: string;
+  }): Promise<{ batch: BatchSummary; cancelledJobs: number; cancelledScheduledPosts: number }>;
   getBatchDetail(input: {
     workspaceId: string;
     businessId: string;

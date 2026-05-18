@@ -9,6 +9,7 @@ import {
   AppErrorResponseSchema,
   BootstrapStatusSchema,
   BatchDetailSchema,
+  BatchMutationResponseSchema,
   BatchesResponseSchema,
   BusinessesResponseSchema,
   BusinessDetailResponseSchema,
@@ -1359,6 +1360,60 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         jobs: detail.jobs.map(jobSummary),
         requestId
       };
+    }
+  );
+
+  app.delete(
+    "/businesses/:businessId/batches/:batchId",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["businessId", "batchId"],
+          properties: { businessId: { type: "string" }, batchId: { type: "string" } }
+        },
+        response: {
+          200: BatchMutationResponseSchema,
+          401: AppErrorResponseSchema,
+          403: AppErrorResponseSchema,
+          404: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { businessId: string; batchId: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace, business } = await requireBusinessAccess({
+        actorId: actor.userId,
+        businessId: params.businessId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/businesses/:businessId/batches/:batchId",
+        handler: async () => {
+          const result = await input.store.deleteBatch({
+            workspaceId: workspace.id,
+            businessId: business.id,
+            batchId: params.batchId,
+            actorId: actor.userId,
+            requestId
+          });
+          return {
+            schemaVersion: "batch_mutation.v1" as const,
+            batch: result.batch,
+            changed: {
+              entityIds: [params.batchId],
+              queryKeys: [`batch:${params.batchId}`, `batches:${business.id}`, `activeBatch:${business.id}`, `scheduledPosts:${business.id}`]
+            },
+            requestId
+          };
+        }
+      });
     }
   );
 
