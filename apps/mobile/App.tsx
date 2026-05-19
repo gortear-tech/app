@@ -364,10 +364,31 @@ function BootScreen() {
   }, []);
 
   useEffect(() => {
+    if (Platform.OS !== "android") return;
+    void WebBrowser.warmUpAsync().catch(() => undefined);
+    return () => {
+      void WebBrowser.coolDownAsync().catch(() => undefined);
+    };
+  }, []);
+
+  useEffect(() => {
     void Linking.getInitialURL().then(handleMetaReturn);
     const subscription = Linking.addEventListener("url", (event) => handleMetaReturn(event.url));
     return () => subscription.remove();
   }, [handleMetaReturn]);
+
+  useEffect(() => {
+    if (!tokenQuery.isSuccess || token) return;
+    let cancelled = false;
+    void ensureSessionForMeta()
+      .then((sessionToken) => {
+        if (!cancelled) queryClient.setQueryData(["session-token"], sessionToken);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [token, tokenQuery.isSuccess]);
 
   useEffect(() => {
     if (selectedBatchId && batches.data && !batches.data.some((batch) => batch.id === selectedBatchId)) {
@@ -398,7 +419,7 @@ function BootScreen() {
 
   const connect = useMutation({
     mutationFn: async () => {
-      const sessionToken = await ensureSessionForMeta();
+      const sessionToken = token || (await ensureSessionForMeta());
       queryClient.setQueryData(["session-token"], sessionToken);
       return connectMeta(sessionToken);
     },

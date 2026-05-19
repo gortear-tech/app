@@ -138,16 +138,8 @@ export const startAnonymousSession = async () => {
 };
 
 export const ensureSessionForMeta = async () => {
-  try {
-    const token = await getStoredSessionToken();
-    if (token) {
-      await getBootstrapStatus(token);
-      return token;
-    }
-  } catch {
-    const token = await getStoredSessionToken();
-    if (token) return token;
-  }
+  const token = await getStoredSessionToken();
+  if (token) return token;
   const session = await startAnonymousSession();
   return session.accessToken;
 };
