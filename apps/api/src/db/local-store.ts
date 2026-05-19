@@ -1127,6 +1127,7 @@ export class LocalDataStore implements DataStore {
     }
     if (!terminalBatchStatuses.has(batch.status)) {
       batch.status = "generando";
+      batch.variantsPerPhoto = input.variantsPerPhoto;
       batch.variantsCount = state.variants.filter((variant) => variant.batchId === batch.id && variant.status !== "eliminada").length;
       batch.lastActivityAt = timestamp;
       batch.updatedAt = timestamp;

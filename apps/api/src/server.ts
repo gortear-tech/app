@@ -398,7 +398,9 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     workspaceId: job.workspaceId,
     progress: job.status === "succeeded" ? 100 : job.status === "running" ? 50 : 0,
     userMessage:
-      job.type === "analyze_photo"
+      job.status === "failed"
+        ? job.lastError ?? "El proceso fallo. Intenta otra vez."
+        : job.type === "analyze_photo"
         ? job.status === "succeeded"
           ? "Foto validada."
           : "Analizando foto."
@@ -420,7 +422,8 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
                 : "Publicando en Facebook."
               : job.status === "succeeded"
                 ? "Trabajo completado."
-                : "Trabajo en proceso.",
+              : "Trabajo en proceso.",
+    ...(job.lastError ? { lastError: job.lastError } : {}),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   });

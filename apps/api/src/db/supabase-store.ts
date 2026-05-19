@@ -1338,11 +1338,12 @@ export class SupabaseDataStoreCore {
       await client.query(
         `update public.batches
          set status = 'generando',
+             variants_per_photo = $3,
              variants_count = (select count(*)::int from public.variants where batch_id = $1 and status <> 'eliminada'),
              last_activity_at = now(),
              updated_at = now()
          where id = $1 and not (status = any($2::text[]))`,
-        [input.batchId, [...terminalBatchStatuses]]
+        [input.batchId, [...terminalBatchStatuses], input.variantsPerPhoto]
       );
       await client.query("commit");
       return { job, created, available, variants };

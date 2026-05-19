@@ -18,6 +18,7 @@ export const JobSummarySchema = Type.Object({
   workspaceId: Type.String(),
   progress: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
   userMessage: Type.Optional(Type.String()),
+  lastError: Type.Optional(Type.String()),
   createdAt: Type.String(),
   updatedAt: Type.String()
 });

@@ -74,6 +74,13 @@ WebBrowser.maybeCompleteAuthSession();
 type FlowStep = "home" | "styles" | "generate" | "review" | "schedule" | "calendar" | "settings";
 type IconName = ComponentProps<typeof Ionicons>["name"];
 type PeriodDays = 7 | 14 | 30;
+type PageAction = {
+  label: string;
+  icon: IconName;
+  onPress: () => void;
+  disabled?: boolean | undefined;
+  tone?: "primary" | "danger" | undefined;
+};
 
 const MAX_PHOTOS_PER_PICK = 10;
 const IMAGE_TARGET_WIDTH = 1800;
@@ -255,6 +262,9 @@ const isWorkJob = (job: BatchDetail["jobs"][number]) =>
 const hasActiveWorkJobs = (jobs: BatchDetail["jobs"]) =>
   jobs.some((job) => ["queued", "running"].includes(job.status) && isWorkJob(job));
 
+const isBatchWorking = (batch: BatchSummary) =>
+  ["pending_upload", "pendiente", "subiendo", "uploading", "analizando", "analyzing", "generando", "generating"].includes(batch.status);
+
 const flowForBatchSummary = (batch: BatchSummary): FlowStep => {
   if (["completado", "completed"].includes(batch.status)) return "calendar";
   if (["generando", "generating"].includes(batch.status)) return "generate";
@@ -340,7 +350,8 @@ function BootScreen() {
   const batches = useQuery({
     queryKey: ["batches", selectedBusinessId],
     queryFn: async () => listBatches(token, selectedBusinessId ?? ""),
-    enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
+    enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home"),
+    refetchInterval: (query) => ((query.state.data as BatchSummary[] | undefined)?.some(isBatchWorking) ? WORK_POLL_MS : false)
   });
   const selectedBatch = useMemo(
     () => (selectedBatchId ? (batches.data ?? []).find((batch) => batch.id === selectedBatchId) ?? null : null),
@@ -350,7 +361,10 @@ function BootScreen() {
     queryKey: ["batch-detail", selectedBusinessId, selectedBatch?.id],
     queryFn: async () => getBatchDetail(token, selectedBusinessId ?? "", selectedBatch?.id ?? ""),
     enabled: Boolean(token && selectedBusinessId && selectedBatch?.id && bootstrap.data?.nextStep === "home"),
-    refetchInterval: (query) => (hasWorkInProgress(query.state.data as BatchDetail | undefined) ? WORK_POLL_MS : false)
+    refetchInterval: (query) =>
+      hasWorkInProgress(query.state.data as BatchDetail | undefined) || (selectedBatch ? isBatchWorking(selectedBatch) : false)
+        ? WORK_POLL_MS
+        : false
   });
   const scheduledPosts = useQuery({
     queryKey: ["scheduled-posts", selectedBusinessId],
@@ -635,6 +649,7 @@ function BootScreen() {
   const variants = detail?.variants ?? [];
   const jobs = detail?.jobs ?? [];
   const posts = scheduledPosts.data ?? [];
+  const failedWorkJobs = jobs.filter((job) => job.status === "failed" && isWorkJob(job));
   const reviewQueue = variants.filter(isVariantReviewable);
   const currentReview = reviewQueue[Math.min(reviewIndex, Math.max(0, reviewQueue.length - 1))] ?? null;
   const acceptedCount = variants.filter(isVariantAccepted).length;
@@ -749,6 +764,50 @@ function BootScreen() {
     return selectedPage?.pageName ? `Pagina activa: ${selectedPage.pageName}` : "Pagina activa";
   }, [bootstrap.data, bootstrap.isError, bootstrap.isLoading, selectedPage?.pageName]);
 
+  const showPageDirectory = () => {
+    setSelectedBatchId(null);
+    setPendingAutoRouteBatchId(null);
+    setFlow("home");
+  };
+
+  const renderPageChrome = (options: { includeUpload?: boolean } = {}) => {
+    if (!selectedPage) return null;
+    const actions: PageAction[] = [
+      { label: "Paginas", icon: "albums-outline", onPress: showPageDirectory },
+      ...(options.includeUpload
+        ? [
+            {
+              label: uploadSelectedPhotos.isPending ? "Subiendo" : "Subir lote",
+              icon: "cloud-upload-outline" as IconName,
+              onPress: () => uploadSelectedPhotos.mutate(),
+              disabled: uploadSelectedPhotos.isPending || !selectedBusinessId,
+              tone: "primary" as const
+            }
+          ]
+        : []),
+      { label: "Agenda", icon: "calendar-outline", onPress: () => setFlow("calendar"), disabled: !selectedBusinessId },
+      { label: "Ajustes", icon: "settings-outline", onPress: () => setFlow("settings") }
+    ];
+    return (
+      <>
+        <PageHeader page={selectedPage} />
+        <PageActionRail actions={actions} />
+      </>
+    );
+  };
+
+  const renderJobAlerts = () =>
+    failedWorkJobs.length > 0 ? (
+      <Alert
+        tone="critical"
+        message={
+          failedWorkJobs[0]?.userMessage ??
+          (failedWorkJobs[0] as { lastError?: string } | undefined)?.lastError ??
+          "Un proceso del lote fallo."
+        }
+      />
+    ) : null;
+
   const renderOnboarding = () => {
     if (!bootstrap.data?.authenticated) {
       return (
@@ -802,18 +861,8 @@ function BootScreen() {
 
   const renderPageWorkspace = () => (
     <Screen>
-      {selectedPage ? <PageHeader page={selectedPage} onBack={() => setFlow("home")} onSettings={() => setFlow("settings")} /> : null}
-      <View style={styles.flatActions}>
-        <View style={styles.flex}>
-          <Button
-            label={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir lote"}
-            icon="cloud-upload-outline"
-            disabled={uploadSelectedPhotos.isPending || !selectedBusinessId}
-            onPress={() => uploadSelectedPhotos.mutate()}
-          />
-        </View>
-        <Button label="Agenda" variant="secondary" disabled={!selectedBusinessId} onPress={() => setFlow("calendar")} />
-      </View>
+      {renderPageChrome({ includeUpload: true })}
+      {renderJobAlerts()}
       {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
       {posts.length > 0 ? <MiniCalendar posts={posts} onOpenCalendar={() => setFlow("calendar")} /> : null}
       <View style={styles.batchList}>
@@ -858,6 +907,8 @@ function BootScreen() {
 
     return (
       <Screen>
+        {renderPageChrome()}
+        {renderJobAlerts()}
         {selectedBatch ? (
           <BatchTop
             batch={selectedBatch}
@@ -932,6 +983,8 @@ function BootScreen() {
     if (generationBusy) {
       return (
         <Screen>
+          {renderPageChrome()}
+          {renderJobAlerts()}
           {selectedBatch ? (
             <BatchTop
               batch={selectedBatch}
@@ -964,6 +1017,8 @@ function BootScreen() {
 
     return (
       <Screen>
+        {renderPageChrome()}
+        {renderJobAlerts()}
         {selectedBatch ? (
           <BatchTop
             batch={selectedBatch}
@@ -997,6 +1052,8 @@ function BootScreen() {
     if (selectedBatch && (batchDetail.isLoading || (selectedBatch.variantsCount > 0 && variants.length === 0))) {
       return (
         <Screen>
+          {renderPageChrome()}
+          {renderJobAlerts()}
           <BatchTop
             batch={selectedBatch}
             active="review"
@@ -1018,6 +1075,8 @@ function BootScreen() {
     if (!currentReview) {
       return (
         <Screen>
+          {renderPageChrome()}
+          {renderJobAlerts()}
           {selectedBatch ? (
             <BatchTop
               batch={selectedBatch}
@@ -1046,6 +1105,8 @@ function BootScreen() {
     }
     return (
       <Screen>
+        {renderPageChrome()}
+        {renderJobAlerts()}
         {selectedBatch ? (
           <BatchTop
             batch={selectedBatch}
@@ -1073,6 +1134,8 @@ function BootScreen() {
 
   const renderSchedule = () => (
     <Screen>
+      {renderPageChrome()}
+      {renderJobAlerts()}
       {selectedBatch ? (
         <BatchTop
           batch={selectedBatch}
@@ -1105,6 +1168,8 @@ function BootScreen() {
 
   const renderCalendar = () => (
     <Screen>
+      {renderPageChrome()}
+      {renderJobAlerts()}
       {selectedBatch ? (
         <BatchTop
           batch={selectedBatch}
@@ -1114,8 +1179,6 @@ function BootScreen() {
           onMinimize={leaveBatch}
           onDelete={() => confirmDeleteBatch(selectedBatch)}
         />
-      ) : selectedPage ? (
-        <PageHeader page={selectedPage} onBack={() => setFlow("home")} onSettings={() => setFlow("settings")} />
       ) : null}
       <CalendarGrid posts={posts} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
       <Panel title={selectedDay ? `Publicaciones ${formatDate(selectedDay)}` : "Publicaciones"}>
@@ -1139,7 +1202,7 @@ function BootScreen() {
 
   const renderSettings = () => (
     <Screen>
-      <Hero title="Paginas y cuenta" eyebrow="Ajustes" body="Cambia pagina activa, reconecta Facebook o cierra sesion." />
+      {renderPageChrome()}
       <Panel title="Pagina activa">
         <Text style={styles.muted}>{stateText}</Text>
         <Button
@@ -1300,23 +1363,60 @@ function ActivePageBanner({
   );
 }
 
-function PageHeader({ page, onBack, onSettings }: { page: MetaPage; onBack: () => void; onSettings: () => void }) {
+function PageHeader({ page }: { page: MetaPage }) {
   return (
-    <View style={styles.pageHeader}>
-      <HeaderButton label="Paginas" onPress={onBack} />
-      {page.profilePhotoUrl ? (
-        <Image source={{ uri: page.profilePhotoUrl }} style={asImageStyle(styles.pageHeaderAvatar)} />
-      ) : (
-        <View style={styles.pageHeaderAvatarFallback}>
-          <Text style={styles.pageAvatarText}>{page.pageName.slice(0, 1).toUpperCase()}</Text>
-        </View>
-      )}
-      <View style={styles.flex}>
-        <Text style={styles.pageHeaderName} numberOfLines={1}>{page.pageName}</Text>
-        <Text style={styles.pageHeaderMeta} numberOfLines={1}>{page.category ?? "Facebook Page"}</Text>
+    <View style={styles.pageIdentity}>
+      <View style={styles.pageCoverFrame}>
+        {page.coverPhotoUrl ? <Image source={{ uri: page.coverPhotoUrl }} style={asImageStyle(styles.pageCover)} /> : <View style={[styles.pageCover, styles.pageCoverPlaceholder]} />}
       </View>
-      <HeaderButton label="Ajustes" onPress={onSettings} />
+      <View style={styles.pageCardBody}>
+        {page.profilePhotoUrl ? (
+          <Image source={{ uri: page.profilePhotoUrl }} style={asImageStyle(styles.pageAvatar)} />
+        ) : (
+          <View style={styles.pageAvatarPlaceholder}>
+            <Text style={styles.pageAvatarText}>{page.pageName.slice(0, 1).toUpperCase()}</Text>
+          </View>
+        )}
+        <View style={styles.flex}>
+          <Text style={styles.pageName} numberOfLines={2}>{page.pageName}</Text>
+          <Text style={styles.pageMeta} numberOfLines={1}>{page.category ?? "Facebook Page"}</Text>
+        </View>
+      </View>
     </View>
+  );
+}
+
+function PageActionRail({ actions }: { actions: PageAction[] }) {
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pageActionRail}>
+      {actions.map((action) => (
+        <Pressable
+          key={action.label}
+          accessibilityLabel={action.label}
+          style={[
+            styles.pageActionButton,
+            action.tone === "primary" ? styles.pageActionButtonPrimary : null,
+            action.tone === "danger" ? styles.pageActionButtonDanger : null,
+            action.disabled ? styles.disabled : null
+          ]}
+          disabled={action.disabled}
+          onPress={action.onPress}
+          android_ripple={{ color: "rgba(255,255,255,0.08)" }}
+        >
+          <Ionicons name={action.icon} size={16} color={action.tone === "primary" ? palette.ink : action.tone === "danger" ? palette.danger : palette.text} />
+          <Text
+            style={[
+              styles.pageActionText,
+              action.tone === "primary" ? styles.pageActionTextPrimary : null,
+              action.tone === "danger" ? styles.headerButtonDangerText : null
+            ]}
+            numberOfLines={1}
+          >
+            {action.label}
+          </Text>
+        </Pressable>
+      ))}
+    </ScrollView>
   );
 }
 
@@ -2121,12 +2221,25 @@ const styles = StyleSheet.create({
   activeMeta: { color: palette.muted, fontSize: 13, fontWeight: "700" },
   changePagePill: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: palette.white, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8 },
   changePageText: { color: palette.ink, fontSize: 12, fontWeight: "900" },
-  pageHeader: { minHeight: 58, flexDirection: "row", alignItems: "center", gap: 10 },
-  pageHeaderAvatar: { width: 46, height: 46, borderRadius: 8 },
-  pageHeaderAvatarFallback: { width: 46, height: 46, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: palette.blue },
-  pageHeaderName: { color: palette.text, fontSize: 18, fontWeight: "900" },
-  pageHeaderMeta: { color: palette.muted, fontSize: 12, fontWeight: "700" },
-  flatActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  pageIdentity: { overflow: "hidden", borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel2 },
+  pageActionRail: { gap: 8, paddingVertical: 2 },
+  pageActionButton: {
+    minWidth: 96,
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 12,
+    backgroundColor: palette.surface
+  },
+  pageActionButtonPrimary: { backgroundColor: palette.white, borderColor: palette.white },
+  pageActionButtonDanger: { borderColor: "rgba(255,143,143,0.34)", backgroundColor: "rgba(255,143,143,0.10)" },
+  pageActionText: { color: palette.text, fontSize: 12, fontWeight: "900" },
+  pageActionTextPrimary: { color: palette.ink },
   batchList: { gap: 8 },
   batchTop: { gap: 8 },
   batchTopRow: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 10 },
