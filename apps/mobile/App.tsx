@@ -74,6 +74,14 @@ WebBrowser.maybeCompleteAuthSession();
 type FlowStep = "home" | "styles" | "generate" | "review" | "schedule" | "calendar" | "settings";
 type IconName = ComponentProps<typeof Ionicons>["name"];
 type PeriodDays = 7 | 14 | 30;
+type BatchFlowStep = Extract<FlowStep, "styles" | "generate" | "review" | "schedule" | "calendar">;
+type BatchProcessState = "done" | "active" | "ready" | "locked";
+type BatchProcessStep = {
+  key: BatchFlowStep;
+  label: string;
+  icon: IconName;
+  state: BatchProcessState;
+};
 type PageAction = {
   label: string;
   icon: IconName;
@@ -659,10 +667,57 @@ function BootScreen() {
   const analysisTotal = photos.length;
   const generationBusy = generateVariants.isPending || variants.some(isVariantBusy) || hasActiveWorkJobs(jobs);
   const readyPhotoCount = photos.filter(isPhotoAnalyzed).length;
+  const photosReadyForGeneration = photos.length > 0 && analyzedCount === photos.length && !photos.some(isPhotoBusy);
   const hasVariants = variants.length > 0;
   const failedPosts = posts.filter(isPostFailed);
+  const selectedBatchPosts = selectedBatch ? posts.filter((post) => post.batchId === selectedBatch.id) : [];
   const refreshing =
     tokenQuery.isFetching || bootstrap.isFetching || pages.isFetching || batches.isFetching || batchDetail.isFetching || scheduledPosts.isFetching;
+
+  const batchProcessSteps = useMemo<BatchProcessStep[]>(() => {
+    if (!selectedBatch) return [];
+    const processOrder: BatchFlowStep[] = ["styles", "generate", "review", "schedule", "calendar"];
+    const labels: Record<BatchFlowStep, { label: string; icon: IconName }> = {
+      styles: { label: "Fotos", icon: "images-outline" },
+      generate: { label: "Generar", icon: "sparkles-outline" },
+      review: { label: "Revisar", icon: "albums-outline" },
+      schedule: { label: "Programar", icon: "calendar-outline" },
+      calendar: { label: "Agenda", icon: "calendar-number-outline" }
+    };
+    const variantsStarted = variants.length > 0 || selectedBatch.variantsCount > 0 || generationBusy;
+    const variantsComplete = variantsStarted && !generationBusy && (variants.length > 0 || selectedBatch.variantsCount > 0);
+    const reviewComplete = variantsComplete && variants.length > 0 && reviewQueue.length === 0;
+    const calendarReady =
+      selectedBatchPosts.length > 0 || ["programado", "scheduled", "completado", "completed"].includes(selectedBatch.status);
+    const completed: Record<BatchFlowStep, boolean> = {
+      styles: photosReadyForGeneration || variantsStarted || calendarReady,
+      generate: variantsComplete || calendarReady,
+      review: reviewComplete || calendarReady,
+      schedule: calendarReady,
+      calendar: false
+    };
+    const ready: Record<BatchFlowStep, boolean> = {
+      styles: true,
+      generate: photosReadyForGeneration,
+      review: variantsComplete,
+      schedule: reviewComplete && acceptedCount > 0,
+      calendar: calendarReady
+    };
+    const current = processOrder.includes(flow as BatchFlowStep) ? (flow as BatchFlowStep) : flowForBatchSummary(selectedBatch);
+    return processOrder.map((key) => {
+      const state: BatchProcessState = current === key ? "active" : completed[key] ? "done" : ready[key] ? "ready" : "locked";
+      return { key, label: labels[key].label, icon: labels[key].icon, state };
+    });
+  }, [
+    acceptedCount,
+    flow,
+    generationBusy,
+    photosReadyForGeneration,
+    reviewQueue.length,
+    selectedBatch,
+    selectedBatchPosts.length,
+    variants.length
+  ]);
 
   const leaveBatch = () => {
     setSelectedBatchId(null);
@@ -698,6 +753,12 @@ function BootScreen() {
       setFlow("review");
     }
   }, [flow, generationBusy, reviewQueue.length]);
+
+  useEffect(() => {
+    if (flow === "generate" && !generationBusy && !hasVariants && !photosReadyForGeneration) {
+      setFlow("styles");
+    }
+  }, [flow, generationBusy, hasVariants, photosReadyForGeneration]);
 
   useEffect(() => {
     if (!detail || pendingAutoRouteBatchId !== detail.batch.id) return;
@@ -785,7 +846,6 @@ function BootScreen() {
             }
           ]
         : []),
-      { label: "Agenda", icon: "calendar-outline", onPress: () => setFlow("calendar"), disabled: !selectedBusinessId },
       { label: "Ajustes", icon: "settings-outline", onPress: () => setFlow("settings") }
     ];
     return (
@@ -864,7 +924,6 @@ function BootScreen() {
       {renderPageChrome({ includeUpload: true })}
       {renderJobAlerts()}
       {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
-      {posts.length > 0 ? <MiniCalendar posts={posts} onOpenCalendar={() => setFlow("calendar")} /> : null}
       <View style={styles.batchList}>
         {(batches.data ?? []).length === 0 ? <EmptyState title="Sin lotes" body="Sube fotos para crear el primero." /> : null}
         {(batches.data ?? []).map((batch) => (
@@ -913,8 +972,8 @@ function BootScreen() {
           <BatchTop
             batch={selectedBatch}
             active="styles"
+            steps={batchProcessSteps}
             deleting={removeBatch.isPending}
-            onStep={setFlow}
             onMinimize={leaveBatch}
             onDelete={() => confirmDeleteBatch(selectedBatch)}
           />
@@ -966,7 +1025,7 @@ function BootScreen() {
         <ActionPair
           primaryLabel={primaryLabel}
           primaryIcon={primaryIcon}
-          primaryDisabled={!generationBusy && !hasVariants && acceptedCount === 0 && readyPhotoCount === 0}
+          primaryDisabled={!generationBusy && !hasVariants && acceptedCount === 0 && !photosReadyForGeneration}
           onPrimary={handlePrimary}
           secondaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir mas"}
           secondaryIcon="add-circle-outline"
@@ -989,8 +1048,8 @@ function BootScreen() {
             <BatchTop
               batch={selectedBatch}
               active="generate"
+              steps={batchProcessSteps}
               deleting={removeBatch.isPending}
-              onStep={setFlow}
               onMinimize={leaveBatch}
               onDelete={() => confirmDeleteBatch(selectedBatch)}
             />
@@ -1002,14 +1061,7 @@ function BootScreen() {
             </View>
             <ProgressBar progress={pct(done, Math.max(total, done))} />
             <Text style={styles.muted}>Aplicando estilo, preparando imagen y escribiendo caption.</Text>
-            <ActionPair
-              primaryLabel="Ver lote"
-              primaryIcon="grid-outline"
-              onPrimary={() => setFlow("styles")}
-              secondaryLabel="Pagina"
-              secondaryIcon="albums-outline"
-              onSecondary={leaveBatch}
-            />
+            <Button label="Salir del lote" icon="albums-outline" variant="secondary" onPress={leaveBatch} />
           </Panel>
         </Screen>
       );
@@ -1023,8 +1075,8 @@ function BootScreen() {
           <BatchTop
             batch={selectedBatch}
             active="generate"
+            steps={batchProcessSteps}
             deleting={removeBatch.isPending}
-            onStep={setFlow}
             onMinimize={leaveBatch}
             onDelete={() => confirmDeleteBatch(selectedBatch)}
           />
@@ -1037,7 +1089,7 @@ function BootScreen() {
           <Button
             label={generateVariants.isPending ? "Enviando..." : "Confirmar"}
             icon="checkmark-circle-outline"
-            disabled={generateVariants.isPending || readyPhotoCount === 0 || hasVariants}
+            disabled={generateVariants.isPending || !photosReadyForGeneration || hasVariants}
             onPress={() => generateVariants.mutate()}
           />
         </Panel>
@@ -1057,8 +1109,8 @@ function BootScreen() {
           <BatchTop
             batch={selectedBatch}
             active="review"
+            steps={batchProcessSteps}
             deleting={removeBatch.isPending}
-            onStep={setFlow}
             onMinimize={leaveBatch}
             onDelete={() => confirmDeleteBatch(selectedBatch)}
           />
@@ -1081,8 +1133,8 @@ function BootScreen() {
             <BatchTop
               batch={selectedBatch}
               active="review"
+              steps={batchProcessSteps}
               deleting={removeBatch.isPending}
-              onStep={setFlow}
               onMinimize={leaveBatch}
               onDelete={() => confirmDeleteBatch(selectedBatch)}
             />
@@ -1090,15 +1142,11 @@ function BootScreen() {
           <Panel title="Resumen">
             <Text style={styles.bigNumber}>{acceptedCount}</Text>
             <Text style={styles.muted}>Variantes aceptadas</Text>
-            <ActionPair
-              primaryLabel="Programar"
-              primaryIcon="calendar-outline"
-              primaryDisabled={acceptedCount === 0}
-              onPrimary={() => setFlow("schedule")}
-              secondaryLabel="Ver lote"
-              secondaryIcon="grid-outline"
-              onSecondary={() => setFlow("styles")}
-            />
+            {acceptedCount > 0 ? (
+              <Button label="Continuar a programar" icon="calendar-outline" onPress={() => setFlow("schedule")} />
+            ) : (
+              <Button label="Salir del lote" icon="albums-outline" variant="secondary" onPress={leaveBatch} />
+            )}
           </Panel>
         </Screen>
       );
@@ -1111,8 +1159,8 @@ function BootScreen() {
           <BatchTop
             batch={selectedBatch}
             active="review"
+            steps={batchProcessSteps}
             deleting={removeBatch.isPending}
-            onStep={setFlow}
             onMinimize={leaveBatch}
             onDelete={() => confirmDeleteBatch(selectedBatch)}
           />
@@ -1140,8 +1188,8 @@ function BootScreen() {
         <BatchTop
           batch={selectedBatch}
           active="schedule"
+          steps={batchProcessSteps}
           deleting={removeBatch.isPending}
-          onStep={setFlow}
           onMinimize={leaveBatch}
           onDelete={() => confirmDeleteBatch(selectedBatch)}
         />
@@ -1174,8 +1222,8 @@ function BootScreen() {
         <BatchTop
           batch={selectedBatch}
           active="calendar"
+          steps={batchProcessSteps}
           deleting={removeBatch.isPending}
-          onStep={setFlow}
           onMinimize={leaveBatch}
           onDelete={() => confirmDeleteBatch(selectedBatch)}
         />
@@ -1423,44 +1471,70 @@ function PageActionRail({ actions }: { actions: PageAction[] }) {
 function BatchTop({
   batch,
   active,
+  steps,
   deleting,
-  onStep,
   onMinimize,
   onDelete
 }: {
   batch: BatchSummary;
   active: FlowStep;
+  steps: BatchProcessStep[];
   deleting: boolean;
-  onStep: (step: FlowStep) => void;
   onMinimize: () => void;
   onDelete: () => void;
 }) {
-  const steps: Array<{ key: FlowStep; label: string; icon: IconName }> = [
-    { key: "styles", label: "Fotos", icon: "images-outline" },
-    { key: "generate", label: "Generar", icon: "sparkles-outline" },
-    { key: "review", label: "Revisar", icon: "albums-outline" },
-    { key: "schedule", label: "Programar", icon: "calendar-outline" },
-    { key: "calendar", label: "Agenda", icon: "calendar-number-outline" }
-  ];
-
   return (
     <View style={styles.batchTop}>
-      <View style={styles.batchTopRow}>
-        <HeaderButton label="Salir" disabled={deleting} onPress={onMinimize} />
-        <View style={styles.flex}>
-          <Text style={styles.batchTitle} numberOfLines={1}>{formatDate(batch.createdAt)}</Text>
-          <Text style={styles.batchMeta} numberOfLines={1}>{batch.photosCount} fotos - {batch.variantsCount} variantes - {batchStatusText(batch.status)}</Text>
-        </View>
-        <HeaderButton label="Eliminar" tone="danger" disabled={deleting} onPress={onDelete} />
+      <View style={styles.batchTitleBlock}>
+        <Text style={styles.batchTitle} numberOfLines={1}>Lote {formatDate(batch.createdAt)}</Text>
+        <Text style={styles.batchMeta} numberOfLines={1}>{batch.photosCount} fotos - {batch.variantsCount} variantes - {batchStatusText(batch.status)}</Text>
       </View>
-      <View style={styles.stepNav}>
-        {steps.map((step) => (
-          <Pressable key={step.key} style={[styles.stepChip, active === step.key ? styles.stepChipActive : null]} onPress={() => onStep(step.key)}>
-            <Ionicons name={step.icon} size={15} color={active === step.key ? palette.ink : palette.muted} />
-            <Text style={[styles.stepChipText, active === step.key ? styles.stepChipTextActive : null]} numberOfLines={1}>{step.label}</Text>
-          </Pressable>
-        ))}
+      <BatchProgressBar steps={steps} active={active} />
+      <View style={styles.batchActionRow}>
+        <MiniButton label="Salir del lote" icon="remove-outline" disabled={deleting} onPress={onMinimize} />
+        <MiniButton label={deleting ? "Eliminando" : "Eliminar lote"} icon="trash-outline" tone="danger" disabled={deleting} onPress={onDelete} />
       </View>
+    </View>
+  );
+}
+
+function BatchProgressBar({ steps, active }: { steps: BatchProcessStep[]; active: FlowStep }) {
+  return (
+    <View style={styles.processRail}>
+      {steps.map((step) => {
+        const isActive = step.state === "active" || active === step.key;
+        const isDone = step.state === "done";
+        const isLocked = step.state === "locked";
+        return (
+          <View key={step.key} style={styles.processItem}>
+            <View
+              style={[
+                styles.processDot,
+                isDone ? styles.processDotDone : null,
+                isActive ? styles.processDotActive : null,
+                isLocked ? styles.processDotLocked : null
+              ]}
+            >
+              <Ionicons
+                name={isDone ? "checkmark" : step.icon}
+                size={14}
+                color={isDone || isActive ? palette.ink : isLocked ? "#66707c" : palette.muted}
+              />
+            </View>
+            <Text
+              style={[
+                styles.processLabel,
+                isDone ? styles.processLabelDone : null,
+                isActive ? styles.processLabelActive : null,
+                isLocked ? styles.processLabelLocked : null
+              ]}
+              numberOfLines={1}
+            >
+              {step.label}
+            </Text>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -2241,15 +2315,30 @@ const styles = StyleSheet.create({
   pageActionText: { color: palette.text, fontSize: 12, fontWeight: "900" },
   pageActionTextPrimary: { color: palette.ink },
   batchList: { gap: 8 },
-  batchTop: { gap: 8 },
-  batchTopRow: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 10 },
+  batchTop: { gap: 8, borderWidth: 1, borderColor: palette.border, borderRadius: 8, padding: 10, backgroundColor: palette.panel },
+  batchTitleBlock: { gap: 2 },
   batchTitle: { color: palette.text, fontSize: 18, fontWeight: "900" },
   batchMeta: { color: palette.muted, fontSize: 12, fontWeight: "700" },
-  stepNav: { flexDirection: "row", gap: 5 },
-  stepChip: { flex: 1, minHeight: 38, alignItems: "center", justifyContent: "center", gap: 2, borderRadius: 8, backgroundColor: palette.surface },
-  stepChipActive: { backgroundColor: palette.white },
-  stepChipText: { color: palette.muted, fontSize: 9, fontWeight: "900" },
-  stepChipTextActive: { color: palette.ink },
+  batchActionRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  processRail: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 4, paddingVertical: 2 },
+  processItem: { flex: 1, alignItems: "center", gap: 4, minWidth: 0 },
+  processDot: {
+    width: 31,
+    height: 31,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface
+  },
+  processDotDone: { backgroundColor: palette.green, borderColor: palette.green },
+  processDotActive: { backgroundColor: palette.white, borderColor: palette.white },
+  processDotLocked: { backgroundColor: "#101317", borderColor: "#252b33" },
+  processLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", textAlign: "center" },
+  processLabelDone: { color: palette.green },
+  processLabelActive: { color: palette.text },
+  processLabelLocked: { color: "#66707c" },
   hero: { gap: 7, paddingVertical: 4 },
   eyebrow: { color: palette.blue, fontSize: 12, fontWeight: "900", textTransform: "uppercase" },
   heroTitle: { color: palette.text, fontSize: 29, fontWeight: "900", letterSpacing: 0 },

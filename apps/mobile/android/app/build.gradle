@@ -96,8 +96,8 @@ android {
         applicationId 'com.gabriel.fbmaniaco'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 12
-        versionName "0.1.11"
+        versionCode 13
+        versionName "0.1.12"
         ndk {
             abiFilters(*releaseArchitectures)
         }
