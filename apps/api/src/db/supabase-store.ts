@@ -961,7 +961,7 @@ export class SupabaseDataStoreCore {
     workspaceId: string;
     businessId: string;
     batchId: string;
-  }): Promise<{ batch: BatchSummary; photos: Photo[]; variants: []; jobs: StoredJob[] } | null> {
+  }): Promise<{ batch: BatchSummary; photos: Photo[]; variants: Variant[]; jobs: StoredJob[] } | null> {
     await this.requireBusiness(input.workspaceId, input.businessId);
     const batchResult = await this.pool.query(
       "select * from public.batches where workspace_id = $1 and business_id = $2 and id = $3",
@@ -972,6 +972,12 @@ export class SupabaseDataStoreCore {
       "select * from public.photos where workspace_id = $1 and business_id = $2 and batch_id = $3 order by created_at asc",
       [input.workspaceId, input.businessId, input.batchId]
     );
+    const variants = await this.pool.query(
+      `select * from public.variants
+       where workspace_id = $1 and business_id = $2 and batch_id = $3 and status <> 'eliminada'
+       order by photo_id asc, variant_index asc`,
+      [input.workspaceId, input.businessId, input.batchId]
+    );
     const jobs = await this.pool.query(
       "select * from public.jobs where workspace_id = $1 and batch_id = $2 order by created_at desc",
       [input.workspaceId, input.batchId]
@@ -979,7 +985,7 @@ export class SupabaseDataStoreCore {
     return {
       batch: toBatch(batchResult.rows[0]),
       photos: photos.rows.map(toPhoto),
-      variants: [],
+      variants: variants.rows.map(toVariant),
       jobs: jobs.rows.map(toJob)
     };
   }
