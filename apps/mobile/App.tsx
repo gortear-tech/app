@@ -33,6 +33,7 @@ import {
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  StatusBar as NativeStatusBar,
   type StyleProp,
   Text,
   TextInput,
@@ -811,7 +812,7 @@ function BootScreen() {
             onPress={() => uploadSelectedPhotos.mutate()}
           />
         </View>
-        <IconButton icon="calendar-outline" label="Calendario" disabled={!selectedBusinessId} onPress={() => setFlow("calendar")} />
+        <Button label="Agenda" variant="secondary" disabled={!selectedBusinessId} onPress={() => setFlow("calendar")} />
       </View>
       {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
       {posts.length > 0 ? <MiniCalendar posts={posts} onOpenCalendar={() => setFlow("calendar")} /> : null}
@@ -1198,7 +1199,7 @@ function BootScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <StatusBar style="light" />
+      <StatusBar style="light" backgroundColor={palette.bg} />
       <View style={styles.shell}>
         <ScrollView
           contentContainerStyle={styles.container}
@@ -1302,7 +1303,7 @@ function ActivePageBanner({
 function PageHeader({ page, onBack, onSettings }: { page: MetaPage; onBack: () => void; onSettings: () => void }) {
   return (
     <View style={styles.pageHeader}>
-      <IconButton icon="chevron-back" label="Paginas" onPress={onBack} />
+      <HeaderButton label="Paginas" onPress={onBack} />
       {page.profilePhotoUrl ? (
         <Image source={{ uri: page.profilePhotoUrl }} style={asImageStyle(styles.pageHeaderAvatar)} />
       ) : (
@@ -1314,7 +1315,7 @@ function PageHeader({ page, onBack, onSettings }: { page: MetaPage; onBack: () =
         <Text style={styles.pageHeaderName} numberOfLines={1}>{page.pageName}</Text>
         <Text style={styles.pageHeaderMeta} numberOfLines={1}>{page.category ?? "Facebook Page"}</Text>
       </View>
-      <IconButton icon="settings-outline" label="Ajustes" onPress={onSettings} />
+      <HeaderButton label="Ajustes" onPress={onSettings} />
     </View>
   );
 }
@@ -1345,12 +1346,12 @@ function BatchTop({
   return (
     <View style={styles.batchTop}>
       <View style={styles.batchTopRow}>
-        <IconButton icon="chevron-back" label="Salir del lote" disabled={deleting} onPress={onMinimize} />
+        <HeaderButton label="Salir" disabled={deleting} onPress={onMinimize} />
         <View style={styles.flex}>
           <Text style={styles.batchTitle} numberOfLines={1}>{formatDate(batch.createdAt)}</Text>
           <Text style={styles.batchMeta} numberOfLines={1}>{batch.photosCount} fotos - {batch.variantsCount} variantes - {batchStatusText(batch.status)}</Text>
         </View>
-        <IconButton icon="trash-outline" label="Eliminar lote" disabled={deleting} onPress={onDelete} />
+        <HeaderButton label="Eliminar" tone="danger" disabled={deleting} onPress={onDelete} />
       </View>
       <View style={styles.stepNav}>
         {steps.map((step) => (
@@ -1397,6 +1398,32 @@ function IconButton({ icon, label, onPress, disabled }: { icon: IconName; label:
   return (
     <Pressable accessibilityLabel={label} style={[styles.iconButton, disabled ? styles.disabled : null]} disabled={disabled} onPress={onPress}>
       <Ionicons name={icon} size={21} color={palette.text} />
+    </Pressable>
+  );
+}
+
+function HeaderButton({
+  label,
+  onPress,
+  disabled,
+  tone
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean | undefined;
+  tone?: "danger";
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={label}
+      style={[styles.headerButton, tone === "danger" ? styles.headerButtonDanger : null, disabled ? styles.disabled : null]}
+      disabled={disabled}
+      onPress={onPress}
+      android_ripple={{ color: "rgba(255,255,255,0.08)" }}
+    >
+      <Text style={[styles.headerButtonText, tone === "danger" ? styles.headerButtonDangerText : null]} numberOfLines={1}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -2031,7 +2058,13 @@ const palette = {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: palette.bg },
   shell: { flex: 1 },
-  container: { flexGrow: 1, gap: 10, padding: 12, paddingBottom: 28 },
+  container: {
+    flexGrow: 1,
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: Platform.OS === "android" ? (NativeStatusBar.currentHeight ?? 0) + 12 : 12,
+    paddingBottom: 28
+  },
   screen: { gap: 10 },
   centeredScreen: { flex: 1, minHeight: 520, justifyContent: "center", gap: 12 },
   centeredBlock: { minHeight: 180, alignItems: "center", justifyContent: "center" },
@@ -2049,6 +2082,20 @@ const styles = StyleSheet.create({
     borderColor: palette.border,
     backgroundColor: palette.panel
   },
+  headerButton: {
+    minWidth: 72,
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 10,
+    backgroundColor: palette.surface
+  },
+  headerButtonDanger: { borderColor: "rgba(255,143,143,0.34)", backgroundColor: "rgba(255,143,143,0.10)" },
+  headerButtonText: { color: palette.text, fontSize: 12, fontWeight: "900" },
+  headerButtonDangerText: { color: palette.danger },
   statusCard: {
     minHeight: 64,
     flexDirection: "row",
