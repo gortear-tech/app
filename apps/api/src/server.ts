@@ -73,7 +73,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   await app.register(cors, { origin: input.config.corsOrigin });
   await app.register(swagger, {
     openapi: {
-      info: { title: "FBmaniaco API", version: "0.1.0" },
+      info: { title: "Maniaco API", version: "0.1.0" },
       components: {
         securitySchemes: {
           bearerAuth: { type: "http", scheme: "bearer" }
@@ -462,15 +462,15 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   app.get("/legal/privacy", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(
       legalPage(
-        "Politica de privacidad de FBmaniaco",
-        `<h1>Politica de privacidad de FBmaniaco</h1>
-        <p>FBmaniaco ayuda a administrar contenido para paginas de Facebook conectadas por el usuario. Solo usamos los datos necesarios para autenticar la cuenta, listar paginas autorizadas, preparar contenido, programar publicaciones y mostrar resultados operativos dentro de la aplicacion.</p>
+        "Politica de privacidad de Maniaco",
+        `<h1>Politica de privacidad de Maniaco</h1>
+        <p>Maniaco ayuda a administrar contenido para paginas de Facebook conectadas por el usuario. Solo usamos los datos necesarios para autenticar la cuenta, listar paginas autorizadas, preparar contenido, programar publicaciones y mostrar resultados operativos dentro de la aplicacion.</p>
         <h2>Datos que tratamos</h2>
         <p>Podemos almacenar identificadores de usuario, workspace, paginas de Facebook autorizadas, permisos concedidos, imagenes subidas por el usuario, textos generados o editados, estados de jobs y registros tecnicos necesarios para seguridad y soporte.</p>
         <h2>Uso de datos de Meta</h2>
         <p>Los datos recibidos desde Meta Graph API se usan unicamente para conectar paginas autorizadas, validar permisos, publicar contenido aprobado por el usuario y consultar resultados relacionados con esas paginas. No vendemos datos ni los compartimos con terceros para publicidad.</p>
         <h2>Conservacion y eliminacion</h2>
-        <p>El usuario puede solicitar eliminacion de datos escribiendo a ${legalContactEmail}. Tambien puede desconectar FBmaniaco desde la configuracion de Facebook o Meta.</p>
+        <p>El usuario puede solicitar eliminacion de datos escribiendo a ${legalContactEmail}. Tambien puede desconectar Maniaco desde la configuracion de Facebook o Meta.</p>
         <h2>Contacto</h2>
         <p>Para privacidad, soporte o eliminacion de datos: ${legalContactEmail}.</p>`
       )
@@ -480,13 +480,13 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   app.get("/legal/terms", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(
       legalPage(
-        "Condiciones de servicio de FBmaniaco",
-        `<h1>Condiciones de servicio de FBmaniaco</h1>
-        <p>FBmaniaco es una herramienta para organizar, generar, revisar, programar y publicar contenido en paginas de Facebook autorizadas por el usuario.</p>
+        "Condiciones de servicio de Maniaco",
+        `<h1>Condiciones de servicio de Maniaco</h1>
+        <p>Maniaco es una herramienta para organizar, generar, revisar, programar y publicar contenido en paginas de Facebook autorizadas por el usuario.</p>
         <h2>Responsabilidad del usuario</h2>
         <p>El usuario es responsable del contenido que sube, aprueba y publica, asi como de contar con permisos suficientes sobre las paginas conectadas.</p>
         <h2>Publicacion y automatizacion</h2>
-        <p>Las acciones sensibles, incluyendo publicacion en Facebook, requieren autorizacion del usuario y permisos validos de Meta. FBmaniaco puede procesar tareas en segundo plano para evitar bloqueos de la aplicacion.</p>
+        <p>Las acciones sensibles, incluyendo publicacion en Facebook, requieren autorizacion del usuario y permisos validos de Meta. Maniaco puede procesar tareas en segundo plano para evitar bloqueos de la aplicacion.</p>
         <h2>Disponibilidad</h2>
         <p>El servicio puede cambiar durante el piloto privado. Trabajamos para mantener disponibilidad, seguridad y trazabilidad de las acciones importantes.</p>
         <h2>Contacto</h2>
@@ -498,9 +498,9 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   app.get("/legal/data-deletion", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(
       legalPage(
-        "Eliminacion de datos de FBmaniaco",
-        `<h1>Eliminacion de datos de FBmaniaco</h1>
-        <p>Para solicitar la eliminacion de datos asociados a FBmaniaco, envia un correo a ${legalContactEmail} con el asunto "Eliminar datos FBmaniaco".</p>
+        "Eliminacion de datos de Maniaco",
+        `<h1>Eliminacion de datos de Maniaco</h1>
+        <p>Para solicitar la eliminacion de datos asociados a Maniaco, envia un correo a ${legalContactEmail} con el asunto "Eliminar datos Maniaco".</p>
         <p>Incluye el correo o cuenta con la que usas la aplicacion y, si aplica, el nombre de la pagina de Facebook conectada. Procesaremos la solicitud y eliminaremos o anonimizaremos los datos operativos que no debamos conservar por seguridad, auditoria o cumplimiento.</p>
         <p>Tambien puedes revocar el acceso desde Facebook o Meta en la seccion de apps y sitios web conectados.</p>`
       )

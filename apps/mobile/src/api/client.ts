@@ -219,7 +219,7 @@ export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus
       authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  }, "No pudimos iniciar FBmaniaco.");
+  }, "No pudimos iniciar Maniaco.");
   return json as BootstrapStatus;
 };
 

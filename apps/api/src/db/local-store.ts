@@ -254,7 +254,7 @@ export class LocalDataStore implements DataStore {
     const timestamp = now();
     const workspace: Workspace = {
       id: randomUUID(),
-      name: "Mi workspace FBmaniaco",
+      name: "Mi workspace Maniaco",
       ownerUserId: userId,
       status: "activo",
       createdAt: timestamp,
@@ -493,7 +493,7 @@ export class LocalDataStore implements DataStore {
       pages: [
         {
           metaPageId: "mock-page-1",
-          pageName: "FBmaniaco Demo",
+          pageName: "Maniaco Demo",
           coverPhotoUrl: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=1200",
           profilePhotoUrl: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?w=320",
           category: "Facebook Page",

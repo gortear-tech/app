@@ -52,7 +52,7 @@ export const authenticateBearer = async (input: {
       : typeof result.data.user.user_metadata?.full_name === "string"
         ? result.data.user.user_metadata.full_name
         : result.data.user.is_anonymous
-          ? "Usuario FBmaniaco"
+          ? "Usuario Maniaco"
           : undefined;
   const actor = { userId: result.data.user.id, email };
   const user = await input.store.upsertLocalUser({

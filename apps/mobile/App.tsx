@@ -431,7 +431,7 @@ function BootScreen() {
     updatePromptShown.current = true;
     NativeAlert.alert(
       availableUpdate.mandatory ? "Actualizacion requerida" : "Actualizacion disponible",
-      availableUpdate.notes ?? `Ya esta lista FBmaniaco ${availableUpdate.versionName}.`,
+      availableUpdate.notes ?? `Ya esta lista Maniaco ${availableUpdate.versionName}.`,
       [
         ...(availableUpdate.mandatory ? [] : [{ text: "Despues", style: "cancel" as const }]),
         { text: "Actualizar", onPress: () => void openAppUpdate(availableUpdate) }
@@ -842,7 +842,7 @@ function BootScreen() {
 
   const stateText = useMemo(() => {
     if (bootstrap.isLoading) return "Revisando conexion inicial...";
-    if (bootstrap.isError) return "No pudimos conectar con FBmaniaco.";
+    if (bootstrap.isError) return "No pudimos conectar con Maniaco.";
     if (!bootstrap.data?.authenticated) return "Conecta Facebook para empezar.";
     if (bootstrap.data.nextStep === "connect_meta" || bootstrap.data.nextStep === "recover_meta") return "Sesion segura lista.";
     if (bootstrap.data.nextStep === "select_page") return "Facebook conectado: elige pagina.";
@@ -1368,7 +1368,7 @@ function TopBar({ busy, onRefresh }: { busy: boolean; onRefresh: () => void }) {
   return (
     <View style={styles.topBar}>
       <View style={styles.flex}>
-        <Text style={styles.productKicker}>FBmaniaco</Text>
+        <Text style={styles.productKicker}>Maniaco</Text>
         <Text style={styles.productTitle}>App Perrona</Text>
       </View>
       <IconButton icon={busy ? "sync" : "refresh"} label="Actualizar" disabled={busy} onPress={onRefresh} />

@@ -389,7 +389,7 @@ export class SupabaseDataStoreCore {
       const workspaceId = randomUUID();
       const workspaceResult = await client.query(
         `insert into public.workspaces (id, name, owner_user_id, status, created_at, updated_at)
-         values ($1, 'Mi workspace FBmaniaco', $2, 'activo', now(), now())
+         values ($1, 'Mi workspace Maniaco', $2, 'activo', now(), now())
          returning *`,
         [workspaceId, userId]
       );
@@ -636,7 +636,7 @@ export class SupabaseDataStoreCore {
       pages: [
         {
           metaPageId: "mock-page-1",
-          pageName: "FBmaniaco Demo",
+          pageName: "Maniaco Demo",
           coverPhotoUrl: "https://images.unsplash.com/photo-1497366754035-f200968a6e72?w=1200",
           profilePhotoUrl: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?w=320",
           category: "Facebook Page",

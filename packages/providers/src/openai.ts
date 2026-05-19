@@ -273,7 +273,7 @@ export const createVisionAnalysisProvider = (config: OpenAiProviderConfig): Visi
                 {
                   type: "input_text",
                   text:
-                    "Analiza la imagen para FBmaniaco. Devuelve solo datos observables y evita inferir claims comerciales, precios o promociones no visibles."
+                    "Analiza la imagen para Maniaco. Devuelve solo datos observables y evita inferir claims comerciales, precios o promociones no visibles."
                 }
               ]
             },

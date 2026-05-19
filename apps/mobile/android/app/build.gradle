@@ -96,16 +96,16 @@ android {
         applicationId 'com.gabriel.fbmaniaco'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 14
-        versionName "0.1.13"
+        versionCode 15
+        versionName "0.1.14"
         ndk {
             abiFilters(*releaseArchitectures)
         }
     }
-    def releaseStoreFilePath = System.getenv("FBMANIACO_UPLOAD_STORE_FILE")
-    def releaseStorePassword = System.getenv("FBMANIACO_UPLOAD_STORE_PASSWORD")
-    def releaseKeyAlias = System.getenv("FBMANIACO_UPLOAD_KEY_ALIAS")
-    def releaseKeyPassword = System.getenv("FBMANIACO_UPLOAD_KEY_PASSWORD")
+    def releaseStoreFilePath = System.getenv("MANIACO_UPLOAD_STORE_FILE")
+    def releaseStorePassword = System.getenv("MANIACO_UPLOAD_STORE_PASSWORD")
+    def releaseKeyAlias = System.getenv("MANIACO_UPLOAD_KEY_ALIAS")
+    def releaseKeyPassword = System.getenv("MANIACO_UPLOAD_KEY_PASSWORD")
     def hasReleaseSigning = releaseStoreFilePath && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
 
     signingConfigs {
@@ -130,7 +130,7 @@ android {
         }
         release {
             if (!hasReleaseSigning) {
-                throw new GradleException("Release signing is required. Set FBMANIACO_UPLOAD_STORE_FILE, FBMANIACO_UPLOAD_STORE_PASSWORD, FBMANIACO_UPLOAD_KEY_ALIAS, and FBMANIACO_UPLOAD_KEY_PASSWORD.")
+                throw new GradleException("Release signing is required. Set MANIACO_UPLOAD_STORE_FILE, MANIACO_UPLOAD_STORE_PASSWORD, MANIACO_UPLOAD_KEY_ALIAS, and MANIACO_UPLOAD_KEY_PASSWORD.")
             }
             signingConfig signingConfigs.release
             shrinkResources (findProperty('android.enableShrinkResourcesInReleaseBuilds')?.toBoolean() ?: false)
