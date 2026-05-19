@@ -65,6 +65,7 @@ import {
 } from "./src/api/client";
 import type { PhotoUploadFile } from "./src/api/client";
 import { getMobileConfig } from "./src/config";
+import { checkForAppUpdate, openAppUpdate, type AppUpdateInfo } from "./src/update";
 
 const queryClient = new QueryClient();
 WebBrowser.maybeCompleteAuthSession();
@@ -292,6 +293,8 @@ function BootScreen() {
   const [periodDays, setPeriodDays] = useState<PeriodDays>(14);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [pendingAutoRouteBatchId, setPendingAutoRouteBatchId] = useState<string | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const updatePromptShown = useRef(false);
 
   const handleMetaReturn = useCallback((url: string | null) => {
     if (!url?.startsWith("fbmaniaco://meta-connected")) return;
@@ -370,6 +373,32 @@ function BootScreen() {
       void WebBrowser.coolDownAsync().catch(() => undefined);
     };
   }, []);
+
+  useEffect(() => {
+    if (config.appEnv === "development") return;
+    let mounted = true;
+    void checkForAppUpdate()
+      .then((update) => {
+        if (mounted) setAvailableUpdate(update);
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, [config.appEnv]);
+
+  useEffect(() => {
+    if (!availableUpdate || updatePromptShown.current) return;
+    updatePromptShown.current = true;
+    NativeAlert.alert(
+      availableUpdate.mandatory ? "Actualizacion requerida" : "Actualizacion disponible",
+      availableUpdate.notes ?? `Ya esta lista FBmaniaco ${availableUpdate.versionName}.`,
+      [
+        ...(availableUpdate.mandatory ? [] : [{ text: "Despues", style: "cancel" as const }]),
+        { text: "Actualizar", onPress: () => void openAppUpdate(availableUpdate) }
+      ]
+    );
+  }, [availableUpdate]);
 
   useEffect(() => {
     void Linking.getInitialURL().then(handleMetaReturn);
@@ -1132,6 +1161,14 @@ function BootScreen() {
         disabled={signOut.isPending}
         onPress={() => signOut.mutate()}
       />
+      {availableUpdate ? (
+        <Button
+          label={`Actualizar a ${availableUpdate.versionName}`}
+          icon="download-outline"
+          variant="secondary"
+          onPress={() => void openAppUpdate(availableUpdate)}
+        />
+      ) : null}
       {config.appEnv === "development" ? <Text style={styles.muted}>API: {config.apiUrl}</Text> : null}
     </Screen>
   );

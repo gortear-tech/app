@@ -2,18 +2,28 @@
   "expo": {
     "name": "FBmaniaco",
     "slug": "fbmaniaco",
-    "version": "0.1.8",
+    "version": "0.1.9",
     "runtimeVersion": {
       "policy": "appVersion"
     },
     "orientation": "portrait",
     "scheme": "fbmaniaco",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-logo.png",
+      "backgroundColor": "#0d0f12",
+      "resizeMode": "contain"
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
     "android": {
-      "package": "com.gabriel.fbmaniaco"
+      "package": "com.gabriel.fbmaniaco",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0d0f12"
+      }
     },
     "extra": {
       "eas": {

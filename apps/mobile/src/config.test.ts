@@ -3,6 +3,8 @@ import { getMobileConfig } from "./config";
 
 const originalEnv = { ...process.env };
 const originalDev = (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__;
+const productionUpdateManifestUrl =
+  "https://guzohwqptoiagulxsard.supabase.co/storage/v1/object/public/app-downloads/fbmaniaco-android-update.json";
 
 afterEach(() => {
   process.env = { ...originalEnv };
@@ -21,7 +23,8 @@ describe("mobile config", () => {
 
     expect(getMobileConfig()).toEqual({
       appEnv: "production",
-      apiUrl: "https://fbmaniaco-api.onrender.com"
+      apiUrl: "https://fbmaniaco-api.onrender.com",
+      updateManifestUrl: productionUpdateManifestUrl
     });
   });
 
@@ -32,7 +35,8 @@ describe("mobile config", () => {
 
     expect(getMobileConfig()).toEqual({
       appEnv: "development",
-      apiUrl: "http://localhost:4000"
+      apiUrl: "http://localhost:4000",
+      updateManifestUrl: productionUpdateManifestUrl
     });
   });
 
