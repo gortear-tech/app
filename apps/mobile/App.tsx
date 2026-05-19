@@ -169,6 +169,25 @@ const formatDate = (value: string | Date) =>
 const formatTime = (value: string | Date) => new Date(value).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
 const dateKey = (value: string | Date) => new Date(value).toISOString().slice(0, 10);
 
+const batchStatusText = (status: string) => {
+  if (["pendiente", "pending"].includes(status)) return "Preparando";
+  if (["subiendo", "uploading"].includes(status)) return "Subiendo";
+  if (["analizando", "analyzing"].includes(status)) return "Analizando";
+  if (["pendiente_confirmacion", "ready_for_generation"].includes(status)) return "Listo";
+  if (["generando", "generating"].includes(status)) return "Generando";
+  if (["generado_parcial", "ready_for_review"].includes(status)) return "Revisar";
+  if (["programado", "scheduled"].includes(status)) return "Programado";
+  if (["completado", "completed"].includes(status)) return "Completo";
+  return status;
+};
+
+const photoStatusText = (photo: Photo) => {
+  if (isPhotoAnalyzed(photo)) return "Lista";
+  if (["uploading", "uploaded"].includes(photo.status)) return "Subiendo";
+  if (["analyzing"].includes(photo.status)) return "Analizando";
+  return photo.status;
+};
+
 const styleForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>) => {
   const preference = preferences[photoId];
   return styleCatalog.find((style) => style.id === preference?.styleId) ?? styleCatalog[0]!;
@@ -181,6 +200,12 @@ const styleSummaryForPhoto = (photoId: string, preferences: Record<string, Photo
   variantStylesForPhoto(photoId, preferences, count)
     .map((style, index) => `V${index + 1} ${style.styleName}`)
     .join(" · ");
+
+const compactStyleSummaryForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) => {
+  const styles = variantStylesForPhoto(photoId, preferences, count);
+  if (styles.length <= 2) return styles.map((style) => style.styleName).join(" / ");
+  return `${styles[0]?.styleName ?? "Estilo"} / ${styles[1]?.styleName ?? "Estilo"} +${styles.length - 2}`;
+};
 
 const promptsForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
   variantStylesForPhoto(photoId, preferences, count)
@@ -348,9 +373,9 @@ function BootScreen() {
     if (selectedBatchId && batches.data && !batches.data.some((batch) => batch.id === selectedBatchId)) {
       setSelectedBatchId(null);
       setPendingAutoRouteBatchId(null);
-      setFlow("home");
+      setFlow(selectedPage ? "styles" : "home");
     }
-  }, [batches.data, selectedBatchId]);
+  }, [batches.data, selectedBatchId, selectedPage]);
 
   const invalidateWork = async () => {
     await Promise.all([
@@ -410,7 +435,7 @@ function BootScreen() {
       queryClient.setQueryData(["bootstrap"], result.bootstrap);
       setSelectedBatchId(null);
       setPendingAutoRouteBatchId(null);
-      setFlow("home");
+      setFlow("styles");
       await refreshAll();
     }
   });
@@ -540,7 +565,7 @@ function BootScreen() {
       if (selectedBatchId === batchId) {
         setSelectedBatchId(null);
         setPendingAutoRouteBatchId(null);
-        setFlow("home");
+        setFlow(selectedPage ? "styles" : "home");
         setStylePhotoId(null);
         setDetailPhotoId(null);
       }
@@ -578,7 +603,7 @@ function BootScreen() {
     setStylePhotoId(null);
     setDetailPhotoId(null);
     setPendingAutoRouteBatchId(null);
-    setFlow("home");
+    setFlow(selectedPage ? "styles" : "home");
   };
 
   const confirmDeleteBatch = (batch: BatchSummary) => {
@@ -636,10 +661,18 @@ function BootScreen() {
 
   const openPage = (page: MetaPage) => {
     if (page.id === selectedPage?.id || page.isSelected) {
-      setFlow("home");
+      setSelectedBatchId(null);
+      setPendingAutoRouteBatchId(null);
+      setFlow("styles");
       return;
     }
     selectPage.mutate(page.id);
+  };
+
+  const openBatch = (batch: BatchSummary) => {
+    setSelectedBatchId(batch.id);
+    setPendingAutoRouteBatchId(batch.id);
+    setFlow(flowForBatchSummary(batch));
   };
 
   const handleReviewAction = async (action: "approve" | "reject") => {
@@ -668,8 +701,7 @@ function BootScreen() {
   const renderOnboarding = () => {
     if (!bootstrap.data?.authenticated) {
       return (
-        <Screen>
-          <Hero title="Conecta Facebook" eyebrow="Inicio" body="Autoriza tus paginas una vez y esta sesion quedara guardada en este telefono." />
+        <CenteredScreen>
           <Button
             label={connect.isPending ? "Abriendo Facebook..." : "Continuar con Facebook"}
             icon="logo-facebook"
@@ -677,18 +709,13 @@ function BootScreen() {
             onPress={() => connect.mutate()}
           />
           {metaReturnMessage ? <Text style={styles.muted}>{metaReturnMessage}</Text> : null}
-        </Screen>
+        </CenteredScreen>
       );
     }
 
     if (bootstrap.data?.nextStep === "connect_meta" || bootstrap.data?.nextStep === "recover_meta") {
       return (
-        <Screen>
-          <Hero
-            title={bootstrap.data.nextStep === "recover_meta" ? "Reconecta Facebook" : "Conecta Facebook"}
-            eyebrow="Permisos"
-            body="FBmaniaco necesita listar tus paginas y publicar solo lo que apruebes."
-          />
+        <CenteredScreen>
           <Button
             label={connect.isPending ? "Conectando..." : "Conectar con Facebook"}
             icon="logo-facebook"
@@ -696,61 +723,61 @@ function BootScreen() {
             onPress={() => connect.mutate()}
           />
           {metaReturnMessage ? <Text style={styles.muted}>{metaReturnMessage}</Text> : null}
-        </Screen>
+        </CenteredScreen>
       );
     }
 
     if (bootstrap.data?.nextStep === "select_page") {
-      return (
-        <Screen>
-          <Hero title="Elige pagina" eyebrow="Facebook" body="Cada pagina trabaja por separado con su propio lote y calendario." />
-          {pages.isLoading ? <ActivityIndicator color={palette.blue} /> : null}
-          {(pages.data ?? []).map((page) => (
-            <PageCard key={page.id} page={page} disabled={selectPage.isPending} onPress={() => openPage(page)} />
-          ))}
-        </Screen>
-      );
+      return renderPageDirectory();
     }
 
     return null;
   };
 
-  const renderHome = () => (
+  const renderPageDirectory = () => (
     <Screen>
-      <Hero
-        title="Panel de lotes"
-        eyebrow="Inicio"
-        body="Sube fotos, deja que la IA trabaje y vuelve al lote cuando este listo para revisar."
-      />
-      <ActionPair
-        primaryLabel={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir fotos"}
-        primaryIcon="cloud-upload-outline"
-        primaryDisabled={uploadSelectedPhotos.isPending || !selectedBusinessId}
-        onPrimary={() => uploadSelectedPhotos.mutate()}
-        secondaryLabel="Ajustes"
-        secondaryIcon="settings-outline"
-        onSecondary={() => setFlow("settings")}
-      />
-      <Panel title="Mini calendario" eyebrow={`${posts.length} publicaciones`}>
-        <MiniCalendar posts={posts} onOpenCalendar={() => setFlow("calendar")} />
-      </Panel>
-      <Panel title="Lista de lotes">
-        {(batches.data ?? []).length === 0 ? <EmptyState title="Sin lotes" body="Crea tu primer lote y sube hasta 10 fotos." /> : null}
+      {pages.isLoading ? <View style={styles.centeredBlock}><ActivityIndicator color={palette.blue} /></View> : null}
+      {(pages.data ?? []).map((page) => (
+        <PageCard
+          key={page.id}
+          page={page}
+          selected={page.id === selectedPage?.id || page.isSelected}
+          disabled={selectPage.isPending}
+          onPress={() => openPage(page)}
+        />
+      ))}
+    </Screen>
+  );
+
+  const renderPageWorkspace = () => (
+    <Screen>
+      {selectedPage ? <PageHeader page={selectedPage} onBack={() => setFlow("home")} onSettings={() => setFlow("settings")} /> : null}
+      <View style={styles.flatActions}>
+        <View style={styles.flex}>
+          <Button
+            label={uploadSelectedPhotos.isPending ? "Subiendo..." : "Subir lote"}
+            icon="cloud-upload-outline"
+            disabled={uploadSelectedPhotos.isPending || !selectedBusinessId}
+            onPress={() => uploadSelectedPhotos.mutate()}
+          />
+        </View>
+        <IconButton icon="calendar-outline" label="Calendario" disabled={!selectedBusinessId} onPress={() => setFlow("calendar")} />
+      </View>
+      {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
+      {posts.length > 0 ? <MiniCalendar posts={posts} onOpenCalendar={() => setFlow("calendar")} /> : null}
+      <View style={styles.batchList}>
+        {(batches.data ?? []).length === 0 ? <EmptyState title="Sin lotes" body="Sube fotos para crear el primero." /> : null}
         {(batches.data ?? []).map((batch) => (
           <BatchRow
             key={batch.id}
             batch={batch}
             selected={batch.id === selectedBatch?.id}
             deleting={removeBatch.isPending}
-            onPress={() => {
-              setSelectedBatchId(batch.id);
-              setPendingAutoRouteBatchId(batch.id);
-              setFlow(flowForBatchSummary(batch));
-            }}
+            onPress={() => openBatch(batch)}
             onDelete={() => confirmDeleteBatch(batch)}
           />
         ))}
-      </Panel>
+      </View>
     </Screen>
   );
 
@@ -780,21 +807,22 @@ function BootScreen() {
 
     return (
       <Screen>
-        <Hero
-          title="Fotos y estilos"
-          eyebrow="Paso 3"
-          body="Tus fotos aparecen aqui desde que las eliges. Ajusta estilos, espera el analisis y genera cuando esten listas."
-        />
         {selectedBatch ? (
-          <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+          <BatchTop
+            batch={selectedBatch}
+            active="styles"
+            deleting={removeBatch.isPending}
+            onStep={setFlow}
+            onMinimize={leaveBatch}
+            onDelete={() => confirmDeleteBatch(selectedBatch)}
+          />
         ) : null}
         {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
-        {generationBusy ? <Alert tone="info" message="Este lote ya esta generando variantes. Puedes ver el progreso o salir sin detenerlo." /> : null}
+        {generationBusy ? <Alert tone="info" message="Este lote ya esta generando variantes." /> : null}
         {!generationBusy && reviewQueue.length > 0 ? <Alert tone="info" message="Este lote ya tiene variantes listas para revisar." /> : null}
         {analysisTotal > 0 && analyzedCount < analysisTotal ? (
           <Panel title="Analizando fotos" eyebrow={`${analyzedCount} de ${analysisTotal}`}>
             <ProgressBar progress={pct(analyzedCount, analysisTotal)} />
-            <Text style={styles.muted}>Puedes quedarte aqui o moverte; el lote seguira avanzando.</Text>
           </Panel>
         ) : null}
         {photos.length === 0 && localUploadPreviews.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para iniciar el analisis." /> : null}
@@ -811,7 +839,7 @@ function BootScreen() {
               key={photo.id}
               photo={photo}
               index={index}
-              styleName={styleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto)}
+              styleName={compactStyleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto)}
               onPress={() => setDetailPhotoId(photo.id)}
               onLongPress={() => setStylePhotoId(photo.id)}
             />
@@ -853,9 +881,15 @@ function BootScreen() {
     if (generationBusy) {
       return (
         <Screen>
-          <Hero title="Generando" eyebrow="Paso 5" body="Estamos editando imagenes y preparando captions. Puedes salir; el trabajo sigue en segundo plano." />
           {selectedBatch ? (
-            <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+            <BatchTop
+              batch={selectedBatch}
+              active="generate"
+              deleting={removeBatch.isPending}
+              onStep={setFlow}
+              onMinimize={leaveBatch}
+              onDelete={() => confirmDeleteBatch(selectedBatch)}
+            />
           ) : null}
           <Panel title="Progreso">
             <View style={styles.spinnerMark}>
@@ -868,9 +902,9 @@ function BootScreen() {
               primaryLabel="Ver lote"
               primaryIcon="grid-outline"
               onPrimary={() => setFlow("styles")}
-              secondaryLabel="Inicio"
-              secondaryIcon="home-outline"
-              onSecondary={() => setFlow("home")}
+              secondaryLabel="Pagina"
+              secondaryIcon="albums-outline"
+              onSecondary={leaveBatch}
             />
           </Panel>
         </Screen>
@@ -879,19 +913,21 @@ function BootScreen() {
 
     return (
       <Screen>
-        <Hero title="Cantidad" eyebrow="Paso 4" body="Elige cuantas variantes generar por foto validada." />
         {selectedBatch ? (
-          <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+          <BatchTop
+            batch={selectedBatch}
+            active="generate"
+            deleting={removeBatch.isPending}
+            onStep={setFlow}
+            onMinimize={leaveBatch}
+            onDelete={() => confirmDeleteBatch(selectedBatch)}
+          />
         ) : null}
-        <Panel title="Cuantas variantes?">
+        <Panel title="Variantes por foto">
           <Stepper value={variantsPerPhoto} min={1} max={5} onChange={setVariantsPerPhoto} />
           <Text style={styles.muted}>
             Total estimado: {readyPhotoCount * variantsPerPhoto} variantes
           </Text>
-          <View style={styles.modePill}>
-            <Ionicons name="flash-outline" size={16} color={palette.amber} />
-            <Text style={styles.modeText}>Modo rapido: genera y captiona en segundo plano</Text>
-          </View>
           <Button
             label={generateVariants.isPending ? "Enviando..." : "Confirmar"}
             icon="checkmark-circle-outline"
@@ -910,7 +946,14 @@ function BootScreen() {
     if (selectedBatch && (batchDetail.isLoading || (selectedBatch.variantsCount > 0 && variants.length === 0))) {
       return (
         <Screen>
-          <Hero title="Abriendo lote" eyebrow="Revision" body="Estamos cargando las variantes de este lote." />
+          <BatchTop
+            batch={selectedBatch}
+            active="review"
+            deleting={removeBatch.isPending}
+            onStep={setFlow}
+            onMinimize={leaveBatch}
+            onDelete={() => confirmDeleteBatch(selectedBatch)}
+          />
           <Panel title="Preparando vista">
             <View style={styles.spinnerMark}>
               <ActivityIndicator color={palette.blue} />
@@ -924,9 +967,15 @@ function BootScreen() {
     if (!currentReview) {
       return (
         <Screen>
-          <Hero title="Revision completa" eyebrow="Paso 6" body={`${acceptedCount} aceptadas. Puedes programar ahora o volver a editar captions.`} />
           {selectedBatch ? (
-            <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+            <BatchTop
+              batch={selectedBatch}
+              active="review"
+              deleting={removeBatch.isPending}
+              onStep={setFlow}
+              onMinimize={leaveBatch}
+              onDelete={() => confirmDeleteBatch(selectedBatch)}
+            />
           ) : null}
           <Panel title="Resumen">
             <Text style={styles.bigNumber}>{acceptedCount}</Text>
@@ -947,7 +996,14 @@ function BootScreen() {
     return (
       <Screen>
         {selectedBatch ? (
-          <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+          <BatchTop
+            batch={selectedBatch}
+            active="review"
+            deleting={removeBatch.isPending}
+            onStep={setFlow}
+            onMinimize={leaveBatch}
+            onDelete={() => confirmDeleteBatch(selectedBatch)}
+          />
         ) : null}
         <SwipeReviewCard
           variant={currentReview}
@@ -966,9 +1022,15 @@ function BootScreen() {
 
   const renderSchedule = () => (
     <Screen>
-      <Hero title="Programar" eyebrow="Paso 7" body={`${acceptedCount} aceptadas. Elige el periodo y confirmamos los mejores huecos libres.`} />
       {selectedBatch ? (
-        <BatchControls batch={selectedBatch} deleting={removeBatch.isPending} onMinimize={leaveBatch} onDelete={() => confirmDeleteBatch(selectedBatch)} />
+        <BatchTop
+          batch={selectedBatch}
+          active="schedule"
+          deleting={removeBatch.isPending}
+          onStep={setFlow}
+          onMinimize={leaveBatch}
+          onDelete={() => confirmDeleteBatch(selectedBatch)}
+        />
       ) : null}
       <Panel title="Periodo">
         <View style={styles.periodGrid}>
@@ -992,7 +1054,18 @@ function BootScreen() {
 
   const renderCalendar = () => (
     <Screen>
-      <Hero title="Calendario" eyebrow="Paso 8" body="Revisa dias, reprograma publicaciones y reintenta fallos." />
+      {selectedBatch ? (
+        <BatchTop
+          batch={selectedBatch}
+          active="calendar"
+          deleting={removeBatch.isPending}
+          onStep={setFlow}
+          onMinimize={leaveBatch}
+          onDelete={() => confirmDeleteBatch(selectedBatch)}
+        />
+      ) : selectedPage ? (
+        <PageHeader page={selectedPage} onBack={() => setFlow("home")} onSettings={() => setFlow("settings")} />
+      ) : null}
       <CalendarGrid posts={posts} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
       <Panel title={selectedDay ? `Publicaciones ${formatDate(selectedDay)}` : "Publicaciones"}>
         {(selectedDay ? posts.filter((post) => dateKey(post.scheduledFor) === selectedDay) : posts).length === 0 ? (
@@ -1043,14 +1116,26 @@ function BootScreen() {
   );
 
   const renderCurrent = () => {
-    if (bootstrap.data?.nextStep !== "home") return renderOnboarding();
+    if (tokenQuery.isLoading || (Boolean(token) && bootstrap.isLoading)) {
+      return (
+        <CenteredScreen>
+          <ActivityIndicator color={palette.blue} />
+        </CenteredScreen>
+      );
+    }
+    if (!bootstrap.data?.authenticated || bootstrap.data.nextStep === "connect_meta" || bootstrap.data.nextStep === "recover_meta") {
+      return renderOnboarding();
+    }
+    if (bootstrap.data.nextStep === "select_page") return renderPageDirectory();
+    if (flow === "home") return renderPageDirectory();
+    if (flow === "styles" && !selectedBatch) return renderPageWorkspace();
     if (flow === "styles") return renderStyles();
     if (flow === "generate") return renderGenerate();
     if (flow === "review") return renderReview();
     if (flow === "schedule") return renderSchedule();
     if (flow === "calendar") return renderCalendar();
     if (flow === "settings") return renderSettings();
-    return renderHome();
+    return renderPageDirectory();
   };
 
   return (
@@ -1069,23 +1154,9 @@ function BootScreen() {
             />
           }
         >
-          <TopBar busy={refreshing} onRefresh={refreshAll} />
-          <ActivePageBanner page={selectedPage} stateText={stateText} loading={bootstrap.isLoading} onChangePage={() => setFlow("settings")} />
           {visibleError ? <Alert message={visibleError instanceof Error ? visibleError.message : "No pudimos continuar."} tone="critical" /> : null}
           {renderCurrent()}
         </ScrollView>
-        {bootstrap.data?.nextStep === "home" ? (
-          <>
-            <WorkBanner
-              uploadProgress={uploadProgress}
-              photos={photos}
-              variants={variants}
-              acceptedCount={acceptedCount}
-              onPress={(next) => setFlow(next)}
-            />
-            <BottomTabs active={flow} onChange={setFlow} failedPosts={failedPosts.length} />
-          </>
-        ) : null}
       </View>
     </SafeAreaView>
   );
@@ -1093,6 +1164,10 @@ function BootScreen() {
 
 function Screen({ children }: { children: ReactNode }) {
   return <View style={styles.screen}>{children}</View>;
+}
+
+function CenteredScreen({ children }: { children: ReactNode }) {
+  return <View style={styles.centeredScreen}>{children}</View>;
 }
 
 function TopBar({ busy, onRefresh }: { busy: boolean; onRefresh: () => void }) {
@@ -1163,6 +1238,71 @@ function ActivePageBanner({
         <View style={[styles.activeCover, styles.activeCoverFallback]}>{content}</View>
       )}
     </Pressable>
+  );
+}
+
+function PageHeader({ page, onBack, onSettings }: { page: MetaPage; onBack: () => void; onSettings: () => void }) {
+  return (
+    <View style={styles.pageHeader}>
+      <IconButton icon="chevron-back" label="Paginas" onPress={onBack} />
+      {page.profilePhotoUrl ? (
+        <Image source={{ uri: page.profilePhotoUrl }} style={asImageStyle(styles.pageHeaderAvatar)} />
+      ) : (
+        <View style={styles.pageHeaderAvatarFallback}>
+          <Text style={styles.pageAvatarText}>{page.pageName.slice(0, 1).toUpperCase()}</Text>
+        </View>
+      )}
+      <View style={styles.flex}>
+        <Text style={styles.pageHeaderName} numberOfLines={1}>{page.pageName}</Text>
+        <Text style={styles.pageHeaderMeta} numberOfLines={1}>{page.category ?? "Facebook Page"}</Text>
+      </View>
+      <IconButton icon="settings-outline" label="Ajustes" onPress={onSettings} />
+    </View>
+  );
+}
+
+function BatchTop({
+  batch,
+  active,
+  deleting,
+  onStep,
+  onMinimize,
+  onDelete
+}: {
+  batch: BatchSummary;
+  active: FlowStep;
+  deleting: boolean;
+  onStep: (step: FlowStep) => void;
+  onMinimize: () => void;
+  onDelete: () => void;
+}) {
+  const steps: Array<{ key: FlowStep; label: string; icon: IconName }> = [
+    { key: "styles", label: "Fotos", icon: "images-outline" },
+    { key: "generate", label: "Generar", icon: "sparkles-outline" },
+    { key: "review", label: "Revisar", icon: "albums-outline" },
+    { key: "schedule", label: "Programar", icon: "calendar-outline" },
+    { key: "calendar", label: "Agenda", icon: "calendar-number-outline" }
+  ];
+
+  return (
+    <View style={styles.batchTop}>
+      <View style={styles.batchTopRow}>
+        <IconButton icon="chevron-back" label="Salir del lote" disabled={deleting} onPress={onMinimize} />
+        <View style={styles.flex}>
+          <Text style={styles.batchTitle} numberOfLines={1}>{formatDate(batch.createdAt)}</Text>
+          <Text style={styles.batchMeta} numberOfLines={1}>{batch.photosCount} fotos - {batch.variantsCount} variantes - {batchStatusText(batch.status)}</Text>
+        </View>
+        <IconButton icon="trash-outline" label="Eliminar lote" disabled={deleting} onPress={onDelete} />
+      </View>
+      <View style={styles.stepNav}>
+        {steps.map((step) => (
+          <Pressable key={step.key} style={[styles.stepChip, active === step.key ? styles.stepChipActive : null]} onPress={() => onStep(step.key)}>
+            <Ionicons name={step.icon} size={15} color={active === step.key ? palette.ink : palette.muted} />
+            <Text style={[styles.stepChipText, active === step.key ? styles.stepChipTextActive : null]} numberOfLines={1}>{step.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -1310,7 +1450,6 @@ function PageCard({
           <Text style={styles.pageName} numberOfLines={2}>{page.pageName}</Text>
           <Text style={styles.pageMeta} numberOfLines={1}>{page.category ?? "Facebook Page"}</Text>
         </View>
-        <Pill label={isSelected ? "Activa" : page.canPublish ? "Lista" : "Permisos"} tone={page.canPublish ? "good" : "warn"} />
       </View>
     </Pressable>
   );
@@ -1363,7 +1502,7 @@ function BatchRow({
           <Text style={styles.rowTitle}>{formatDate(batch.createdAt)}</Text>
           <Text style={styles.muted}>{batch.photosCount} fotos - {batch.variantsCount} variantes</Text>
         </View>
-        <Pill label={batch.status} tone={batch.status === "completado" || batch.status === "completed" ? "good" : "neutral"} />
+        <Pill label={batchStatusText(batch.status)} tone={batch.status === "completado" || batch.status === "completed" ? "good" : "neutral"} />
       </Pressable>
       <IconButton icon="trash-outline" label="Eliminar lote" disabled={deleting} onPress={onDelete} />
     </View>
@@ -1442,7 +1581,7 @@ function PhotoTile({
       <View style={styles.photoTileBody}>
         <Text style={styles.rowTitle}>F{index + 1}</Text>
         <Text style={styles.muted} numberOfLines={2}>{styleName}</Text>
-        <Pill label={isPhotoAnalyzed(photo) ? "analizada" : photo.status} tone={isPhotoAnalyzed(photo) ? "good" : "neutral"} />
+        <Pill label={photoStatusText(photo)} tone={isPhotoAnalyzed(photo) ? "good" : "neutral"} />
       </View>
     </Pressable>
   );
@@ -1834,8 +1973,10 @@ const palette = {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: palette.bg },
   shell: { flex: 1 },
-  container: { flexGrow: 1, gap: 14, padding: 16, paddingBottom: Platform.OS === "android" ? 210 : 190 },
-  screen: { gap: 14 },
+  container: { flexGrow: 1, gap: 10, padding: 12, paddingBottom: 28 },
+  screen: { gap: 10 },
+  centeredScreen: { flex: 1, minHeight: 520, justifyContent: "center", gap: 12 },
+  centeredBlock: { minHeight: 180, alignItems: "center", justifyContent: "center" },
   flex: { flex: 1 },
   topBar: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 12, paddingTop: 4 },
   productKicker: { color: palette.blue, fontSize: 12, fontWeight: "900", textTransform: "uppercase" },
@@ -1875,17 +2016,33 @@ const styles = StyleSheet.create({
   activeMeta: { color: palette.muted, fontSize: 13, fontWeight: "700" },
   changePagePill: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: palette.white, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8 },
   changePageText: { color: palette.ink, fontSize: 12, fontWeight: "900" },
+  pageHeader: { minHeight: 58, flexDirection: "row", alignItems: "center", gap: 10 },
+  pageHeaderAvatar: { width: 46, height: 46, borderRadius: 8 },
+  pageHeaderAvatarFallback: { width: 46, height: 46, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: palette.blue },
+  pageHeaderName: { color: palette.text, fontSize: 18, fontWeight: "900" },
+  pageHeaderMeta: { color: palette.muted, fontSize: 12, fontWeight: "700" },
+  flatActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  batchList: { gap: 8 },
+  batchTop: { gap: 8 },
+  batchTopRow: { minHeight: 54, flexDirection: "row", alignItems: "center", gap: 10 },
+  batchTitle: { color: palette.text, fontSize: 18, fontWeight: "900" },
+  batchMeta: { color: palette.muted, fontSize: 12, fontWeight: "700" },
+  stepNav: { flexDirection: "row", gap: 5 },
+  stepChip: { flex: 1, minHeight: 38, alignItems: "center", justifyContent: "center", gap: 2, borderRadius: 8, backgroundColor: palette.surface },
+  stepChipActive: { backgroundColor: palette.white },
+  stepChipText: { color: palette.muted, fontSize: 9, fontWeight: "900" },
+  stepChipTextActive: { color: palette.ink },
   hero: { gap: 7, paddingVertical: 4 },
   eyebrow: { color: palette.blue, fontSize: 12, fontWeight: "900", textTransform: "uppercase" },
   heroTitle: { color: palette.text, fontSize: 29, fontWeight: "900", letterSpacing: 0 },
   heroBody: { color: palette.muted, fontSize: 15, lineHeight: 22, fontWeight: "600" },
-  panel: { gap: 12, borderWidth: 1, borderColor: palette.border, borderRadius: 8, padding: 14, backgroundColor: palette.panel },
-  panelTitle: { color: palette.text, fontSize: 20, fontWeight: "900" },
+  panel: { gap: 10, borderWidth: 1, borderColor: palette.border, borderRadius: 8, padding: 12, backgroundColor: palette.panel },
+  panelTitle: { color: palette.text, fontSize: 18, fontWeight: "900" },
   rowTitle: { color: palette.text, fontSize: 15, fontWeight: "800" },
   muted: { color: palette.muted, fontSize: 14, lineHeight: 20, fontWeight: "600" },
   empty: { gap: 5, padding: 12, borderWidth: 1, borderColor: palette.border, borderRadius: 8, backgroundColor: palette.surface },
   button: {
-    minHeight: 52,
+    minHeight: 48,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -1925,7 +2082,7 @@ const styles = StyleSheet.create({
   batchRowSelected: { borderWidth: 1, borderColor: palette.blue },
   batchControlRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 },
   batchIcon: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: palette.panel2 },
-  photoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  photoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   photoTile: { width: "48.5%", overflow: "hidden", borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
   photoImage: { width: "100%", aspectRatio: 1, backgroundColor: palette.mediaBg },
   previewFrame: { overflow: "hidden", alignItems: "center", justifyContent: "center" },
