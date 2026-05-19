@@ -53,6 +53,7 @@ import {
   getBatchDetail,
   getBootstrapStatus,
   getStoredSessionToken,
+  isAuthSessionError,
   listBatches,
   listMetaPages,
   listScheduledPosts,
@@ -314,6 +315,7 @@ function BootScreen() {
   const [pendingAutoRouteBatchId, setPendingAutoRouteBatchId] = useState<string | null>(null);
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const updatePromptShown = useRef(false);
+  const authRecoveryAttempted = useRef(false);
 
   const handleMetaReturn = useCallback((url: string | null) => {
     if (!url?.startsWith("fbmaniaco://meta-connected")) return;
@@ -337,6 +339,20 @@ function BootScreen() {
     enabled: tokenQuery.isSuccess,
     retry: 1
   });
+
+  useEffect(() => {
+    if (!bootstrap.isError || !isAuthSessionError(bootstrap.error) || authRecoveryAttempted.current) return;
+    authRecoveryAttempted.current = true;
+    void clearStoredSession().then(async () => {
+      queryClient.setQueryData(["session-token"], null);
+      await queryClient.invalidateQueries({ queryKey: ["session-token"] });
+      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+    });
+  }, [bootstrap.error, bootstrap.isError]);
+
+  useEffect(() => {
+    if (bootstrap.isSuccess) authRecoveryAttempted.current = false;
+  }, [bootstrap.isSuccess]);
 
   const selectedBusinessId = bootstrap.data?.authenticated ? bootstrap.data.selectedBusinessId : null;
   const selectedPageId = bootstrap.data?.authenticated ? bootstrap.data.selectedPageId : null;
@@ -471,9 +487,17 @@ function BootScreen() {
 
   const connect = useMutation({
     mutationFn: async () => {
-      const sessionToken = token || (await ensureSessionForMeta());
+      let sessionToken = token || (await ensureSessionForMeta());
       queryClient.setQueryData(["session-token"], sessionToken);
-      return connectMeta(sessionToken);
+      try {
+        return await connectMeta(sessionToken);
+      } catch (error) {
+        if (!isAuthSessionError(error)) throw error;
+        await clearStoredSession();
+        sessionToken = await ensureSessionForMeta();
+        queryClient.setQueryData(["session-token"], sessionToken);
+        return connectMeta(sessionToken);
+      }
     },
     onSuccess: async (result) => {
       if (result.authorizationUrl) {

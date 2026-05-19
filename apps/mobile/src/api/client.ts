@@ -34,6 +34,69 @@ type StoredAuthSession = {
 
 let memorySession: StoredAuthSession | null = null;
 
+export class ApiClientError extends Error {
+  public readonly status: number;
+  public readonly code?: string;
+  public readonly userMessage?: string;
+  public readonly action?: string;
+
+  constructor(input: { status: number; message: string; code?: string; userMessage?: string; action?: string }) {
+    super(input.message);
+    this.status = input.status;
+    if (input.code) this.code = input.code;
+    if (input.userMessage) this.userMessage = input.userMessage;
+    if (input.action) this.action = input.action;
+  }
+}
+
+export const isAuthSessionError = (error: unknown) =>
+  error instanceof ApiClientError && (error.status === 401 || error.code === "unauthorized");
+
+const responseJson = async (response: Response): Promise<Record<string, unknown>> => {
+  try {
+    const json = (await response.json()) as unknown;
+    return json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+};
+
+const stringField = (json: Record<string, unknown>, key: string) => {
+  const value = json[key];
+  return typeof value === "string" ? value : undefined;
+};
+
+const apiError = (response: Response, json: Record<string, unknown>, fallback: string) => {
+  const code = stringField(json, "code") ?? stringField(json, "error");
+  const userMessage = stringField(json, "userMessage");
+  const action = stringField(json, "action");
+  const input: { status: number; message: string; code?: string; userMessage?: string; action?: string } = {
+    status: response.status,
+    message: userMessage ?? stringField(json, "error_description") ?? stringField(json, "msg") ?? stringField(json, "error") ?? fallback
+  };
+  if (code) input.code = code;
+  if (userMessage) input.userMessage = userMessage;
+  if (action) input.action = action;
+  return new ApiClientError(input);
+};
+
+const jsonRequest = async (url: string, init: RequestInit, fallback: string) => {
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (error) {
+    throw new ApiClientError({
+      status: 0,
+      code: "network_request_failed",
+      userMessage: "No pudimos llegar al servidor. Revisa internet e intenta de nuevo.",
+      message: error instanceof Error ? error.message : "Network request failed"
+    });
+  }
+  const json = await responseJson(response);
+  if (!response.ok) throw apiError(response, json, fallback);
+  return json;
+};
+
 const canUseSecureStore = async () => {
   try {
     return await SecureStore.isAvailableAsync();
@@ -45,11 +108,20 @@ const canUseSecureStore = async () => {
 export const getStoredSessionToken = async () => {
   const session = await getStoredSession();
   if (!session?.accessToken) return null;
-  if (session.refreshToken && session.expiresAt && session.expiresAt - Math.floor(Date.now() / 1000) <= REFRESH_WINDOW_SECONDS) {
+  const now = Math.floor(Date.now() / 1000);
+  if (!session.refreshToken && session.expiresAt && session.expiresAt <= now) {
+    await clearStoredSession();
+    return null;
+  }
+  if (session.refreshToken && session.expiresAt && session.expiresAt - now <= REFRESH_WINDOW_SECONDS) {
     try {
       const refreshed = await refreshStoredSession(session.refreshToken);
       return refreshed.accessToken;
-    } catch {
+    } catch (error) {
+      if (session.expiresAt <= now || isAuthSessionError(error)) {
+        await clearStoredSession();
+        return null;
+      }
       return session.accessToken;
     }
   }
@@ -95,18 +167,14 @@ export const clearStoredSession = async () => {
 
 const mobileAuthRequest = async (path: "anonymous" | "refresh", body: Record<string, unknown>): Promise<MobileAuthSessionResponse> => {
   const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/auth/mobile/${path}`, {
+  const json = await jsonRequest(`${apiUrl}/auth/mobile/${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify(body)
-  });
-  const json = await response.json();
-  if (!response.ok) {
-    throw new Error(json.userMessage ?? json.error_description ?? json.msg ?? json.error ?? "No pudimos iniciar sesion.");
-  }
+  }, "No pudimos iniciar sesion.");
   return json as MobileAuthSessionResponse;
 };
 
@@ -146,17 +214,12 @@ export const ensureSessionForMeta = async () => {
 
 export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus> => {
   const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/auth/bootstrap-status`, {
+  const json = await jsonRequest(`${apiUrl}/auth/bootstrap-status`, {
     headers: {
       authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-
-  const json = await response.json();
-  if (!response.ok) {
-    throw new Error(json.userMessage ?? "No pudimos iniciar FBmaniaco.");
-  }
+  }, "No pudimos iniciar FBmaniaco.");
   return json as BootstrapStatus;
 };
 
@@ -211,7 +274,7 @@ const uploadToSignedStorage = async (input: {
 
 export const connectMeta = async (token: string, flow: "oauth" | "device_login" = "oauth"): Promise<MetaConnectResponse> => {
   const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/auth/meta/connect`, {
+  const json = await jsonRequest(`${apiUrl}/auth/meta/connect`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -220,9 +283,7 @@ export const connectMeta = async (token: string, flow: "oauth" | "device_login" 
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ flow })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos conectar Facebook.");
+  }, "No pudimos conectar Facebook.");
   return json as MetaConnectResponse;
 };
 
