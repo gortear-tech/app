@@ -827,7 +827,7 @@ export class LocalDataStore implements DataStore {
     height?: number;
     actorId: string;
     requestId: string;
-  }): Promise<{ photo: Photo; job: StoredJob }> {
+  }): Promise<{ photo: Photo; job: StoredJob | null }> {
     const state = await this.load();
     this.requireBusiness(state, input.workspaceId, input.businessId);
     const batch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
@@ -873,7 +873,9 @@ export class LocalDataStore implements DataStore {
       originalAssetId: originalAsset.id,
       contentHash: input.checksum ?? null,
       mimeType: input.contentType,
-      status: "analyzing",
+      thumbnailAssetId: originalAsset.id,
+      visionInputAssetId: originalAsset.id,
+      status: "validada",
       createdAt: timestamp,
       updatedAt: timestamp
     };
@@ -884,26 +886,13 @@ export class LocalDataStore implements DataStore {
     state.photos.push(photo);
     intent.status = "completed";
     batch.photosCount = state.photos.filter((item) => item.batchId === batch.id && item.status !== "eliminada").length;
+    if (!terminalBatchStatuses.has(batch.status)) {
+      batch.status = "pendiente_confirmacion";
+    }
     batch.lastActivityAt = timestamp;
     batch.updatedAt = timestamp;
-    const job = await this.createJob({
-      type: "analyze_photo",
-      workspaceId: input.workspaceId,
-      businessId: input.businessId,
-      batchId: input.batchId,
-      photoId: photo.id,
-      dedupeKey: `analyze_photo:${photo.id}`,
-      payload: {
-        photoId: photo.id,
-        batchId: input.batchId,
-        imageUrl: publicMediaUrl(originalAsset.id),
-        contentType: input.contentType,
-        fileSize: input.fileSize,
-        requestId: input.requestId
-      }
-    });
     await this.persist();
-    return { photo, job };
+    return { photo, job: null };
   }
 
   async getPhoto(input: { workspaceId: string; photoId: string }): Promise<Photo | null> {
@@ -1030,7 +1019,7 @@ export class LocalDataStore implements DataStore {
         code: "batch_not_ready_for_generation",
         statusCode: 409,
         message: `Batch cannot generate variants from status ${batch.status}`,
-        userMessage: "Primero termina de subir y analizar las fotos antes de generar variantes.",
+        userMessage: "Primero termina de subir las fotos antes de generar variantes.",
         retryable: false,
         action: "refresh"
       });
@@ -1041,7 +1030,7 @@ export class LocalDataStore implements DataStore {
         code: "no_valid_photos_for_generation",
         statusCode: 409,
         message: "Batch has no validated photos",
-        userMessage: "Necesitas al menos una foto analizada antes de generar variantes.",
+        userMessage: "Necesitas al menos una foto lista antes de generar variantes.",
         retryable: false,
         action: "refresh"
       });
@@ -1165,14 +1154,14 @@ export class LocalDataStore implements DataStore {
         item.businessId === input.businessId &&
         item.batchId === input.batchId
     );
-    if (!photo?.visionAnalysis) return null;
+    if (!photo || photo.status !== "validada") return null;
     const business = this.requireBusiness(state, input.workspaceId, input.businessId);
     const page = business.facebookPageId
       ? state.pages.find((item) => item.id === business.facebookPageId && item.workspaceId === input.workspaceId)
       : null;
     return {
       variant,
-      photo: photo as Photo & { visionAnalysis: VisionAnalysis },
+      photo,
       business,
       page: page ? publicMetaPage(page) : null,
       style: variant.assignedStyle ?? this.assignStyle(variant.variantIndex),
@@ -1193,7 +1182,7 @@ export class LocalDataStore implements DataStore {
     ) {
       return variant;
     }
-    if (!photo || photo.status !== "validada" || !photo.visionAnalysis) {
+    if (!photo || photo.status !== "validada") {
       throw new AppError({
         code: "photo_not_ready_for_variant",
         statusCode: 409,
@@ -1219,7 +1208,7 @@ export class LocalDataStore implements DataStore {
     const plan = {
       schemaVersion: "generation_plan.v1" as const,
       puedeGenerar: true,
-      motivo: "Foto validada con analisis disponible.",
+      motivo: "Foto lista para edicion basica.",
       sujetoPrincipal: "producto o escena principal de la foto",
       preservar: ["producto real", "logos visibles", "texto visible", "identidad de personas"],
       permitido: ["encuadre cuadrado", "mejora de luz", "fondo limpio", "composicion para Facebook"],
@@ -1255,7 +1244,7 @@ export class LocalDataStore implements DataStore {
       businessName: business?.name ?? "tu negocio",
       pageName: page?.pageName ?? business?.name ?? "tu pagina",
       category: page?.category ?? String(business?.metadata.category ?? "Facebook Page"),
-      visionAnalysis: photo.visionAnalysis as VisionAnalysis
+      visionAnalysis: photo.visionAnalysis ? (photo.visionAnalysis as VisionAnalysis) : null
     });
     const captionResult = input.captionResult ?? fallbackCaptionResult;
     const caption = captionResult.caption;
@@ -1640,6 +1629,7 @@ export class LocalDataStore implements DataStore {
     post.deliveryMode = "publish_now";
     post.scheduledFor = now();
     post.scheduledForUnix = Math.floor(Date.now() / 1000);
+    post.status = "publicacion_en_proceso";
     post.updatedAt = post.scheduledFor;
     const job = await this.createJob({
       type: "publish_post",
@@ -1863,7 +1853,7 @@ export class LocalDataStore implements DataStore {
         photo.businessId === businessId &&
         photo.batchId === batchId &&
         photo.status === "validada" &&
-        photo.visionAnalysis
+        Boolean(photo.originalAssetId)
     );
   }
 
@@ -1992,7 +1982,7 @@ export class LocalDataStore implements DataStore {
     return {
       schemaVersion: "generation_plan.v1" as const,
       puedeGenerar: true,
-      motivo: "Foto validada con analisis disponible.",
+      motivo: "Foto lista para edicion basica.",
       sujetoPrincipal: "producto o escena principal de la foto",
       preservar: ["producto real", "logos visibles", "texto visible", "identidad de personas"],
       permitido: ["encuadre cuadrado", "mejora de luz", "fondo limpio", "composicion para Facebook"],

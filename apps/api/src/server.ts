@@ -2077,10 +2077,10 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           return {
             schemaVersion: "complete_upload.v1" as const,
             photo: completed.photo,
-            job: jobSummary(completed.job),
+            job: completed.job ? jobSummary(completed.job) : null,
             changed: {
-              entityIds: [business.id, params.batchId, completed.photo.id, completed.job.id],
-              queryKeys: [`batch:${params.batchId}`, `batches:${business.id}`, `jobs:${business.id}`]
+              entityIds: [business.id, params.batchId, completed.photo.id],
+              queryKeys: [`batch:${params.batchId}`, `batches:${business.id}`]
             },
             requestId
           };

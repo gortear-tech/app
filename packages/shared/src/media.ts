@@ -47,7 +47,7 @@ export const CompleteUploadBodySchema = Type.Object({
 export const CompleteUploadResponseSchema = Type.Object({
   schemaVersion: Type.Literal("complete_upload.v1"),
   photo: PhotoSchema,
-  job: JobSummarySchema,
+  job: Type.Union([Type.Null(), JobSummarySchema]),
   changed: Type.Object({
     entityIds: Type.Array(Type.String()),
     queryKeys: Type.Array(Type.String())

@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { ImageEditProvider, VisionAnalysisProvider } from "@fbmaniaco/providers";
+import { ImageEditProvider } from "@fbmaniaco/providers";
+import { variantEditPromptForStyle } from "@fbmaniaco/shared";
 import { processOneJob } from "./processor.js";
 
 describe("worker processor", () => {
@@ -36,38 +37,11 @@ describe("worker processor", () => {
     await rm(path, { force: true });
   });
 
-  it("validates an uploaded photo through an analyze_photo job", async () => {
+  it("uploads a photo as ready and generates edited variants one at a time", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-photo-${Date.now()}.json`);
     const store = new LocalDataStore(path);
     const previousPublicApiUrl = process.env.PUBLIC_API_URL;
     process.env.PUBLIC_API_URL = "https://api.example.test";
-    const visionProvider: VisionAnalysisProvider = {
-      mode: "responses",
-      analyze: async (input) => ({
-        analysis: {
-          schemaVersion: "vision_analysis.v1",
-          promptVersion: input.promptVersion,
-          subject: { type: "food", description: "Plato fotografiado" },
-          composition: { framing: "centered", angle: "front", background: "simple", lighting: "natural" },
-          palette: { dominantColors: ["red"], temperature: "warm", saturation: "medium", contrast: "medium" },
-          sensitiveElements: {
-            personVisible: false,
-            priceVisible: false,
-            logoVisible: false,
-            promotionVisible: false,
-            textVisible: false,
-            notes: []
-          },
-          quality: { sharpness: "ok", exposure: "ok", noise: "low" },
-          mood: { temperature: "warm", keywords: ["antojo"], description: "Apetitoso" },
-          summary: "Foto lista para revision."
-        },
-        responseId: "resp_test",
-        model: "test-vision",
-        usage: null,
-        latencyMs: 1
-      })
-    };
     const imagePrompts: string[] = [];
     const imageEditProvider: ImageEditProvider = {
       mode: "mock",
@@ -119,23 +93,13 @@ describe("worker processor", () => {
       actorId: "u2",
       requestId: "test"
     });
-    const analyzeImageUrl = new URL(String(completed.job.payload.imageUrl));
-    expect(Number(analyzeImageUrl.searchParams.get("expires")) - Math.floor(Date.now() / 1000)).toBeGreaterThan(60 * 60);
-
-    const result = await processOneJob({ store, workerId: "photo-worker", visionProvider });
     const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 
-    expect(result.processed).toBe(true);
-    expect(result.job?.id).toBe(completed.job.id);
-    expect(result.job?.status).toBe("succeeded");
+    expect(completed.job).toBeNull();
     expect(detail?.photos[0]?.status).toBe("validada");
     expect(detail?.photos[0]?.thumbnailAssetId).toBeTruthy();
     expect(detail?.photos[0]?.visionInputAssetId).toBeTruthy();
     expect(detail?.batch.status).toBe("pendiente_confirmacion");
-    const aiRuns = await store.listAiRuns({ workspaceId: workspace.id, jobId: completed.job.id });
-    expect(aiRuns).toHaveLength(1);
-    expect(aiRuns[0]?.promptTemplateId).toBe("photo-vision-analysis");
-    expect(aiRuns[0]?.schemaVersion).toBe("vision_analysis.v1");
 
     const generation = await store.requestGenerateBatch({
       workspaceId: workspace.id,
@@ -160,14 +124,14 @@ describe("worker processor", () => {
     expect(thirdVariantJob.job?.type).toBe("generate_variant");
     expect(variants).toHaveLength(3);
     expect(variants.every((variant) => variant.status === "generada" && Boolean(variant.caption))).toBe(true);
-    expect(variants.every((variant) => variant.caption?.includes("FBmaniaco Demo"))).toBe(true);
+    expect(variants.every((variant) => variant.caption?.includes("Maniaco Demo"))).toBe(true);
     expect(variants.every((variant) => !variant.caption?.includes("Pagina sin permiso completo"))).toBe(true);
     expect(variants.map((variant) => variant.assignedStyle?.styleName)).toEqual(["Playa", "Estudio", "Nocturno"]);
     expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(3);
     expect(imagePrompts).toEqual([
-      "Corrige la iluminación y los colores. Cambia el fondo. Playa.",
-      "Corrige la iluminación y los colores. Cambia el fondo. Estudio.",
-      "Corrige la iluminación y los colores. Cambia el fondo. Nocturno."
+      variantEditPromptForStyle("Playa", "fuerte"),
+      variantEditPromptForStyle("Estudio", "fuerte"),
+      variantEditPromptForStyle("Nocturno", "fuerte")
     ]);
     expect(variants.every((variant) => variant.generatedAssetId && variant.generatedAssetId !== detail?.photos[0]?.originalAssetId)).toBe(
       true
@@ -198,6 +162,7 @@ describe("worker processor", () => {
       actorId: "u2",
       requestId: "test-publish-now"
     });
+    expect(publishRequest.scheduledPost.status).toBe("publicacion_en_proceso");
     const publishResult = await processOneJob({ store, workerId: "calendar-worker" });
     const published = await store.getScheduledPost({
       workspaceId: workspace.id,

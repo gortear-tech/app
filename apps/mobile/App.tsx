@@ -178,6 +178,22 @@ const isVariantDone = (variant: Variant) =>
 const isVariantBusy = (variant: Variant) => ["pendiente", "generando", "queued", "generating"].includes(variant.status);
 const isPostFailed = (post: ScheduledPost) => ["fallida", "failed", "estado_incierto", "needs_user_action"].includes(post.status);
 const isPostGood = (post: ScheduledPost) => ["publicada", "published"].includes(post.status);
+const isPostPublishing = (post: ScheduledPost) => ["publicacion_en_proceso", "publishing"].includes(post.status);
+
+const postStatusLabel = (post: ScheduledPost) => {
+  if (isPostGood(post)) return "Publicada en Facebook";
+  if (isPostPublishing(post)) return "Publicando ahora";
+  if (isPostFailed(post)) return post.status === "estado_incierto" ? "Sin confirmacion de Meta" : "Fallo al publicar";
+  if (["cancelada", "cancelled"].includes(post.status)) return "Cancelada";
+  if (["programada", "scheduled"].includes(post.status)) return "Programada, aun no publicada";
+  return post.status;
+};
+
+const postStatusTone = (post: ScheduledPost): "good" | "warn" | "neutral" => {
+  if (isPostGood(post)) return "good";
+  if (isPostFailed(post) || isPostPublishing(post)) return "warn";
+  return "neutral";
+};
 
 const pct = (done: number, total: number) => (total <= 0 ? 0 : Math.min(100, Math.round((done / total) * 100)));
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -225,19 +241,65 @@ const compactStyleSummaryForPhoto = (photoId: string, preferences: Record<string
   return `${styles[0]?.styleName ?? "Estilo"} / ${styles[1]?.styleName ?? "Estilo"} +${styles.length - 2}`;
 };
 
-const promptsForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
-  variantStylesForPhoto(photoId, preferences, count)
-    .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName)}`)
+const promptsForPhoto = (
+  photoId: string,
+  preferences: Record<string, PhotoStylePreference>,
+  count: number,
+  fallbackIntensity: number
+) => {
+  const intensity = intensityLevel(preferences[photoId]?.intensity ?? fallbackIntensity);
+  return variantStylesForPhoto(photoId, preferences, count)
+    .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName, intensity)}`)
     .join("\n");
+};
 
-const styleOverridesForGeneration = (photos: Photo[], preferences: Record<string, PhotoStylePreference>): GenerateBatchStyleOverride[] =>
+const intensityLevel = (value: number): "ligera" | "media" | "fuerte" => {
+  if (value <= 40) return "ligera";
+  if (value >= 80) return "fuerte";
+  return "media";
+};
+
+const intensityCopy = (value: number) => {
+  if (value <= 40) return "Conserva la comida casi intacta; solo mejora foto.";
+  if (value >= 80) return "Cambia mas el ambiente, sin cambiar el platillo.";
+  return "Mejora presentacion sin transformar el producto.";
+};
+
+const GenerationIntensityControl = ({
+  value,
+  onChange
+}: {
+  value: number;
+  onChange: (next: number) => void;
+}) => (
+  <View style={styles.intensityBox}>
+    <View style={styles.rowBetween}>
+      <Text style={styles.rowTitle}>Intensidad de generacion</Text>
+      <Pill label={`${value}%`} tone={value <= 40 ? "good" : value >= 80 ? "warn" : "neutral"} />
+    </View>
+    <Text style={styles.muted}>{intensityCopy(value)}</Text>
+    <View style={styles.sliderRow}>
+      {[25, 40, 60, 80].map((option) => (
+        <Pressable key={option} style={[styles.sliderDot, value === option ? styles.sliderDotActive : null]} onPress={() => onChange(option)}>
+          <Text style={[styles.sliderText, value === option ? styles.sliderTextActive : null]}>{option}</Text>
+        </Pressable>
+      ))}
+    </View>
+  </View>
+);
+
+const styleOverridesForGeneration = (
+  photos: Photo[],
+  preferences: Record<string, PhotoStylePreference>,
+  fallbackIntensity: number
+): GenerateBatchStyleOverride[] =>
   photos.filter(isPhotoAnalyzed).map((photo) => {
     const style = styleForPhoto(photo.id, preferences);
     return {
       photoId: photo.id,
       styleId: style.id,
       styleName: style.name,
-      intensity: preferences[photo.id]?.intensity ?? 70
+      intensity: preferences[photo.id]?.intensity ?? fallbackIntensity
     };
   });
 
@@ -284,13 +346,17 @@ const flowForBatchSummary = (batch: BatchSummary): FlowStep => {
 const flowForBatchDetail = (detail: BatchDetail, posts: ScheduledPost[] = []): FlowStep => {
   const variants = detail.variants;
   const photos = detail.photos;
-  if (variants.some(isVariantBusy) || hasActiveWorkJobs(detail.jobs) || ["generando", "generating"].includes(detail.batch.status)) {
+  const batchPosts = posts.filter((post) => post.batchId === detail.batch.id);
+  if (batchPosts.length > 0) return "calendar";
+  const generationJobsActive = detail.jobs.some(
+    (job) => ["queued", "running"].includes(job.status) && ["generate_batch", "generate_variant"].includes(job.type)
+  );
+  if (variants.some(isVariantBusy) || generationJobsActive || ["generando", "generating"].includes(detail.batch.status)) {
     return "generate";
   }
   if (variants.some(isVariantReviewable)) return "review";
   const accepted = variants.some((variant) => ["aprobada", "approved"].includes(variant.status));
   if (accepted) return "schedule";
-  if (posts.some((post) => post.batchId === detail.batch.id)) return "calendar";
   if (variants.length > 0) return "review";
   if (photos.some(isPhotoBusy)) return "styles";
   return "styles";
@@ -305,13 +371,16 @@ function BootScreen() {
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [localUploadPreviews, setLocalUploadPreviews] = useState<LocalPhotoPreview[]>([]);
+  const [pageSnapshot, setPageSnapshot] = useState<MetaPage | null>(null);
   const [photoPrefs, setPhotoPrefs] = useState<Record<string, PhotoStylePreference>>({});
   const [stylePhotoId, setStylePhotoId] = useState<string | null>(null);
   const [detailPhotoId, setDetailPhotoId] = useState<string | null>(null);
+  const [generationIntensity, setGenerationIntensity] = useState(40);
   const [variantsPerPhoto, setVariantsPerPhoto] = useState(5);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [periodDays, setPeriodDays] = useState<PeriodDays>(14);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [publishNotice, setPublishNotice] = useState<string | null>(null);
   const [pendingAutoRouteBatchId, setPendingAutoRouteBatchId] = useState<string | null>(null);
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const updatePromptShown = useRef(false);
@@ -367,9 +436,14 @@ function BootScreen() {
     )
   });
   const selectedPage = useMemo(
-    () => (pages.data ?? []).find((page) => page.id === selectedPageId || page.isSelected) ?? null,
-    [pages.data, selectedPageId]
+    () => (pages.data ?? []).find((page) => page.id === selectedPageId || page.isSelected) ?? pageSnapshot,
+    [pageSnapshot, pages.data, selectedPageId]
   );
+
+  useEffect(() => {
+    const current = (pages.data ?? []).find((page) => page.id === selectedPageId || page.isSelected);
+    if (current) setPageSnapshot(current);
+  }, [pages.data, selectedPageId]);
 
   const batches = useQuery({
     queryKey: ["batches", selectedBusinessId],
@@ -611,7 +685,7 @@ function BootScreen() {
         selectedBusinessId ?? "",
         selectedBatch?.id ?? "",
         variantsPerPhoto,
-        styleOverridesForGeneration(photos, photoPrefs)
+        styleOverridesForGeneration(photos, photoPrefs, generationIntensity)
       ),
     onMutate: () => setFlow("generate"),
     onSuccess: invalidateWork
@@ -635,7 +709,10 @@ function BootScreen() {
 
   const schedule = useMutation({
     mutationFn: async () => confirmCalendar(token, selectedBusinessId ?? "", selectedBatch?.id ?? "", periodDays),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      setPublishNotice(
+        `Quedaron ${result.scheduledPosts.length} publicaciones programadas. Aun no estan publicadas; se enviaran automaticamente en su hora.`
+      );
       setFlow("calendar");
       await invalidateWork();
     }
@@ -643,17 +720,36 @@ function BootScreen() {
 
   const publishNow = useMutation({
     mutationFn: async (post: ScheduledPost) => publishScheduledPost(token, selectedBusinessId ?? "", post.batchId, post.id),
-    onSuccess: invalidateWork
+    onMutate: () => setPublishNotice("Mandando la publicacion a Facebook..."),
+    onSuccess: async (result) => {
+      setPublishNotice(
+        isPostGood(result.scheduledPost)
+          ? "Publicacion confirmada en Facebook."
+          : "La publicacion quedo enviada. Esperando confirmacion del proceso."
+      );
+      await invalidateWork();
+    }
   });
 
   const retryPost = useMutation({
     mutationFn: async (post: ScheduledPost) => retryScheduledPost(token, selectedBusinessId ?? "", post.batchId, post.id),
-    onSuccess: invalidateWork
+    onMutate: () => setPublishNotice("Reintentando publicacion..."),
+    onSuccess: async (result) => {
+      setPublishNotice(
+        isPostGood(result.scheduledPost)
+          ? "Publicacion confirmada en Facebook."
+          : "Reintento enviado. Revisa el estado en esta pantalla."
+      );
+      await invalidateWork();
+    }
   });
 
   const cancelPost = useMutation({
     mutationFn: async (post: ScheduledPost) => cancelScheduledPost(token, selectedBusinessId ?? "", post.batchId, post.id),
-    onSuccess: invalidateWork
+    onSuccess: async () => {
+      setPublishNotice("Publicacion cancelada.");
+      await invalidateWork();
+    }
   });
 
   const removeBatch = useMutation({
@@ -688,7 +784,6 @@ function BootScreen() {
   const generatedDone = variants.filter(isVariantDone).length;
   const generatedTotal = variants.length;
   const analyzedCount = photos.filter(isPhotoAnalyzed).length;
-  const analysisTotal = photos.length;
   const generationBusy = generateVariants.isPending || variants.some(isVariantBusy) || hasActiveWorkJobs(jobs);
   const readyPhotoCount = photos.filter(isPhotoAnalyzed).length;
   const photosReadyForGeneration = photos.length > 0 && analyzedCount === photos.length && !photos.some(isPhotoBusy);
@@ -811,6 +906,7 @@ function BootScreen() {
     reschedulePost.error;
 
   const openPage = (page: MetaPage) => {
+    setPageSnapshot(page);
     if (page.id === selectedPage?.id || page.isSelected) {
       setSelectedBatchId(null);
       setPendingAutoRouteBatchId(null);
@@ -1005,12 +1101,7 @@ function BootScreen() {
         {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
         {generationBusy ? <Alert tone="info" message="Este lote ya esta generando variantes." /> : null}
         {!generationBusy && reviewQueue.length > 0 ? <Alert tone="info" message="Este lote ya tiene variantes listas para revisar." /> : null}
-        {analysisTotal > 0 && analyzedCount < analysisTotal ? (
-          <Panel title="Analizando fotos" eyebrow={`${analyzedCount} de ${analysisTotal}`}>
-            <ProgressBar progress={pct(analyzedCount, analysisTotal)} />
-          </Panel>
-        ) : null}
-        {photos.length === 0 && localUploadPreviews.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para iniciar el analisis." /> : null}
+        {photos.length === 0 && localUploadPreviews.length === 0 ? <EmptyState title="Aun no hay fotos" body="Sube fotos para generar variantes." /> : null}
         {localUploadPreviews.length > 0 && photos.length === 0 ? (
           <Panel title="Fotos seleccionadas" eyebrow="Subiendo">
             <View style={styles.photoGrid}>
@@ -1033,7 +1124,7 @@ function BootScreen() {
         {stylePhotoId ? (
           <StylePicker
             photoId={stylePhotoId}
-            preference={photoPrefs[stylePhotoId] ?? { styleId: styleCatalog[0]!.id, intensity: 70 }}
+            preference={photoPrefs[stylePhotoId] ?? { styleId: styleCatalog[0]!.id, intensity: generationIntensity }}
             variantsPerPhoto={variantsPerPhoto}
             onChange={(next) => setPhotoPrefs((current) => ({ ...current, [stylePhotoId]: next }))}
             onClose={() => setStylePhotoId(null)}
@@ -1042,7 +1133,7 @@ function BootScreen() {
         {detailPhotoId ? (
           <PhotoDetail
             photo={photos.find((photo) => photo.id === detailPhotoId) ?? null}
-            prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto)}
+            prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto, generationIntensity)}
             onClose={() => setDetailPhotoId(null)}
           />
         ) : null}
@@ -1084,7 +1175,7 @@ function BootScreen() {
               <Text style={styles.panelTitle}>{done} de {Math.max(total, done)} generadas</Text>
             </View>
             <ProgressBar progress={pct(done, Math.max(total, done))} />
-            <Text style={styles.muted}>Aplicando estilo, preparando imagen y escribiendo caption.</Text>
+            <Text style={styles.muted}>Editando cada foto con un fondo distinto.</Text>
             <Button label="Salir del lote" icon="albums-outline" variant="secondary" onPress={leaveBatch} />
           </Panel>
         </Screen>
@@ -1242,6 +1333,7 @@ function BootScreen() {
     <Screen>
       {renderPageChrome()}
       {renderJobAlerts()}
+      {publishNotice ? <Alert tone="info" message={publishNotice} /> : null}
       {selectedBatch ? (
         <BatchTop
           batch={selectedBatch}
@@ -1907,7 +1999,7 @@ function StylePicker({
           </Pressable>
         ))}
       </View>
-      <Text style={styles.promptBox}>{promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto)}</Text>
+      <Text style={styles.promptBox}>{promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, preference.intensity)}</Text>
       <Button label="Listo" icon="checkmark-outline" variant="secondary" onPress={onClose} />
     </Panel>
   );
@@ -2094,13 +2186,22 @@ function ScheduledPostRow({
       <View style={[styles.timelineDot, isPostFailed(post) ? styles.timelineBad : isPostGood(post) ? styles.timelineGood : null]} />
       <View style={styles.flex}>
         <Text style={styles.rowTitle}>{formatDate(post.scheduledFor)} - {formatTime(post.scheduledFor)}</Text>
-        <Text style={styles.muted}>{post.status} / {post.remoteStatus}</Text>
+        <Pill label={postStatusLabel(post)} tone={postStatusTone(post)} />
+        {post.remoteStatus === "confirmado_meta" && post.remotePostUrl ? (
+          <Text style={styles.muted}>Confirmada por Meta.</Text>
+        ) : post.remoteStatus === "incierto" ? (
+          <Text style={styles.muted}>Meta no confirmo el resultado. Revisa o reintenta.</Text>
+        ) : (
+          <Text style={styles.muted}>Pendiente de envio.</Text>
+        )}
         <Text style={styles.captionPreview} numberOfLines={3}>{post.caption ?? "Sin caption"}</Text>
         <View style={styles.compactActions}>
           <MiniButton label="+1h" onPress={() => onShift(0, 1)} disabled={busy} />
           <MiniButton label="+1d" onPress={() => onShift(1, 0)} disabled={busy} />
           {isPostFailed(post) ? <MiniButton label="Reintentar" icon="refresh-outline" onPress={onRetry} disabled={busy} /> : null}
-          {post.status === "programada" ? <MiniButton label="Publicar" icon="send-outline" onPress={onPublish} disabled={busy} /> : null}
+          {["programada", "scheduled"].includes(post.status) ? (
+            <MiniButton label="Publicar ahora" icon="send-outline" onPress={onPublish} disabled={busy} />
+          ) : null}
           {post.status !== "cancelada" && post.status !== "publicada" ? <MiniButton label="Cancelar" tone="danger" onPress={onCancel} disabled={busy} /> : null}
         </View>
       </View>
@@ -2131,7 +2232,7 @@ function WorkBanner({
     target = "styles";
   } else if (photos.some(isPhotoBusy)) {
     const done = photos.filter(isPhotoAnalyzed).length;
-    label = `Analizando ${done} de ${photos.length}...`;
+    label = `Preparando ${done} de ${photos.length}...`;
     progress = pct(done, photos.length);
     target = "styles";
   } else if (photos.length > 0 && variants.length === 0) {
@@ -2371,6 +2472,7 @@ const styles = StyleSheet.create({
   panelTitle: { color: palette.text, fontSize: 18, fontWeight: "900" },
   rowTitle: { color: palette.text, fontSize: 15, fontWeight: "800" },
   muted: { color: palette.muted, fontSize: 14, lineHeight: 20, fontWeight: "600" },
+  rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   empty: { gap: 5, padding: 12, borderWidth: 1, borderColor: palette.border, borderRadius: 8, backgroundColor: palette.surface },
   button: {
     minHeight: 48,
@@ -2424,6 +2526,7 @@ const styles = StyleSheet.create({
   photoTileBody: { gap: 5, padding: 10 },
   styleRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 58, padding: 10, borderRadius: 8, backgroundColor: palette.surface },
   styleRowActive: { borderWidth: 1, borderColor: palette.blue },
+  intensityBox: { gap: 8, padding: 10, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.surface },
   sliderRow: { flexDirection: "row", gap: 8 },
   sliderDot: { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 40, borderRadius: 8, backgroundColor: palette.surface },
   sliderDotActive: { backgroundColor: palette.white },

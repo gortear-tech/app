@@ -9,7 +9,7 @@ import {
   VisionAnalysisProvider
 } from "@fbmaniaco/providers";
 import { createClient } from "@supabase/supabase-js";
-import { variantEditPromptForStyle, variantStylePresetForIndex, type AssignedStyle } from "@fbmaniaco/shared";
+import { variantEditPromptForStyle, variantStylePresetForIndex, type AssignedStyle, type VisionAnalysis } from "@fbmaniaco/shared";
 
 export type WorkerResult = {
   processed: boolean;
@@ -25,7 +25,7 @@ const envFlag = (name: string, fallback: boolean) => {
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
 const backgroundPromptForVariant = (variantIndex: number, style?: AssignedStyle) => {
   const background = style?.styleName.trim() || variantStylePresetForIndex(variantIndex).styleName;
-  return variantEditPromptForStyle(background);
+  return variantEditPromptForStyle(background, style?.intensity ?? "media");
 };
 
 const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: string; assetId: string | null | undefined }) => {
@@ -249,7 +249,7 @@ export const processOneJob = async (input: {
                   styleName: context.style.styleName,
                   variantIndex: context.variant.variantIndex,
                   fileName: context.photo.fileName ?? null,
-                  visionAnalysis: context.photo.visionAnalysis,
+                  visionAnalysis: context.photo.visionAnalysis as VisionAnalysis,
                   requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
                   operationKey: captionOperationKey,
                   promptVersion: context.promptVersion
@@ -325,7 +325,8 @@ export const processOneJob = async (input: {
             prompt: backgroundPromptForVariant(context.variant.variantIndex, context.style),
             requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
             operationKey,
-            size: "1024x1024"
+            size: "1024x1024",
+            quality: "medium"
           });
           generatedAsset = await storeGeneratedVariantImage({
             workspaceId: job.workspaceId,

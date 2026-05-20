@@ -1020,7 +1020,7 @@ export class SupabaseDataStoreCore {
     return toUploadIntent(result.rows[0]);
   }
 
-  async completeUpload(input: Parameters<DataStore["completeUpload"]>[0]): Promise<{ photo: Photo; job: StoredJob }> {
+  async completeUpload(input: Parameters<DataStore["completeUpload"]>[0]): Promise<{ photo: Photo; job: StoredJob | null }> {
     this.assertUploadShape(input.contentType, input.fileSize, input.originalFileName);
     const client = await this.pool.connect();
     try {
@@ -1066,9 +1066,9 @@ export class SupabaseDataStoreCore {
       );
       const photoResult = await client.query(
         `insert into public.photos
-         (id, workspace_id, business_id, batch_id, file_name, storage_key, original_asset_id, content_hash,
-          mime_type, width, height, status, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'analyzing', now(), now())
+         (id, workspace_id, business_id, batch_id, file_name, storage_key, original_asset_id,
+          thumbnail_asset_id, vision_input_asset_id, content_hash, mime_type, width, height, status, created_at, updated_at)
+         values ($1, $2, $3, $4, $5, $6, $7, $7, $7, $8, $9, $10, $11, 'validada', now(), now())
          returning *`,
         [
           photoId,
@@ -1090,42 +1090,14 @@ export class SupabaseDataStoreCore {
         `update public.batches
          set photos_count = (
            select count(*)::int from public.photos where batch_id = $1 and status <> 'eliminada'
-         ), last_activity_at = now(), updated_at = now()
+         ),
+         status = case when status = any($2::text[]) then status else 'pendiente_confirmacion' end,
+         last_activity_at = now(), updated_at = now()
          where id = $1`,
-        [input.batchId]
+        [input.batchId, [...terminalBatchStatuses]]
       );
-      const jobResult = await client.query(
-        `insert into public.jobs
-         (id, type, status, workspace_id, business_id, batch_id, photo_id, dedupe_key, payload, run_after, created_at, updated_at)
-         values ($1, 'analyze_photo', 'queued', $2, $3, $4, $5, $6, $7::jsonb, now(), now(), now())
-         on conflict do nothing
-         returning *`,
-        [
-          randomUUID(),
-          input.workspaceId,
-          input.businessId,
-          input.batchId,
-          photoId,
-          `analyze_photo:${photoId}`,
-          JSON.stringify({
-            photoId,
-            batchId: input.batchId,
-            imageUrl: publicMediaUrl(originalAssetId),
-            contentType: input.contentType,
-            fileSize: input.fileSize,
-            requestId: input.requestId
-          })
-        ]
-      );
-      const job =
-        jobResult.rows[0] ??
-        (
-          await client.query("select * from public.jobs where type = 'analyze_photo' and dedupe_key = $1", [
-            `analyze_photo:${photoId}`
-          ])
-        ).rows[0];
       await client.query("commit");
-      return { photo: toPhoto(photoResult.rows[0]), job: toJob(job) };
+      return { photo: toPhoto(photoResult.rows[0]), job: null };
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -1237,7 +1209,7 @@ export class SupabaseDataStoreCore {
         code: "batch_not_ready_for_generation",
         statusCode: 409,
         message: `Batch cannot generate variants from status ${batch.status}`,
-        userMessage: "Primero termina de subir y analizar las fotos antes de generar variantes.",
+        userMessage: "Primero termina de subir las fotos antes de generar variantes.",
         retryable: false,
         action: "refresh"
       });
@@ -1248,7 +1220,7 @@ export class SupabaseDataStoreCore {
         code: "no_valid_photos_for_generation",
         statusCode: 409,
         message: "Batch has no validated photos",
-        userMessage: "Necesitas al menos una foto analizada antes de generar variantes.",
+        userMessage: "Necesitas al menos una foto lista antes de generar variantes.",
         retryable: false,
         action: "refresh"
       });
@@ -1401,7 +1373,7 @@ export class SupabaseDataStoreCore {
       [variant.photoId, input.workspaceId, input.businessId, input.batchId]
     );
     const photo = photoResult.rows[0] ? toPhoto(photoResult.rows[0]) : null;
-    if (!photo?.visionAnalysis) return null;
+    if (!photo || photo.status !== "validada") return null;
     const business = await this.requireBusiness(input.workspaceId, input.businessId);
     const pageResult = business.facebookPageId
       ? await this.pool.query("select * from public.facebook_pages where id = $1 and workspace_id = $2", [
@@ -1411,7 +1383,7 @@ export class SupabaseDataStoreCore {
       : null;
     return {
       variant,
-      photo: photo as Photo & { visionAnalysis: VisionAnalysis },
+      photo,
       business,
       page: pageResult?.rows[0] ? toMetaPage(pageResult.rows[0]) : null,
       style: variant.assignedStyle ?? this.assignStyle(variant.variantIndex),
@@ -1446,7 +1418,7 @@ export class SupabaseDataStoreCore {
         await client.query("commit");
         return current;
       }
-      if (!photo || photo.status !== "validada" || !photo.visionAnalysis) {
+      if (!photo || photo.status !== "validada") {
         throw new AppError({
           code: "photo_not_ready_for_variant",
           statusCode: 409,
@@ -1502,7 +1474,7 @@ export class SupabaseDataStoreCore {
         businessName: businessRow?.name ?? "tu negocio",
         pageName: businessRow?.page_name ?? businessRow?.name ?? "tu pagina",
         category: businessRow?.category ?? "Facebook Page",
-        visionAnalysis: photo.visionAnalysis as VisionAnalysis
+        visionAnalysis: photo.visionAnalysis ? (photo.visionAnalysis as VisionAnalysis) : null
       });
       const captionResult = input.captionResult ?? fallbackCaptionResult;
       const caption = captionResult.caption;
@@ -1802,6 +1774,7 @@ export class SupabaseDataStoreCore {
     );
     if (!asset.rows[0]) return await this.failScheduledPost(post.id, "media_not_available");
     const operationKey = `meta_publish:${post.id}`;
+    await this.pool.query("update public.scheduled_posts set status = 'publicacion_en_proceso', updated_at = now() where id = $1", [post.id]);
     await this.upsertExternalOperation({
       operationKey,
       workspaceId: post.workspaceId,
@@ -1953,7 +1926,8 @@ export class SupabaseDataStoreCore {
     const scheduledFor = now();
     const updated = await this.pool.query(
       `update public.scheduled_posts
-       set delivery_mode = 'publish_now', scheduled_for = $2, scheduled_for_unix = $3, updated_at = $2
+       set delivery_mode = 'publish_now', scheduled_for = $2, scheduled_for_unix = $3,
+           status = 'publicacion_en_proceso', updated_at = $2
        where id = $1 returning *`,
       [post.id, scheduledFor, Math.floor(Date.now() / 1000)]
     );
@@ -2143,7 +2117,7 @@ export class SupabaseDataStoreCore {
     const result = await this.pool.query(
       `select * from public.photos
        where workspace_id = $1 and business_id = $2 and batch_id = $3
-         and status = 'validada' and vision_analysis is not null
+         and status = 'validada' and original_asset_id is not null
        order by created_at asc`,
       [workspaceId, businessId, batchId]
     );
@@ -2188,7 +2162,7 @@ export class SupabaseDataStoreCore {
     return {
       schemaVersion: "generation_plan.v1" as const,
       puedeGenerar: true,
-      motivo: "Foto validada con analisis disponible.",
+      motivo: "Foto lista para edicion basica.",
       sujetoPrincipal: "producto o escena principal de la foto",
       preservar: ["producto real", "logos visibles", "texto visible", "identidad de personas"],
       permitido: ["encuadre cuadrado", "mejora de luz", "fondo limpio", "composicion para Facebook"],

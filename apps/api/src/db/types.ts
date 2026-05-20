@@ -169,7 +169,7 @@ export type GeneratedVariantAssetInput = {
 
 export type VariantCaptionContext = {
   variant: Variant;
-  photo: Photo & { visionAnalysis: VisionAnalysis };
+  photo: Photo;
   business: Business;
   page: MetaPage | null;
   style: AssignedStyle;
@@ -269,7 +269,7 @@ export type DataStore = {
     height?: number;
     actorId: string;
     requestId: string;
-  }): Promise<{ photo: Photo; job: StoredJob }>;
+  }): Promise<{ photo: Photo; job: StoredJob | null }>;
   getPhoto(input: { workspaceId: string; photoId: string }): Promise<Photo | null>;
   completeAnalyzePhoto(input: {
     photoId: string;

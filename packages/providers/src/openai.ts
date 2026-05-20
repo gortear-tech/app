@@ -58,6 +58,7 @@ export type ImageEditInput = {
   requestId: string;
   operationKey: string;
   size?: string;
+  quality?: "auto" | "low" | "medium" | "high";
 };
 
 export type ImageEditProviderResult = {
@@ -84,7 +85,7 @@ export type OpenAiProviderConfig = {
 };
 
 const defaultVisionModel = "gpt-5.5";
-const defaultImageEditModel = "gpt-image-1";
+const defaultImageEditModel = "gpt-image-2";
 const defaultPromptVersion = "vision-analysis-v1";
 const defaultCaptionPromptVersion = "caption-page-context-v1";
 const supportsReasoningEffort = (model: string) => /^(gpt-5|o[1-9]|o\d)/i.test(model);
@@ -486,6 +487,7 @@ export const createImageEditProvider = (config: OpenAiProviderConfig): ImageEdit
         form.append("model", model);
         form.append("prompt", input.prompt);
         form.append("size", input.size ?? "1024x1024");
+        form.append("quality", input.quality ?? "medium");
         form.append("output_format", "jpeg");
         form.append("image", new Blob([sourceBytes], { type: input.mimeType }), imageFileNameForMime(input.mimeType));
 

@@ -412,32 +412,10 @@ describe("api bootstrap and tenancy", () => {
       }
     });
     expect(complete.statusCode).toBe(200);
-    expect(complete.json().photo.status).toBe("analyzing");
-    expect(complete.json().job.type).toBe("analyze_photo");
+    expect(complete.json().photo.status).toBe("validada");
+    expect(complete.json().job).toBeNull();
     expect(JSON.stringify(complete.json())).not.toMatch(/imageDataUrl|access_token|pageAccessToken/i);
 
-    await store.completeAnalyzePhoto({
-      photoId: complete.json().photo.id,
-      jobId: complete.json().job.id,
-      analysis: {
-        schemaVersion: "vision_analysis.v1",
-        promptVersion: "test",
-        subject: { type: "food", description: "Plato fotografiado" },
-        composition: { framing: "centered", angle: "front", background: "simple", lighting: "natural" },
-        palette: { dominantColors: ["red"], temperature: "warm", saturation: "medium", contrast: "medium" },
-        sensitiveElements: {
-          personVisible: false,
-          priceVisible: false,
-          logoVisible: false,
-          promotionVisible: false,
-          textVisible: false,
-          notes: []
-        },
-        quality: { sharpness: "ok", exposure: "ok", noise: "low" },
-        mood: { temperature: "warm", keywords: ["antojo"], description: "Apetitoso" },
-        summary: "Foto lista para revision."
-      }
-    });
     const detail = await app.inject({
       method: "GET",
       url: `/businesses/${businessId}/batches/${batchId}`,

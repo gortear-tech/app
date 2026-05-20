@@ -172,5 +172,17 @@ export const variantStylePresetForIndex = (variantIndex: number, startStyleId?: 
   return VARIANT_STYLE_PRESETS[(startIndex + Math.max(1, variantIndex) - 1) % VARIANT_STYLE_PRESETS.length]!;
 };
 
-export const variantEditPromptForStyle = (styleName: string) =>
-  `Corrige la iluminación y los colores. Cambia el fondo. ${styleName}.`;
+const backgroundWordForStyle = (styleName: string) => {
+  const lower = styleName.toLowerCase();
+  if (lower.includes("rmol")) return "marmol";
+  if (lower.includes("jard")) return "jardin";
+  if (lower.includes("bamb")) return "bambu";
+  return lower
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9 ]/g, "")
+    .trim();
+};
+
+export const variantEditPromptForStyle = (styleName: string, _intensity: AssignedStyle["intensity"] = "media") =>
+  `Corrige la iluminacion y los colores. Cambia el fondo a uno de ${backgroundWordForStyle(styleName)}.`;

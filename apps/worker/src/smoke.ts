@@ -2,40 +2,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { rm } from "node:fs/promises";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { ImageEditProvider, VisionAnalysisProvider } from "@fbmaniaco/providers";
+import { ImageEditProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 const path = join(tmpdir(), `fbmaniaco-worker-${Date.now()}.json`);
 const store = new LocalDataStore(path);
 const previousPublicApiUrl = process.env.PUBLIC_API_URL;
 process.env.PUBLIC_API_URL = "https://api.example.test";
-const visionProvider: VisionAnalysisProvider = {
-  mode: "responses",
-  analyze: async (input) => ({
-    analysis: {
-      schemaVersion: "vision_analysis.v1",
-      promptVersion: input.promptVersion,
-      subject: { type: "food", description: "Foto smoke" },
-      composition: { framing: "centered", angle: "front", background: "simple", lighting: "natural" },
-      palette: { dominantColors: ["red"], temperature: "warm", saturation: "medium", contrast: "medium" },
-      sensitiveElements: {
-        personVisible: false,
-        priceVisible: false,
-        logoVisible: false,
-        promotionVisible: false,
-        textVisible: false,
-        notes: []
-      },
-      quality: { sharpness: "ok", exposure: "ok", noise: "low" },
-      mood: { temperature: "warm", keywords: ["antojo"], description: "Lista para publicar" },
-      summary: "Foto validada por smoke."
-    },
-    responseId: "smoke-vision",
-    model: "smoke-vision",
-    usage: null,
-    latencyMs: 1
-  })
-};
 const imageEditProvider: ImageEditProvider = {
   mode: "mock",
   edit: async (input) => ({
@@ -84,10 +57,9 @@ const upload = await store.completeUpload({
   actorId: "worker-smoke",
   requestId: "worker-smoke"
 });
-const photoResult = await processOneJob({ store, workerId: "worker-smoke", visionProvider });
 const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
-if (!photoResult.processed || photoResult.job?.id !== upload.job.id || detail?.photos[0]?.status !== "validada") {
-  throw new Error(`worker analyze smoke failed: ${JSON.stringify({ photoResult, detail })}`);
+if (upload.job !== null || detail?.photos[0]?.status !== "validada") {
+  throw new Error(`worker upload smoke failed: ${JSON.stringify({ upload, detail })}`);
 }
 
 await store.requestGenerateBatch({
