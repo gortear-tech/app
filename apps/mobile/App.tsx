@@ -22,6 +22,7 @@ import {
   Animated,
   Alert as NativeAlert,
   AppState,
+  BackHandler,
   Image,
   ImageBackground,
   type ImageStyle,
@@ -838,13 +839,14 @@ function BootScreen() {
     variants.length
   ]);
 
-  const leaveBatch = () => {
+  const leaveBatch = useCallback(() => {
     setSelectedBatchId(null);
     setStylePhotoId(null);
     setDetailPhotoId(null);
+    setSelectedDay(null);
     setPendingAutoRouteBatchId(null);
     setFlow(selectedPage ? "styles" : "home");
-  };
+  }, [selectedPage]);
 
   const confirmDeleteBatch = (batch: BatchSummary) => {
     NativeAlert.alert(
@@ -917,6 +919,9 @@ function BootScreen() {
   };
 
   const openBatch = (batch: BatchSummary) => {
+    setStylePhotoId(null);
+    setDetailPhotoId(null);
+    setSelectedDay(null);
     setSelectedBatchId(batch.id);
     setPendingAutoRouteBatchId(batch.id);
     setFlow(flowForBatchSummary(batch));
@@ -945,11 +950,98 @@ function BootScreen() {
     return selectedPage?.pageName ? `Pagina activa: ${selectedPage.pageName}` : "Pagina activa";
   }, [bootstrap.data, bootstrap.isError, bootstrap.isLoading, selectedPage?.pageName]);
 
-  const showPageDirectory = () => {
+  const showPageDirectory = useCallback(() => {
     setSelectedBatchId(null);
+    setStylePhotoId(null);
+    setDetailPhotoId(null);
+    setSelectedDay(null);
     setPendingAutoRouteBatchId(null);
     setFlow("home");
-  };
+  }, []);
+
+  const handleAndroidBack = useCallback(() => {
+    if (stylePhotoId) {
+      setStylePhotoId(null);
+      return true;
+    }
+    if (detailPhotoId) {
+      setDetailPhotoId(null);
+      return true;
+    }
+    if (selectedDay) {
+      setSelectedDay(null);
+      return true;
+    }
+    if (!bootstrap.data?.authenticated || bootstrap.data.nextStep === "select_page") {
+      return false;
+    }
+    if (flow === "settings") {
+      if (selectedBatch && detail) {
+        setFlow(flowForBatchDetail(detail, posts));
+      } else if (selectedBatch) {
+        setFlow(flowForBatchSummary(selectedBatch));
+      } else if (selectedPage) {
+        setFlow("styles");
+      } else {
+        setFlow("home");
+      }
+      return true;
+    }
+    if (selectedBatch) {
+      if (flow === "calendar") {
+        setFlow(acceptedCount > 0 ? "schedule" : hasVariants ? "review" : photosReadyForGeneration ? "generate" : "styles");
+        return true;
+      }
+      if (flow === "schedule") {
+        setFlow(hasVariants ? "review" : photosReadyForGeneration ? "generate" : "styles");
+        return true;
+      }
+      if (flow === "review") {
+        setFlow(generationBusy || hasVariants ? "generate" : "styles");
+        return true;
+      }
+      if (flow === "generate") {
+        setFlow("styles");
+        return true;
+      }
+      if (flow === "styles") {
+        leaveBatch();
+        return true;
+      }
+    }
+    if (selectedPage && flow === "styles") {
+      showPageDirectory();
+      return true;
+    }
+    if (flow !== "home") {
+      setFlow("home");
+      return true;
+    }
+    return false;
+  }, [
+    acceptedCount,
+    bootstrap.data?.authenticated,
+    bootstrap.data?.nextStep,
+    detail,
+    detailPhotoId,
+    flow,
+    generationBusy,
+    hasVariants,
+    leaveBatch,
+    photosReadyForGeneration,
+    posts,
+    selectedBatch,
+    selectedDay,
+    selectedPage,
+    showPageDirectory,
+    stylePhotoId
+  ]);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return undefined;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", handleAndroidBack);
+    return () => subscription.remove();
+  }, [handleAndroidBack]);
 
   const renderPageChrome = (options: { includeUpload?: boolean } = {}) => {
     if (!selectedPage) return null;
