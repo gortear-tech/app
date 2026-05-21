@@ -2,7 +2,7 @@
   "expo": {
     "name": "Maniaco",
     "slug": "fbmaniaco",
-    "version": "0.1.16",
+    "version": "0.1.20",
     "runtimeVersion": {
       "policy": "appVersion"
     },

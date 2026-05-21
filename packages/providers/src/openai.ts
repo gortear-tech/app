@@ -29,10 +29,14 @@ export type CaptionInput = {
   pageName: string;
   businessName: string;
   category?: string | null;
+  imageUrl?: string | null;
   styleName: string;
   variantIndex: number;
   fileName?: string | null;
-  visionAnalysis: VisionAnalysis;
+  visionAnalysis?: VisionAnalysis | null;
+  seoKeywords?: string[];
+  contentTypes?: string[];
+  pageContext?: string | null;
   requestId: string;
   operationKey: string;
   promptVersion: string;
@@ -164,12 +168,19 @@ const cleanHashtag = (value: string) =>
 const fallbackCaption = (input: CaptionInput): CaptionResult => {
   const pageName = input.pageName.trim() || input.businessName.trim() || "tu pagina";
   const category = input.category?.trim() || "negocio local";
-  const subject = input.visionAnalysis.subject.description || input.visionAnalysis.summary || "esta imagen";
-  const moodKeywords = input.visionAnalysis.mood.keywords.slice(0, 3).filter(Boolean);
+  const subject = input.visionAnalysis?.subject.description || input.visionAnalysis?.summary || input.fileName || "esta imagen";
+  const moodKeywords = input.visionAnalysis?.mood.keywords.slice(0, 3).filter(Boolean) ?? [];
+  const seoKeywords = (input.seoKeywords ?? []).slice(0, 6).filter(Boolean);
+  const contentTypes = (input.contentTypes ?? []).slice(0, 4).filter(Boolean);
+  const pageContext = input.pageContext?.trim();
   const mood = moodKeywords.length > 0 ? ` Con un tono ${moodKeywords.join(", ")}.` : "";
+  const seoLine = seoKeywords.length > 0 ? `\n\nEnfoque SEO: ${seoKeywords.join(", ")}.` : "";
+  const contentLine = contentTypes.length > 0 ? ` Tipo: ${contentTypes.join(", ")}.` : "";
+  const contextLine = pageContext ? `\n\n${pageContext}` : "";
   const localTag = cleanHashtag(pageName);
   const categoryTag = cleanHashtag(category);
-  const hashtagLine = [localTag ? `#${localTag}` : null, categoryTag ? `#${categoryTag}` : null]
+  const seoTags = seoKeywords.map(cleanHashtag).filter(Boolean).slice(0, 2);
+  const hashtagLine = [localTag ? `#${localTag}` : null, categoryTag ? `#${categoryTag}` : null, ...seoTags.map((tag) => `#${tag}`)]
     .filter(Boolean)
     .join(" ");
   return {
@@ -177,10 +188,14 @@ const fallbackCaption = (input: CaptionInput): CaptionResult => {
     promptVersion: input.promptVersion || defaultCaptionPromptVersion,
     caption:
       `${pageName}: ${subject}.\n\n` +
-      `Una publicacion pensada para ${category}, con estilo ${input.styleName}.${mood}\n\n` +
+      `Una publicacion pensada para ${category}, con estilo ${input.styleName}.${contentLine}${mood}${contextLine}${seoLine}\n\n` +
       `${hashtagLine || "#NegocioLocal"}`,
-    seoTermsUsed: [pageName, category, ...moodKeywords].filter(Boolean),
-    warnings: ["caption_generado_con_contexto_de_pagina", "no_inventa_precios_ni_promociones"]
+    seoTermsUsed: [pageName, category, ...seoKeywords, ...contentTypes, ...moodKeywords].filter(Boolean),
+    warnings: [
+      "caption_generado_con_prompt_separado",
+      input.imageUrl ? "caption_adaptado_a_imagen_generada" : "caption_sin_url_de_imagen_generada",
+      "no_inventa_precios_ni_promociones"
+    ]
   };
 };
 
@@ -361,6 +376,41 @@ export const createCaptionGenerationProvider = (config: OpenAiProviderConfig): C
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
+        const userContent: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string }> = [
+          {
+            type: "input_text",
+            text: JSON.stringify({
+              promptVersion: input.promptVersion,
+              operationKey: input.operationKey,
+              page: {
+                name: input.pageName,
+                businessName: input.businessName,
+                category: input.category ?? "Facebook Page",
+                seoKeywords: input.seoKeywords ?? [],
+                contentTypes: input.contentTypes ?? [],
+                context: input.pageContext ?? null
+              },
+              creative: {
+                styleName: input.styleName,
+                variantIndex: input.variantIndex,
+                fileName: input.fileName ?? null,
+                imageSource: input.imageUrl ? "generated_variant" : "text_context_only"
+              },
+              imageAnalysis: input.visionAnalysis ?? null,
+              outputRules: [
+                "caption maximo 650 caracteres salvo que la imagen necesite contexto",
+                "personaliza el texto para esta pagina y esta imagen, sin mezclar informacion de otras paginas",
+                "usa palabras clave SEO solo si encajan naturalmente",
+                "incluye 1 llamada suave a interactuar o visitar la pagina cuando sea natural",
+                "usa 1 a 4 hashtags relevantes derivados de la pagina, categoria, imagen o palabras clave",
+                "no menciones que fue hecho con IA"
+              ]
+            })
+          }
+        ];
+        if (input.imageUrl) {
+          userContent.push({ type: "input_image", image_url: input.imageUrl });
+        }
         const payload = {
           model,
           prompt_cache_key: `fbmaniaco:${input.promptVersion}`,
@@ -380,32 +430,7 @@ export const createCaptionGenerationProvider = (config: OpenAiProviderConfig): C
             },
             {
               role: "user",
-              content: [
-                {
-                  type: "input_text",
-                  text: JSON.stringify({
-                    promptVersion: input.promptVersion,
-                    operationKey: input.operationKey,
-                    page: {
-                      name: input.pageName,
-                      businessName: input.businessName,
-                      category: input.category ?? "Facebook Page"
-                    },
-                    creative: {
-                      styleName: input.styleName,
-                      variantIndex: input.variantIndex,
-                      fileName: input.fileName ?? null
-                    },
-                    imageAnalysis: input.visionAnalysis,
-                    outputRules: [
-                      "caption maximo 650 caracteres salvo que la imagen necesite contexto",
-                      "incluye 1 llamada suave a interactuar o visitar la pagina cuando sea natural",
-                      "usa 1 a 4 hashtags relevantes derivados de la pagina o categoria",
-                      "no menciones que fue hecho con IA"
-                    ]
-                  })
-                }
-              ]
+              content: userContent
             }
           ],
           text: {

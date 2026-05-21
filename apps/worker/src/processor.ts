@@ -27,6 +27,75 @@ const backgroundPromptForVariant = (variantIndex: number, style?: AssignedStyle)
   const background = style?.styleName.trim() || variantStylePresetForIndex(variantIndex).styleName;
   return variantEditPromptForStyle(background, style?.intensity ?? "media");
 };
+type ImageEditorRuntime = {
+  providerName: string;
+  config: Parameters<typeof createImageEditProvider>[0];
+  size: string;
+  quality: "auto" | "low" | "medium" | "high";
+};
+
+const decodeStoredSecret = (value: unknown) => {
+  if (typeof value !== "string") return null;
+  const prefix = value.startsWith("server:") ? "server:" : value.startsWith("local-dev:") ? "local-dev:" : null;
+  if (!prefix) return null;
+  return Buffer.from(value.slice(prefix.length), "base64url").toString("utf8");
+};
+
+const stringSetting = (record: Record<string, unknown>, key: string, fallback = "") => {
+  const value = record[key];
+  return typeof value === "string" ? value.trim() : fallback;
+};
+
+const textSetting = (record: Record<string, unknown>, key: string) => stringSetting(record, key, "");
+
+const listSetting = (record: Record<string, unknown>, key: string) => {
+  const value = record[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
+};
+
+const numberSetting = (record: Record<string, unknown>, key: string, fallback: number, min: number, max: number) => {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.round(value))) : fallback;
+};
+
+const imageEditorRuntimeFromBusiness = (
+  metadata: Record<string, unknown>,
+  fallback: Parameters<typeof createImageEditProvider>[0]
+): ImageEditorRuntime => {
+  const editors = Array.isArray(metadata.imageEditors) ? metadata.imageEditors : [];
+  const active = editors.find(
+    (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item) && item.enabled === true
+  );
+  if (!active) {
+    return {
+      providerName: "openai",
+      config: fallback,
+      size: "1024x1024",
+      quality: "medium"
+    };
+  }
+  const provider = stringSetting(active, "provider", "openai_compatible");
+  const apiKey = decodeStoredSecret(active.apiKeySecret) ?? fallback.apiKey;
+  const baseUrl = provider === "openai" ? fallback.baseUrl : stringSetting(active, "baseUrl", fallback.baseUrl);
+  const model = stringSetting(active, "model", fallback.imageEditModel ?? "gpt-image-2");
+  const size = stringSetting(active, "size", "1024x1024");
+  const qualitySetting = stringSetting(active, "quality", "medium");
+  const quality = qualitySetting === "auto" || qualitySetting === "low" || qualitySetting === "high" ? qualitySetting : "medium";
+  const config: Parameters<typeof createImageEditProvider>[0] = {
+    ...fallback,
+    timeoutMs: numberSetting(active, "timeoutMs", fallback.timeoutMs ?? 30000, 5000, 120000)
+  };
+  if (apiKey) config.apiKey = apiKey;
+  if (baseUrl) config.baseUrl = baseUrl;
+  if (model) config.imageEditModel = model;
+  return {
+    providerName: provider === "openai" ? "openai" : "openai_compatible",
+    config,
+    size,
+    quality
+  };
+};
 
 const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: string; assetId: string | null | undefined }) => {
   if (!input.assetId || !process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) return null;
@@ -44,6 +113,18 @@ const freshSignedMediaUrl = async (input: { store: DataStore; workspaceId: strin
 
 const generatedVariantStorageKey = (input: { workspaceId: string; businessId: string; batchId: string; variantId: string }) =>
   `${input.workspaceId}/${input.businessId}/${input.batchId}/generated/${input.variantId}.jpg`;
+
+const freshSignedStorageUrl = async (input: { bucket: string; storageKey: string }) => {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE) return null;
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+  const { data, error } = await supabase.storage.from(input.bucket).createSignedUrl(input.storageKey, 60 * 30);
+  if (error || !data?.signedUrl) {
+    throw new Error(`Could not create fresh signed generated media URL: ${error?.message ?? "unknown storage error"}`);
+  }
+  return data.signedUrl;
+};
 
 const storeGeneratedVariantImage = async (input: {
   workspaceId: string;
@@ -100,7 +181,6 @@ export const processOneJob = async (input: {
   if (process.env.OPENAI_IMAGE_MODEL) providerConfig.imageEditModel = process.env.OPENAI_IMAGE_MODEL;
   const visionProvider = input.visionProvider ?? createVisionAnalysisProvider(providerConfig);
   const captionProvider = input.captionProvider ?? createCaptionGenerationProvider(providerConfig);
-  const imageEditProvider = input.imageEditProvider ?? createImageEditProvider(providerConfig);
   const job = await input.store.claimDueJob(input.workerId);
   if (!job) return { processed: false };
 
@@ -208,20 +288,8 @@ export const processOneJob = async (input: {
         if (!envFlag("FEATURE_OPENAI_IMAGE_GENERATION", true)) {
           throw new Error("OpenAI image generation is disabled by feature flag");
         }
-        if (!input.imageEditProvider && imageEditProvider.mode !== "images") {
-          throw new Error("OpenAI image edit provider is not configured");
-        }
         if (!job.variantId) throw new Error("generate_variant job is missing variantId");
         const operationKey = job.operationKey ?? `openai_image_edit:${job.variantId}`;
-        await input.store.upsertExternalOperation({
-          operationKey,
-          workspaceId: job.workspaceId,
-          jobId: job.id,
-          provider: imageEditProvider.mode === "images" ? "openai" : "mock",
-          operation: "generate_variant",
-          status: "started"
-        });
-        let captionAiRunId: string | undefined;
         const context = job.businessId && job.batchId
           ? await input.store.getVariantCaptionContext({
               workspaceId: job.workspaceId,
@@ -230,44 +298,90 @@ export const processOneJob = async (input: {
               variantId: job.variantId
             })
           : null;
+        if (!context) throw new Error("generate_variant job is missing variant context");
+        const editorRuntime = imageEditorRuntimeFromBusiness(context.business.metadata, providerConfig);
+        const imageEditProvider = input.imageEditProvider ?? createImageEditProvider(editorRuntime.config);
+        if (!input.imageEditProvider && imageEditProvider.mode !== "images") {
+          throw new Error("Image edit provider is not configured");
+        }
+        const imageOperationProvider = imageEditProvider.mode === "images" ? editorRuntime.providerName : "mock";
+        await input.store.upsertExternalOperation({
+          operationKey,
+          workspaceId: job.workspaceId,
+          jobId: job.id,
+          provider: imageOperationProvider,
+          operation: "generate_variant",
+          status: "started"
+        });
+        let captionAiRunId: string | undefined;
         const captionOperationKey = `openai_caption:${job.variantId}`;
-        const caption = context?.photo.visionAnalysis
-          ? await (async () => {
-              await input.store.upsertExternalOperation({
-                operationKey: captionOperationKey,
-                workspaceId: job.workspaceId,
-                jobId: job.id,
-                provider: captionProvider.mode === "responses" ? "openai" : "mock",
-                operation: "generate_caption",
-                status: "started"
-              });
-              try {
-                return await captionProvider.generate({
-                  pageName: context.page?.pageName ?? context.business.name,
-                  businessName: context.business.name,
-                  category: context.page?.category ?? String(context.business.metadata.category ?? "Facebook Page"),
-                  styleName: context.style.styleName,
-                  variantIndex: context.variant.variantIndex,
-                  fileName: context.photo.fileName ?? null,
-                  visionAnalysis: context.photo.visionAnalysis as VisionAnalysis,
-                  requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
-                  operationKey: captionOperationKey,
-                  promptVersion: context.promptVersion
-                });
-              } catch (error) {
-                await input.store.upsertExternalOperation({
-                  operationKey: captionOperationKey,
-                  workspaceId: job.workspaceId,
-                  jobId: job.id,
-                  provider: captionProvider.mode === "responses" ? "openai" : "mock",
-                  operation: "generate_caption",
-                  status: "failed"
-                });
-                throw error;
-              }
-            })()
-          : null;
-        if (caption && context) {
+        let caption: Awaited<ReturnType<CaptionGenerationProvider["generate"]>> | null = null;
+        const sourceImageUrl =
+          (await freshSignedMediaUrl({ store: input.store, workspaceId: job.workspaceId, assetId: context.photo.originalAssetId })) ??
+          (imageEditProvider.mode === "mock" ? `mock://media/${context.photo.originalAssetId ?? context.photo.id}` : null);
+        if (!sourceImageUrl) {
+          throw new Error("generate_variant job is missing real source imageUrl");
+        }
+        let generatedAsset: Parameters<DataStore["completeGenerateVariant"]>[0]["generatedAsset"];
+        try {
+          const imageEdit = await imageEditProvider.edit({
+            imageUrl: sourceImageUrl,
+            mimeType: context.photo.mimeType ?? "image/jpeg",
+            prompt: backgroundPromptForVariant(context.variant.variantIndex, context.style),
+            requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
+            operationKey,
+            size: editorRuntime.size,
+            quality: editorRuntime.quality
+          });
+          generatedAsset = await storeGeneratedVariantImage({
+            workspaceId: job.workspaceId,
+            businessId: context.business.id,
+            batchId: context.variant.batchId,
+            variantId: context.variant.id,
+            imageBytes: imageEdit.imageBytes,
+            mimeType: imageEdit.mimeType,
+            requiresStorage: imageEditProvider.mode === "images"
+          });
+          const generatedImageUrl =
+            (await freshSignedStorageUrl({ bucket: generatedAsset.bucket, storageKey: generatedAsset.storageKey })) ??
+            (imageEditProvider.mode === "mock" ? `mock://generated/${context.variant.id}` : null);
+
+          await input.store.upsertExternalOperation({
+            operationKey: captionOperationKey,
+            workspaceId: job.workspaceId,
+            jobId: job.id,
+            provider: captionProvider.mode === "responses" ? "openai" : "mock",
+            operation: "generate_caption",
+            status: "started"
+          });
+          try {
+            caption = await captionProvider.generate({
+              pageName: context.page?.pageName ?? context.business.name,
+              businessName: context.business.name,
+              category: context.page?.category ?? String(context.business.metadata.category ?? "Facebook Page"),
+              imageUrl: generatedImageUrl ?? sourceImageUrl,
+              styleName: context.style.styleName,
+              variantIndex: context.variant.variantIndex,
+              fileName: context.photo.fileName ?? null,
+              visionAnalysis: context.photo.visionAnalysis as VisionAnalysis | null,
+              seoKeywords: listSetting(context.business.metadata, "facebookSeoKeywords"),
+              contentTypes: listSetting(context.business.metadata, "contentTypes"),
+              pageContext: textSetting(context.business.metadata, "facebookSeoContext"),
+              requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
+              operationKey: captionOperationKey,
+              promptVersion: context.promptVersion
+            });
+          } catch (error) {
+            await input.store.upsertExternalOperation({
+              operationKey: captionOperationKey,
+              workspaceId: job.workspaceId,
+              jobId: job.id,
+              provider: captionProvider.mode === "responses" ? "openai" : "mock",
+              operation: "generate_caption",
+              status: "failed"
+            });
+            throw error;
+          }
           const inputHash = createHash("sha256")
             .update(
               JSON.stringify({
@@ -275,6 +389,7 @@ export const processOneJob = async (input: {
                 pageId: context.page?.id ?? null,
                 photoId: context.photo.id,
                 variantId: context.variant.id,
+                generatedImageKey: generatedAsset.storageKey,
                 promptVersion: context.promptVersion
               })
             )
@@ -309,40 +424,12 @@ export const processOneJob = async (input: {
             operation: "generate_caption",
             status: "succeeded"
           });
-        }
-        if (!context) throw new Error("generate_variant job is missing variant context");
-        const sourceImageUrl =
-          (await freshSignedMediaUrl({ store: input.store, workspaceId: job.workspaceId, assetId: context.photo.originalAssetId })) ??
-          (imageEditProvider.mode === "mock" ? `mock://media/${context.photo.originalAssetId ?? context.photo.id}` : null);
-        if (!sourceImageUrl) {
-          throw new Error("generate_variant job is missing real source imageUrl");
-        }
-        let generatedAsset: Parameters<DataStore["completeGenerateVariant"]>[0]["generatedAsset"];
-        try {
-          const imageEdit = await imageEditProvider.edit({
-            imageUrl: sourceImageUrl,
-            mimeType: context.photo.mimeType ?? "image/jpeg",
-            prompt: backgroundPromptForVariant(context.variant.variantIndex, context.style),
-            requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
-            operationKey,
-            size: "1024x1024",
-            quality: "medium"
-          });
-          generatedAsset = await storeGeneratedVariantImage({
-            workspaceId: job.workspaceId,
-            businessId: context.business.id,
-            batchId: context.variant.batchId,
-            variantId: context.variant.id,
-            imageBytes: imageEdit.imageBytes,
-            mimeType: imageEdit.mimeType,
-            requiresStorage: imageEditProvider.mode === "images"
-          });
         } catch (error) {
           await input.store.upsertExternalOperation({
             operationKey,
             workspaceId: job.workspaceId,
             jobId: job.id,
-            provider: imageEditProvider.mode === "images" ? "openai" : "mock",
+            provider: imageOperationProvider,
             operation: "generate_variant",
             status: "failed"
           });
@@ -372,7 +459,7 @@ export const processOneJob = async (input: {
           operationKey,
           workspaceId: job.workspaceId,
           jobId: job.id,
-          provider: imageEditProvider.mode === "images" ? "openai" : "mock",
+          provider: imageOperationProvider,
           operation: "generate_variant",
           status: "succeeded"
         });

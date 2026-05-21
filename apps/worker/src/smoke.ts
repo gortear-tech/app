@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { rm } from "node:fs/promises";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { ImageEditProvider } from "@fbmaniaco/providers";
+import { CaptionGenerationProvider, ImageEditProvider } from "@fbmaniaco/providers";
 import { processOneJob } from "./processor.js";
 
 const path = join(tmpdir(), `fbmaniaco-worker-${Date.now()}.json`);
@@ -19,6 +19,26 @@ const imageEditProvider: ImageEditProvider = {
     usage: null,
     latencyMs: 1
   })
+};
+const captionInputs: Array<Parameters<CaptionGenerationProvider["generate"]>[0]> = [];
+const captionProvider: CaptionGenerationProvider = {
+  mode: "mock",
+  generate: async (input) => {
+    captionInputs.push(input);
+    return {
+      result: {
+        schemaVersion: "caption.v1",
+        promptVersion: input.promptVersion,
+        caption: `${input.pageName}: texto personalizado para ${input.styleName}.`,
+        seoTermsUsed: [input.pageName, input.styleName],
+        warnings: ["caption_generado_con_prompt_separado"]
+      },
+      responseId: null,
+      model: "mock-caption",
+      usage: null,
+      latencyMs: 1
+    };
+  }
 };
 await store.upsertLocalUser({ userId: "worker-smoke", email: "worker@example.com" });
 const { workspace } = await store.ensureDefaultWorkspace("worker-smoke");
@@ -71,10 +91,13 @@ await store.requestGenerateBatch({
   requestId: "worker-smoke-generate"
 });
 await processOneJob({ store, workerId: "worker-smoke" });
-const variantResult = await processOneJob({ store, workerId: "worker-smoke", imageEditProvider });
+const variantResult = await processOneJob({ store, workerId: "worker-smoke", imageEditProvider, captionProvider });
 const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 if (!variantResult.processed || variants[0]?.status !== "generada" || !variants[0].caption) {
   throw new Error(`worker variant smoke failed: ${JSON.stringify({ variantResult, variants })}`);
+}
+if (captionInputs.length !== 1 || !captionInputs[0]?.imageUrl?.startsWith("mock://generated/")) {
+  throw new Error(`worker caption did not use generated image context: ${JSON.stringify(captionInputs)}`);
 }
 if (!variants[0].generatedAssetId || variants[0].generatedAssetId === detail?.photos[0]?.originalAssetId) {
   throw new Error(`worker variant reused original asset: ${JSON.stringify({ variant: variants[0], photo: detail?.photos[0] })}`);

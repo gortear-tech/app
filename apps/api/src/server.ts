@@ -38,12 +38,105 @@ import {
   UploadIntentResponseSchema,
   VariantMutationResponseSchema,
   VariantsResponseSchema,
-  WorkspaceRole
+  WorkspaceRole,
+  type Business
 } from "@fbmaniaco/shared";
 import { ApiConfig, readinessFromConfig } from "./config.js";
 import { authenticateBearer } from "./auth.js";
 import { DataStore } from "./db/index.js";
 import { getRequestId } from "./request-id.js";
+
+const allowedImageEditorProviders = new Set(["openai", "openai_compatible"]);
+const allowedImageEditorSizes = new Set(["1024x1024", "1536x1024", "1024x1536"]);
+const allowedImageEditorQualities = new Set(["auto", "low", "medium", "high"]);
+
+const encodeServerSecret = (secret: string) => `server:${Buffer.from(secret, "utf8").toString("base64url")}`;
+
+const stringValue = (value: unknown, fallback = "") => (typeof value === "string" ? value.trim() : fallback);
+const numberValue = (value: unknown, fallback: number, min: number, max: number) =>
+  typeof value === "number" && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.round(value))) : fallback;
+
+const sanitizeBusinessMetadata = (metadata: Record<string, unknown>): Record<string, unknown> => {
+  const sanitized = { ...metadata };
+  const editors = sanitized.imageEditors;
+  if (Array.isArray(editors)) {
+    sanitized.imageEditors = editors
+      .filter((editor): editor is Record<string, unknown> => Boolean(editor) && typeof editor === "object" && !Array.isArray(editor))
+      .map((editor) => {
+        const { apiKey: _apiKey, apiKeySecret, encryptedApiKey: _encryptedApiKey, secret: _secret, ...publicEditor } = editor;
+        return {
+          ...publicEditor,
+          apiKeyConfigured: Boolean(publicEditor.apiKeyConfigured || apiKeySecret)
+        };
+      });
+  }
+  return sanitized;
+};
+
+const sanitizeBusinessForClient = (business: Business): Business => ({
+  ...business,
+  metadata: sanitizeBusinessMetadata(business.metadata)
+});
+
+const normalizeImageEditorsForStorage = (
+  currentMetadata: Record<string, unknown>,
+  incomingEditors: unknown
+): Array<Record<string, unknown>> | undefined => {
+  if (!Array.isArray(incomingEditors)) return undefined;
+  const currentEditors = Array.isArray(currentMetadata.imageEditors) ? currentMetadata.imageEditors : [];
+  const currentById = new Map<string, Record<string, unknown>>();
+  for (const editor of currentEditors) {
+    if (editor && typeof editor === "object" && !Array.isArray(editor)) {
+      const record = editor as Record<string, unknown>;
+      const id = stringValue(record.id);
+      if (id) currentById.set(id, record);
+    }
+  }
+
+  return incomingEditors
+    .filter((editor): editor is Record<string, unknown> => Boolean(editor) && typeof editor === "object" && !Array.isArray(editor))
+    .slice(0, 6)
+    .map((editor, index) => {
+      const id = stringValue(editor.id, `image-editor-${index + 1}`);
+      const existing = currentById.get(id);
+      const provider = allowedImageEditorProviders.has(stringValue(editor.provider)) ? stringValue(editor.provider) : "openai_compatible";
+      const model = stringValue(editor.model, provider === "openai" ? "gpt-image-2" : "");
+      const baseUrl = stringValue(editor.baseUrl, provider === "openai" ? "" : "https://api.openai.com/v1");
+      const size = allowedImageEditorSizes.has(stringValue(editor.size)) ? stringValue(editor.size) : "1024x1024";
+      const quality = allowedImageEditorQualities.has(stringValue(editor.quality)) ? stringValue(editor.quality) : "medium";
+      const existingSecret = stringValue(existing?.apiKeySecret);
+      const rawApiKey = stringValue(editor.apiKey);
+      const apiKeySecret = rawApiKey
+        ? encodeServerSecret(rawApiKey)
+        : editor.clearApiKey === true
+          ? ""
+          : existingSecret;
+      const stored: Record<string, unknown> = {
+        id,
+        provider,
+        label: stringValue(editor.label, provider === "openai" ? "OpenAI Images" : "Editor compatible"),
+        enabled: editor.enabled === true,
+        model,
+        baseUrl,
+        size,
+        quality,
+        timeoutMs: numberValue(editor.timeoutMs, 30000, 5000, 120000),
+        apiKeyConfigured: Boolean(apiKeySecret)
+      };
+      if (apiKeySecret) stored.apiKeySecret = apiKeySecret;
+      return stored;
+    });
+};
+
+const prepareBusinessMetadataForUpdate = (
+  currentMetadata: Record<string, unknown>,
+  incomingMetadata: Record<string, unknown>
+): Record<string, unknown> => {
+  const prepared = { ...incomingMetadata };
+  const imageEditors = normalizeImageEditorsForStorage(currentMetadata, incomingMetadata.imageEditors);
+  if (imageEditors) prepared.imageEditors = imageEditors;
+  return prepared;
+};
 
 export const buildServer = async (input: { config: ApiConfig; store: DataStore; metaProvider?: MetaProvider }): Promise<FastifyInstance> => {
   const metaProvider =
@@ -1083,7 +1176,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           });
           return {
             schemaVersion: "select_page.v1" as const,
-            business,
+            business: sanitizeBusinessForClient(business),
             bootstrap: await buildBootstrap(actor, user, requestId),
             changed: {
               entityIds: [body.pageId, business.id],
@@ -1112,7 +1205,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       const workspace = memberships[0]?.workspace;
       return {
         schemaVersion: "businesses.v1" as const,
-        businesses: workspace ? await input.store.listBusinesses(workspace.id) : [],
+        businesses: workspace ? (await input.store.listBusinesses(workspace.id)).map(sanitizeBusinessForClient) : [],
         requestId
       };
     }
@@ -1138,7 +1231,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       });
       return {
         schemaVersion: "business_detail.v1" as const,
-        business,
+        business: sanitizeBusinessForClient(business),
         requestId
       };
     }
@@ -1188,11 +1281,11 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           };
           if (body.name !== undefined) updateInput.name = body.name;
           if (body.timezone !== undefined) updateInput.timezone = body.timezone;
-          if (body.metadata !== undefined) updateInput.metadata = body.metadata;
+          if (body.metadata !== undefined) updateInput.metadata = prepareBusinessMetadataForUpdate(business.metadata, body.metadata);
           const updated = await input.store.updateBusiness(updateInput);
           return {
             schemaVersion: "business_mutation.v1" as const,
-            business: updated,
+            business: sanitizeBusinessForClient(updated),
             changed: {
               entityIds: [business.id],
               queryKeys: [`settings:${business.id}`, `business:${business.id}`, `dashboard:${business.id}`]

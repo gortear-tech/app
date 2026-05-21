@@ -54,6 +54,14 @@ const publicMediaUrl = (assetId: string) => {
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const metadataText = (metadata: Record<string, unknown> | undefined, key: string) => {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value.trim() : "";
+};
+const metadataList = (metadata: Record<string, unknown> | undefined, key: string) => {
+  const value = metadata?.[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+};
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
 const hiddenBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const terminalBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
@@ -1467,14 +1475,16 @@ export class SupabaseDataStoreCore {
         [current.workspaceId, current.businessId]
       );
       const businessRow = businessResult.rows[0];
+      const businessMetadata = json<Record<string, unknown>>(businessRow?.metadata, {});
       const fallbackCaptionResult = this.captionForVariant({
         fileName: photo.fileName ?? "foto",
         variantIndex: current.variantIndex,
         styleName: style.styleName,
         businessName: businessRow?.name ?? "tu negocio",
         pageName: businessRow?.page_name ?? businessRow?.name ?? "tu pagina",
-        category: businessRow?.category ?? "Facebook Page",
-        visionAnalysis: photo.visionAnalysis ? (photo.visionAnalysis as VisionAnalysis) : null
+        category: businessRow?.category ?? String(businessMetadata.category ?? "Facebook Page"),
+        visionAnalysis: photo.visionAnalysis ? (photo.visionAnalysis as VisionAnalysis) : null,
+        metadata: businessMetadata
       });
       const captionResult = input.captionResult ?? fallbackCaptionResult;
       const caption = captionResult.caption;
@@ -2189,9 +2199,13 @@ export class SupabaseDataStoreCore {
     pageName: string;
     category: string;
     visionAnalysis?: VisionAnalysis | null;
+    metadata?: Record<string, unknown>;
   }): CaptionResult {
     const subject = input.visionAnalysis?.subject.description || input.visionAnalysis?.summary || input.fileName;
-    const keywords = input.visionAnalysis?.mood.keywords.slice(0, 3).filter(Boolean) ?? [];
+    const configuredKeywords = metadataList(input.metadata, "facebookSeoKeywords").slice(0, 6);
+    const contentTypes = metadataList(input.metadata, "contentTypes").slice(0, 4);
+    const context = metadataText(input.metadata, "facebookSeoContext");
+    const keywords = [...configuredKeywords, ...(input.visionAnalysis?.mood.keywords.slice(0, 3).filter(Boolean) ?? [])];
     const cleanTag = (value: string) =>
       value
         .normalize("NFD")
@@ -2209,14 +2223,17 @@ export class SupabaseDataStoreCore {
     const hashtags = [pageTag ? `#${pageTag}` : null, categoryTag ? `#${categoryTag}` : null]
       .filter(Boolean)
       .join(" ");
+    const contextLine = context ? `${context}\n\n` : "";
+    const contentLine = contentTypes.length > 0 ? `Tipo de contenido: ${contentTypes.join(", ")}. ` : "";
     return {
       schemaVersion: "caption.v1",
       promptVersion: "caption-page-context-v1",
       caption:
         `${input.pageName}: ${subject}.\n\n` +
-        `Una publicacion pensada para ${input.category}, con estilo ${input.styleName}. ${ending}\n\n` +
+        contextLine +
+        `Una publicacion pensada para ${input.category}, con estilo ${input.styleName}. ${contentLine}${ending}\n\n` +
         `${hashtags || "#NegocioLocal"}`,
-      seoTermsUsed: [input.pageName, input.businessName, input.category, ...keywords].filter(Boolean),
+      seoTermsUsed: [input.pageName, input.businessName, input.category, ...keywords, ...contentTypes].filter(Boolean),
       warnings: ["caption_generado_con_contexto_de_pagina", "no_inventa_precios_ni_promociones"]
     };
   }

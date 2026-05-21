@@ -117,6 +117,46 @@ describe("api bootstrap and tenancy", () => {
     expect(replay.statusCode).toBe(200);
     expect(replay.json().business.id).toBe(select.json().business.id);
 
+    const editorSettings = await app.inject({
+      method: "PATCH",
+      url: `/businesses/${select.json().business.id}`,
+      headers: { authorization, "idempotency-key": "editor-settings-1" },
+      payload: {
+        metadata: {
+          imageEditors: [
+            {
+              id: "editor-openai",
+              provider: "openai",
+              label: "OpenAI Images",
+              enabled: true,
+              model: "gpt-image-2",
+              size: "1024x1024",
+              quality: "medium",
+              timeoutMs: 30000,
+              apiKey: "sk-test-editor-secret"
+            }
+          ]
+        }
+      }
+    });
+    expect(editorSettings.statusCode).toBe(200);
+    expect(editorSettings.json().business.metadata.imageEditors[0].apiKeyConfigured).toBe(true);
+    expect(JSON.stringify(editorSettings.json())).not.toMatch(/sk-test-editor-secret|apiKeySecret|encryptedApiKey/i);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/businesses/${select.json().business.id}`,
+      headers: { authorization }
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(JSON.stringify(detail.json())).not.toMatch(/sk-test-editor-secret|apiKeySecret|encryptedApiKey/i);
+    const storedBusiness = await store.getBusiness({
+      workspaceId: select.json().business.workspaceId,
+      businessId: select.json().business.id
+    });
+    expect(JSON.stringify(storedBusiness?.metadata)).toMatch(/server:/);
+    expect(JSON.stringify(storedBusiness?.metadata)).not.toMatch(/sk-test-editor-secret/);
+
     const conflict = await app.inject({
       method: "POST",
       url: "/meta/pages/select",

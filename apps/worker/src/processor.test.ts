@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { ImageEditProvider } from "@fbmaniaco/providers";
+import { CaptionGenerationProvider, ImageEditProvider } from "@fbmaniaco/providers";
 import { variantEditPromptForStyle } from "@fbmaniaco/shared";
 import { processOneJob } from "./processor.js";
 
@@ -43,6 +43,7 @@ describe("worker processor", () => {
     const previousPublicApiUrl = process.env.PUBLIC_API_URL;
     process.env.PUBLIC_API_URL = "https://api.example.test";
     const imagePrompts: string[] = [];
+    const captionInputs: Array<Parameters<CaptionGenerationProvider["generate"]>[0]> = [];
     const imageEditProvider: ImageEditProvider = {
       mode: "mock",
       edit: async (input) => {
@@ -52,6 +53,25 @@ describe("worker processor", () => {
           mimeType: "image/jpeg",
           responseId: null,
           model: "mock-image-edit",
+          usage: null,
+          latencyMs: 1
+        };
+      }
+    };
+    const captionProvider: CaptionGenerationProvider = {
+      mode: "mock",
+      generate: async (input) => {
+        captionInputs.push(input);
+        return {
+          result: {
+            schemaVersion: "caption.v1",
+            promptVersion: input.promptVersion,
+            caption: `${input.pageName}: texto SEO personalizado para ${input.styleName}.`,
+            seoTermsUsed: [input.pageName, input.styleName, ...(input.seoKeywords ?? [])],
+            warnings: ["caption_generado_con_prompt_separado"]
+          },
+          responseId: null,
+          model: "mock-caption",
           usage: null,
           latencyMs: 1
         };
@@ -113,9 +133,9 @@ describe("worker processor", () => {
     expect(generation.created).toBe(3);
 
     const batchJob = await processOneJob({ store, workerId: "variant-worker" });
-    const firstVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
-    const secondVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
-    const thirdVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider });
+    const firstVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider, captionProvider });
+    const secondVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider, captionProvider });
+    const thirdVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider, captionProvider });
     const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
 
     expect(batchJob.job?.type).toBe("generate_batch");
@@ -125,6 +145,8 @@ describe("worker processor", () => {
     expect(variants).toHaveLength(3);
     expect(variants.every((variant) => variant.status === "generada" && Boolean(variant.caption))).toBe(true);
     expect(variants.every((variant) => variant.caption?.includes("Maniaco Demo"))).toBe(true);
+    expect(captionInputs).toHaveLength(3);
+    expect(captionInputs.every((input) => input.imageUrl?.startsWith("mock://generated/"))).toBe(true);
     expect(variants.every((variant) => !variant.caption?.includes("Pagina sin permiso completo"))).toBe(true);
     expect(variants.map((variant) => variant.assignedStyle?.styleName)).toEqual(["Playa", "Estudio", "Nocturno"]);
     expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(3);

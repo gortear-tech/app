@@ -5,6 +5,7 @@ import {
   BootstrapStatus,
   Business,
   BusinessDetailResponse,
+  BusinessMutationResponse,
   ConfirmCalendarResponse,
   GenerateBatchResponse,
   GenerateBatchStyleOverride,
@@ -14,6 +15,7 @@ import {
   ScheduledPost,
   ScheduledPostMutationResponse,
   ScheduledPostsResponse,
+  UpdateBusinessBody,
   VariantMutationResponse
 } from "@fbmaniaco/shared";
 import * as SecureStore from "expo-secure-store";
@@ -328,6 +330,27 @@ export const getBusinessDetail = async (token: string, businessId: string): Prom
   const json = await response.json();
   if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer la configuracion del negocio.");
   return json as BusinessDetailResponse;
+};
+
+export const updateBusiness = async (
+  token: string,
+  businessId: string,
+  body: UpdateBusinessBody
+): Promise<BusinessMutationResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const response = await fetch(`${apiUrl}/businesses/${businessId}`, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("update-business"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify(body)
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos guardar los ajustes.");
+  return json as BusinessMutationResponse;
 };
 
 export const getActiveBatch = async (token: string, businessId: string): Promise<BatchSummary | null> => {

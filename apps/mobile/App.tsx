@@ -5,6 +5,7 @@ import {
   variantStylePresetForIndex,
   type BatchDetail,
   type BatchSummary,
+  type Business,
   type GenerateBatchStyleOverride,
   type MetaPage,
   type Photo,
@@ -53,6 +54,7 @@ import {
   generateBatchVariants,
   getBatchDetail,
   getBootstrapStatus,
+  getBusinessDetail,
   getStoredSessionToken,
   isAuthSessionError,
   listBatches,
@@ -62,6 +64,7 @@ import {
   rejectVariant,
   retryScheduledPost,
   selectMetaPage,
+  updateBusiness,
   updateScheduledPost,
   updateVariantCaption,
   uploadPhoto
@@ -83,6 +86,34 @@ type BatchProcessStep = {
   label: string;
   icon: IconName;
   state: BatchProcessState;
+};
+type BusinessSettingsDraft = {
+  name: string;
+  timezone: string;
+  category: string;
+  defaultVariantsPerPhoto: number;
+  defaultGenerationIntensity: number;
+  defaultPeriodDays: PeriodDays;
+  defaultStyleId: string;
+  contentTypes: string[];
+  facebookSeoKeywords: string[];
+  facebookSeoContext: string;
+  imageEditors: ImageEditorDraft[];
+};
+type ImageEditorProviderKey = "openai" | "openai_compatible";
+type ImageEditorDraft = {
+  id: string;
+  provider: ImageEditorProviderKey;
+  label: string;
+  enabled: boolean;
+  model: string;
+  baseUrl: string;
+  size: "1024x1024" | "1536x1024" | "1024x1536";
+  quality: "auto" | "low" | "medium" | "high";
+  timeoutMs: number;
+  apiKeyConfigured: boolean;
+  apiKeyInput: string;
+  clearApiKey?: boolean;
 };
 type PageAction = {
   label: string;
@@ -107,6 +138,152 @@ const styleCatalog = [
   { id: "nocturno", name: "Nocturno", detail: "Contraste, moderno", icon: "moon-outline" as IconName },
   { id: "bambu", name: "Bambú", detail: "Organico, textura fina", icon: "flower-outline" as IconName }
 ];
+
+const defaultContentTypes = ["producto", "promocion", "combo", "evento", "menu", "temporada"];
+const defaultTimezone = "America/Mexico_City";
+const timezoneOptions = ["America/Mexico_City", "America/Monterrey", "America/Tijuana", "America/Cancun"];
+const periodOptions: PeriodDays[] = [7, 14, 30];
+const imageEditorProviderCatalog: Array<{ provider: ImageEditorProviderKey; label: string; model: string; baseUrl: string }> = [
+  { provider: "openai", label: "OpenAI Images", model: "gpt-image-2", baseUrl: "" },
+  { provider: "openai_compatible", label: "Compatible /images/edits", model: "gpt-image-2", baseUrl: "https://api.openai.com/v1" }
+];
+const imageEditorSizes: ImageEditorDraft["size"][] = ["1024x1024", "1536x1024", "1024x1536"];
+const imageEditorQualities: ImageEditorDraft["quality"][] = ["auto", "low", "medium", "high"];
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const metadataRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const stringSetting = (metadata: Record<string, unknown>, key: string, fallback = "") => {
+  const value = metadata[key];
+  return typeof value === "string" ? value : fallback;
+};
+
+const numberSetting = (metadata: Record<string, unknown>, key: string, fallback: number, min: number, max: number) => {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isFinite(value) ? clamp(Math.round(value), min, max) : fallback;
+};
+
+const periodSetting = (metadata: Record<string, unknown>, fallback: PeriodDays): PeriodDays => {
+  const value = metadata.defaultPeriodDays;
+  return value === 7 || value === 14 || value === 30 ? value : fallback;
+};
+
+const stringArraySetting = (metadata: Record<string, unknown>, key: string, fallback: string[] = []) => {
+  const value = metadata[key];
+  if (!Array.isArray(value)) return fallback;
+  return normalizeList(value.filter((item): item is string => typeof item === "string"));
+};
+
+const normalizeList = (items: string[]) => {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of items) {
+    const clean = item.replace(/\s+/g, " ").trim();
+    if (!clean) continue;
+    const key = clean.toLocaleLowerCase("es-MX");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(clean);
+  }
+  return normalized;
+};
+
+const listFromInput = (input: string) => normalizeList(input.split(/[,\n]/g));
+
+const asImageEditorProvider = (value: unknown): ImageEditorProviderKey =>
+  value === "openai" || value === "openai_compatible" ? value : "openai_compatible";
+
+const asImageEditorSize = (value: unknown): ImageEditorDraft["size"] =>
+  value === "1536x1024" || value === "1024x1536" || value === "1024x1024" ? value : "1024x1024";
+
+const asImageEditorQuality = (value: unknown): ImageEditorDraft["quality"] =>
+  value === "auto" || value === "low" || value === "medium" || value === "high" ? value : "medium";
+
+const defaultImageEditor = (): ImageEditorDraft => ({
+  id: "openai-default",
+  provider: "openai",
+  label: "OpenAI Images",
+  enabled: true,
+  model: "gpt-image-2",
+  baseUrl: "",
+  size: "1024x1024",
+  quality: "medium",
+  timeoutMs: 30000,
+  apiKeyConfigured: false,
+  apiKeyInput: ""
+});
+
+const imageEditorsFromMetadata = (metadata: Record<string, unknown>): ImageEditorDraft[] => {
+  const value = metadata.imageEditors;
+  if (!Array.isArray(value)) return [defaultImageEditor()];
+  const editors = value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .map((item, index): ImageEditorDraft => {
+      const provider = asImageEditorProvider(item.provider);
+      return {
+        id: stringSetting(item, "id", `image-editor-${index + 1}`),
+        provider,
+        label: stringSetting(item, "label", provider === "openai" ? "OpenAI Images" : "Editor compatible"),
+        enabled: item.enabled === true,
+        model: stringSetting(item, "model", provider === "openai" ? "gpt-image-2" : ""),
+        baseUrl: stringSetting(item, "baseUrl", provider === "openai" ? "" : "https://api.openai.com/v1"),
+        size: asImageEditorSize(item.size),
+        quality: asImageEditorQuality(item.quality),
+        timeoutMs: numberSetting(item, "timeoutMs", 30000, 5000, 120000),
+        apiKeyConfigured: item.apiKeyConfigured === true,
+        apiKeyInput: ""
+      };
+    });
+  return editors.length > 0 ? editors : [defaultImageEditor()];
+};
+
+const imageEditorsForMetadata = (editors: ImageEditorDraft[]) =>
+  editors.map((editor) => ({
+    id: editor.id,
+    provider: editor.provider,
+    label: editor.label.trim() || (editor.provider === "openai" ? "OpenAI Images" : "Editor compatible"),
+    enabled: editor.enabled,
+    model: editor.model.trim(),
+    baseUrl: editor.baseUrl.trim(),
+    size: editor.size,
+    quality: editor.quality,
+    timeoutMs: clamp(editor.timeoutMs, 5000, 120000),
+    apiKeyConfigured: editor.apiKeyConfigured || editor.apiKeyInput.trim().length > 0,
+    ...(editor.apiKeyInput.trim() ? { apiKey: editor.apiKeyInput.trim() } : {}),
+    ...(editor.clearApiKey ? { clearApiKey: true } : {})
+  }));
+
+const settingsDraftFromBusiness = (business: Business, page: MetaPage | null | undefined): BusinessSettingsDraft => {
+  const metadata = metadataRecord(business.metadata);
+  const defaultStyleId = stringSetting(metadata, "defaultStyleId", styleCatalog[0]!.id);
+  return {
+    name: business.name || page?.pageName || "Mi pagina",
+    timezone: business.timezone || defaultTimezone,
+    category: stringSetting(metadata, "category", page?.category ?? ""),
+    defaultVariantsPerPhoto: numberSetting(metadata, "defaultVariantsPerPhoto", 3, 1, 5),
+    defaultGenerationIntensity: numberSetting(metadata, "defaultGenerationIntensity", 40, 25, 80),
+    defaultPeriodDays: periodSetting(metadata, 14),
+    defaultStyleId: styleCatalog.some((style) => style.id === defaultStyleId) ? defaultStyleId : styleCatalog[0]!.id,
+    contentTypes: stringArraySetting(metadata, "contentTypes", defaultContentTypes),
+    facebookSeoKeywords: stringArraySetting(metadata, "facebookSeoKeywords", []),
+    facebookSeoContext: stringSetting(metadata, "facebookSeoContext", ""),
+    imageEditors: imageEditorsFromMetadata(metadata)
+  };
+};
+
+const metadataFromSettingsDraft = (draft: BusinessSettingsDraft, current: Record<string, unknown>) => ({
+  ...current,
+  category: draft.category.trim(),
+  defaultVariantsPerPhoto: clamp(draft.defaultVariantsPerPhoto, 1, 5),
+  defaultGenerationIntensity: clamp(draft.defaultGenerationIntensity, 25, 80),
+  defaultPeriodDays: draft.defaultPeriodDays,
+  defaultStyleId: draft.defaultStyleId,
+  contentTypes: normalizeList(draft.contentTypes),
+  facebookSeoKeywords: normalizeList(draft.facebookSeoKeywords),
+  facebookSeoContext: draft.facebookSeoContext.trim(),
+  imageEditors: imageEditorsForMetadata(draft.imageEditors)
+});
 
 type PhotoStylePreference = { styleId: string; intensity: number };
 type LocalPhotoPreview = { id: string; uri: string; name: string };
@@ -197,12 +374,24 @@ const postStatusTone = (post: ScheduledPost): "good" | "warn" | "neutral" => {
 };
 
 const pct = (done: number, total: number) => (total <= 0 ? 0 : Math.min(100, Math.round((done / total) * 100)));
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const formatDate = (value: string | Date) =>
   new Date(value).toLocaleDateString("es-MX", { weekday: "short", day: "numeric", month: "short" });
 const formatTime = (value: string | Date) => new Date(value).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
-const dateKey = (value: string | Date) => new Date(value).toISOString().slice(0, 10);
+const localDateKey = (value: string | Date) => {
+  const date = new Date(value);
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+};
+const formatDayKey = (key: string) => {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year ?? 0, (month ?? 1) - 1, day ?? 1).toLocaleDateString("es-MX", {
+    weekday: "short",
+    day: "numeric",
+    month: "short"
+  });
+};
 
 const batchStatusText = (status: string) => {
   if (["pendiente", "pending"].includes(status)) return "Preparando";
@@ -223,21 +412,38 @@ const photoStatusText = (photo: Photo) => {
   return photo.status;
 };
 
-const styleForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>) => {
+const styleForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, fallbackStyleId = styleCatalog[0]!.id) => {
   const preference = preferences[photoId];
-  return styleCatalog.find((style) => style.id === preference?.styleId) ?? styleCatalog[0]!;
+  return styleCatalog.find((style) => style.id === (preference?.styleId ?? fallbackStyleId)) ?? styleCatalog[0]!;
 };
 
-const variantStylesForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
-  Array.from({ length: count }, (_, index) => variantStylePresetForIndex(index + 1, preferences[photoId]?.styleId));
+const variantStylesForPhoto = (
+  photoId: string,
+  preferences: Record<string, PhotoStylePreference>,
+  count: number,
+  fallbackStyleId = styleCatalog[0]!.id
+) =>
+  Array.from({ length: count }, (_, index) =>
+    variantStylePresetForIndex(index + 1, preferences[photoId]?.styleId ?? fallbackStyleId)
+  );
 
-const styleSummaryForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) =>
-  variantStylesForPhoto(photoId, preferences, count)
+const styleSummaryForPhoto = (
+  photoId: string,
+  preferences: Record<string, PhotoStylePreference>,
+  count: number,
+  fallbackStyleId = styleCatalog[0]!.id
+) =>
+  variantStylesForPhoto(photoId, preferences, count, fallbackStyleId)
     .map((style, index) => `V${index + 1} ${style.styleName}`)
     .join(" · ");
 
-const compactStyleSummaryForPhoto = (photoId: string, preferences: Record<string, PhotoStylePreference>, count: number) => {
-  const styles = variantStylesForPhoto(photoId, preferences, count);
+const compactStyleSummaryForPhoto = (
+  photoId: string,
+  preferences: Record<string, PhotoStylePreference>,
+  count: number,
+  fallbackStyleId = styleCatalog[0]!.id
+) => {
+  const styles = variantStylesForPhoto(photoId, preferences, count, fallbackStyleId);
   if (styles.length <= 2) return styles.map((style) => style.styleName).join(" / ");
   return `${styles[0]?.styleName ?? "Estilo"} / ${styles[1]?.styleName ?? "Estilo"} +${styles.length - 2}`;
 };
@@ -246,10 +452,11 @@ const promptsForPhoto = (
   photoId: string,
   preferences: Record<string, PhotoStylePreference>,
   count: number,
-  fallbackIntensity: number
+  fallbackIntensity: number,
+  fallbackStyleId = styleCatalog[0]!.id
 ) => {
   const intensity = intensityLevel(preferences[photoId]?.intensity ?? fallbackIntensity);
-  return variantStylesForPhoto(photoId, preferences, count)
+  return variantStylesForPhoto(photoId, preferences, count, fallbackStyleId)
     .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName, intensity)}`)
     .join("\n");
 };
@@ -292,10 +499,11 @@ const GenerationIntensityControl = ({
 const styleOverridesForGeneration = (
   photos: Photo[],
   preferences: Record<string, PhotoStylePreference>,
-  fallbackIntensity: number
+  fallbackIntensity: number,
+  fallbackStyleId = styleCatalog[0]!.id
 ): GenerateBatchStyleOverride[] =>
   photos.filter(isPhotoAnalyzed).map((photo) => {
-    const style = styleForPhoto(photo.id, preferences);
+    const style = styleForPhoto(photo.id, preferences, fallbackStyleId);
     return {
       photoId: photo.id,
       styleId: style.id,
@@ -303,6 +511,20 @@ const styleOverridesForGeneration = (
       intensity: preferences[photo.id]?.intensity ?? fallbackIntensity
     };
   });
+
+const freezePhotoPreferencesForGeneration = (
+  photos: Photo[],
+  preferences: Record<string, PhotoStylePreference>,
+  fallbackIntensity: number,
+  fallbackStyleId = styleCatalog[0]!.id
+) => {
+  const next = { ...preferences };
+  for (const photo of photos.filter(isPhotoAnalyzed)) {
+    if (next[photo.id]) continue;
+    next[photo.id] = { styleId: fallbackStyleId, intensity: fallbackIntensity };
+  }
+  return next;
+};
 
 const visionLabels = (photo: Photo) => {
   const analysis = photo.visionAnalysis as
@@ -384,6 +606,11 @@ function BootScreen() {
   const [publishNotice, setPublishNotice] = useState<string | null>(null);
   const [pendingAutoRouteBatchId, setPendingAutoRouteBatchId] = useState<string | null>(null);
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<BusinessSettingsDraft | null>(null);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+  const [newContentType, setNewContentType] = useState("");
+  const [newSeoKeyword, setNewSeoKeyword] = useState("");
   const updatePromptShown = useRef(false);
   const authRecoveryAttempted = useRef(false);
 
@@ -396,6 +623,7 @@ function BootScreen() {
     void queryClient.invalidateQueries({ queryKey: ["session-token"] });
     void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
     void queryClient.invalidateQueries({ queryKey: ["pages"] });
+    void queryClient.invalidateQueries({ queryKey: ["business-detail"] });
   }, []);
 
   const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
@@ -440,11 +668,34 @@ function BootScreen() {
     () => (pages.data ?? []).find((page) => page.id === selectedPageId || page.isSelected) ?? pageSnapshot,
     [pageSnapshot, pages.data, selectedPageId]
   );
+  const businessDetail = useQuery({
+    queryKey: ["business-detail", selectedBusinessId],
+    queryFn: async () => getBusinessDetail(token, selectedBusinessId ?? ""),
+    enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home")
+  });
+  const activeBusiness = businessDetail.data?.business ?? null;
 
   useEffect(() => {
     const current = (pages.data ?? []).find((page) => page.id === selectedPageId || page.isSelected);
     if (current) setPageSnapshot(current);
   }, [pages.data, selectedPageId]);
+
+  useEffect(() => {
+    if (!activeBusiness) {
+      setSettingsDraft(null);
+      return;
+    }
+    setSettingsDraft(settingsDraftFromBusiness(activeBusiness, selectedPage));
+  }, [activeBusiness?.id, activeBusiness?.updatedAt, selectedPage?.category, selectedPage?.pageName]);
+
+  useEffect(() => {
+    if (!activeBusiness) return;
+    const defaults = settingsDraftFromBusiness(activeBusiness, selectedPage);
+    setVariantsPerPhoto(defaults.defaultVariantsPerPhoto);
+    setGenerationIntensity(defaults.defaultGenerationIntensity);
+    setPeriodDays(defaults.defaultPeriodDays);
+    setPhotoPrefs({});
+  }, [activeBusiness?.id, activeBusiness?.updatedAt, selectedPage?.id]);
 
   const batches = useQuery({
     queryKey: ["batches", selectedBusinessId],
@@ -549,15 +800,22 @@ function BootScreen() {
     ]);
   };
 
-  const refreshAll = async () => {
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["session-token"] }),
-      queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
-      queryClient.invalidateQueries({ queryKey: ["pages"] }),
-      queryClient.invalidateQueries({ queryKey: ["batches"] }),
-      queryClient.invalidateQueries({ queryKey: ["batch-detail"] }),
-      queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] })
-    ]);
+  const refreshAll = async (options: { showSpinner?: boolean } = {}) => {
+    const showSpinner = options.showSpinner === true;
+    if (showSpinner) setManualRefreshing(true);
+    try {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["session-token"] }),
+        queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
+        queryClient.invalidateQueries({ queryKey: ["pages"] }),
+        queryClient.invalidateQueries({ queryKey: ["business-detail"] }),
+        queryClient.invalidateQueries({ queryKey: ["batches"] }),
+        queryClient.invalidateQueries({ queryKey: ["batch-detail"] }),
+        queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] })
+      ]);
+    } finally {
+      if (showSpinner) setManualRefreshing(false);
+    }
   };
 
   const connect = useMutation({
@@ -612,6 +870,134 @@ function BootScreen() {
     }
   });
 
+  const saveBusinessSettings = useMutation({
+    mutationFn: async (draft: BusinessSettingsDraft) => {
+      if (!selectedBusinessId || !activeBusiness) throw new Error("Selecciona una pagina antes de guardar ajustes.");
+      const cleanDraft: BusinessSettingsDraft = {
+        ...draft,
+        name: draft.name.trim() || selectedPage?.pageName || activeBusiness.name,
+        timezone: draft.timezone.trim() || defaultTimezone,
+        category: draft.category.trim(),
+        defaultVariantsPerPhoto: clamp(draft.defaultVariantsPerPhoto, 1, 5),
+        defaultGenerationIntensity: clamp(draft.defaultGenerationIntensity, 25, 80),
+        contentTypes: normalizeList(draft.contentTypes),
+        facebookSeoKeywords: normalizeList(draft.facebookSeoKeywords),
+        facebookSeoContext: draft.facebookSeoContext.trim()
+      };
+      return updateBusiness(token, selectedBusinessId, {
+        name: cleanDraft.name,
+        timezone: cleanDraft.timezone,
+        metadata: metadataFromSettingsDraft(cleanDraft, metadataRecord(activeBusiness.metadata))
+      });
+    },
+    onSuccess: async (result) => {
+      const nextDraft = settingsDraftFromBusiness(result.business, selectedPage);
+      setSettingsDraft(nextDraft);
+      setVariantsPerPhoto(nextDraft.defaultVariantsPerPhoto);
+      setGenerationIntensity(nextDraft.defaultGenerationIntensity);
+      setPeriodDays(nextDraft.defaultPeriodDays);
+      setSettingsNotice("Ajustes guardados para esta pagina.");
+      queryClient.setQueryData(["business-detail", selectedBusinessId], {
+        schemaVersion: "business_detail.v1",
+        business: result.business,
+        requestId: result.requestId
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["business-detail", selectedBusinessId] }),
+        queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
+        queryClient.invalidateQueries({ queryKey: ["batches", selectedBusinessId] })
+      ]);
+    }
+  });
+
+  const updateSettingsDraft = (patch: Partial<BusinessSettingsDraft>) => {
+    setSettingsNotice(null);
+    setSettingsDraft((current) => (current ? { ...current, ...patch } : current));
+  };
+
+  const addSettingsListItem = (field: "contentTypes" | "facebookSeoKeywords", raw: string, clear: () => void) => {
+    const items = listFromInput(raw);
+    if (items.length === 0) return;
+    setSettingsNotice(null);
+    setSettingsDraft((current) =>
+      current ? { ...current, [field]: normalizeList([...current[field], ...items]) } : current
+    );
+    clear();
+  };
+
+  const removeSettingsListItem = (field: "contentTypes" | "facebookSeoKeywords", item: string) => {
+    setSettingsNotice(null);
+    setSettingsDraft((current) =>
+      current ? { ...current, [field]: current[field].filter((value) => value !== item) } : current
+    );
+  };
+
+  const addImageEditor = (provider: ImageEditorProviderKey) => {
+    const preset = imageEditorProviderCatalog.find((item) => item.provider === provider) ?? imageEditorProviderCatalog[1]!;
+    const id = `${provider}-${Date.now()}`;
+    setSettingsNotice(null);
+    setSettingsDraft((current) =>
+      current
+        ? {
+            ...current,
+            imageEditors: [
+              ...current.imageEditors,
+              {
+                id,
+                provider,
+                label: preset.label,
+                enabled: current.imageEditors.length === 0,
+                model: preset.model,
+                baseUrl: preset.baseUrl,
+                size: "1024x1024",
+                quality: "medium",
+                timeoutMs: 30000,
+                apiKeyConfigured: false,
+                apiKeyInput: ""
+              }
+            ]
+          }
+        : current
+    );
+  };
+
+  const updateImageEditor = (editorId: string, patch: Partial<ImageEditorDraft>) => {
+    setSettingsNotice(null);
+    setSettingsDraft((current) =>
+      current
+        ? {
+            ...current,
+            imageEditors: current.imageEditors.map((editor) =>
+              editor.id === editorId ? { ...editor, ...patch } : editor
+            )
+          }
+        : current
+    );
+  };
+
+  const useImageEditor = (editorId: string) => {
+    setSettingsNotice(null);
+    setSettingsDraft((current) =>
+      current
+        ? {
+            ...current,
+            imageEditors: current.imageEditors.map((editor) => ({ ...editor, enabled: editor.id === editorId }))
+          }
+        : current
+    );
+  };
+
+  const removeImageEditor = (editorId: string) => {
+    setSettingsNotice(null);
+    setSettingsDraft((current) => {
+      if (!current) return current;
+      const remaining = current.imageEditors.filter((editor) => editor.id !== editorId);
+      if (remaining.length === 0) return { ...current, imageEditors: [defaultImageEditor()] };
+      if (!remaining.some((editor) => editor.enabled)) remaining[0] = { ...remaining[0]!, enabled: true };
+      return { ...current, imageEditors: remaining };
+    });
+  };
+
   const uploadSelectedPhotos = useMutation({
     mutationFn: async () => {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -629,9 +1015,19 @@ function BootScreen() {
       if (!businessId) throw new Error("Selecciona una pagina antes de subir fotos.");
       let batchId = selectedBatch?.id ?? null;
       if (!batchId || selectedBatch?.status === "completado" || selectedBatch?.status === "completed") {
+        const defaults = settingsDraft;
         const batch = await createBatch(token, businessId);
         batchId = batch.id;
         setSelectedBatchId(batch.id);
+        setPhotoPrefs({});
+        setStylePhotoId(null);
+        setDetailPhotoId(null);
+        setReviewIndex(0);
+        if (defaults) {
+          setVariantsPerPhoto(defaults.defaultVariantsPerPhoto);
+          setGenerationIntensity(defaults.defaultGenerationIntensity);
+          setPeriodDays(defaults.defaultPeriodDays);
+        }
         queryClient.setQueryData(["batches", businessId], (current: BatchSummary[] | undefined) => [batch, ...(current ?? [])]);
       }
 
@@ -680,13 +1076,18 @@ function BootScreen() {
   });
 
   const generateVariants = useMutation({
-    mutationFn: async () =>
+    mutationFn: async (input: {
+      businessId: string;
+      batchId: string;
+      variantsPerPhoto: number;
+      styleOverrides: GenerateBatchStyleOverride[];
+    }) =>
       generateBatchVariants(
         token,
-        selectedBusinessId ?? "",
-        selectedBatch?.id ?? "",
-        variantsPerPhoto,
-        styleOverridesForGeneration(photos, photoPrefs, generationIntensity)
+        input.businessId,
+        input.batchId,
+        input.variantsPerPhoto,
+        input.styleOverrides
       ),
     onMutate: () => setFlow("generate"),
     onSuccess: invalidateWork
@@ -778,6 +1179,10 @@ function BootScreen() {
   const variants = detail?.variants ?? [];
   const jobs = detail?.jobs ?? [];
   const posts = scheduledPosts.data ?? [];
+  const pagePosts = useMemo(
+    () => posts.filter((post) => !selectedBusinessId || post.businessId === selectedBusinessId),
+    [posts, selectedBusinessId]
+  );
   const failedWorkJobs = jobs.filter((job) => job.status === "failed" && isWorkJob(job));
   const reviewQueue = variants.filter(isVariantReviewable);
   const currentReview = reviewQueue[Math.min(reviewIndex, Math.max(0, reviewQueue.length - 1))] ?? null;
@@ -789,11 +1194,8 @@ function BootScreen() {
   const readyPhotoCount = photos.filter(isPhotoAnalyzed).length;
   const photosReadyForGeneration = photos.length > 0 && analyzedCount === photos.length && !photos.some(isPhotoBusy);
   const hasVariants = variants.length > 0;
-  const failedPosts = posts.filter(isPostFailed);
-  const selectedBatchPosts = selectedBatch ? posts.filter((post) => post.batchId === selectedBatch.id) : [];
-  const refreshing =
-    tokenQuery.isFetching || bootstrap.isFetching || pages.isFetching || batches.isFetching || batchDetail.isFetching || scheduledPosts.isFetching;
-
+  const failedPosts = pagePosts.filter(isPostFailed);
+  const selectedBatchPosts = selectedBatch ? pagePosts.filter((post) => post.batchId === selectedBatch.id) : [];
   const batchProcessSteps = useMemo<BatchProcessStep[]>(() => {
     if (!selectedBatch) return [];
     const processOrder: BatchFlowStep[] = ["styles", "generate", "review", "schedule", "calendar"];
@@ -859,6 +1261,25 @@ function BootScreen() {
     );
   };
 
+  const startVariantGeneration = () => {
+    if (!selectedBusinessId || !selectedBatch?.id || !photosReadyForGeneration) return;
+    const fallbackStyleId = settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id;
+    const frozenPreferences = freezePhotoPreferencesForGeneration(
+      photos,
+      photoPrefs,
+      generationIntensity,
+      fallbackStyleId
+    );
+    const styleOverrides = styleOverridesForGeneration(photos, frozenPreferences, generationIntensity, fallbackStyleId);
+    setPhotoPrefs(frozenPreferences);
+    generateVariants.mutate({
+      businessId: selectedBusinessId,
+      batchId: selectedBatch.id,
+      variantsPerPhoto,
+      styleOverrides
+    });
+  };
+
   useEffect(() => {
     setReviewIndex(0);
   }, [reviewQueue.length]);
@@ -891,7 +1312,9 @@ function BootScreen() {
     bootstrap.error ??
     connect.error ??
     pages.error ??
+    businessDetail.error ??
     selectPage.error ??
+    saveBusinessSettings.error ??
     batches.error ??
     batchDetail.error ??
     scheduledPosts.error ??
@@ -1043,14 +1466,14 @@ function BootScreen() {
     return () => subscription.remove();
   }, [handleAndroidBack]);
 
-  const renderPageChrome = (options: { includeUpload?: boolean } = {}) => {
+  const renderPageChrome = (options: { includeUpload?: boolean; compact?: boolean } = {}) => {
     if (!selectedPage) return null;
     const actions: PageAction[] = [
       { label: "Paginas", icon: "albums-outline", onPress: showPageDirectory },
       ...(options.includeUpload
         ? [
             {
-              label: uploadSelectedPhotos.isPending ? "Subiendo" : "Subir lote",
+              label: uploadSelectedPhotos.isPending ? "Subiendo" : "Subir fotos",
               icon: "cloud-upload-outline" as IconName,
               onPress: () => uploadSelectedPhotos.mutate(),
               disabled: uploadSelectedPhotos.isPending || !selectedBusinessId,
@@ -1060,10 +1483,11 @@ function BootScreen() {
         : []),
       { label: "Ajustes", icon: "settings-outline", onPress: () => setFlow("settings") }
     ];
+    const compact = options.compact === true;
     return (
       <>
-        <PageHeader page={selectedPage} />
-        <PageActionRail actions={actions} />
+        <PageHeader page={selectedPage} compact={compact} />
+        <PageActionRail actions={actions} compact={compact} />
       </>
     );
   };
@@ -1118,6 +1542,12 @@ function BootScreen() {
 
   const renderPageDirectory = () => (
     <Screen>
+      <View style={styles.pageDirectoryHeader}>
+        <Text style={styles.pageDirectoryTitle}>Tus paginas</Text>
+        <Text style={styles.pageDirectorySubtitle}>
+          {(pages.data ?? []).length > 0 ? "Elige una para trabajar." : "Conecta una pagina para empezar."}
+        </Text>
+      </View>
       {pages.isLoading ? <View style={styles.centeredBlock}><ActivityIndicator color={palette.blue} /></View> : null}
       {(pages.data ?? []).map((page) => (
         <PageCard
@@ -1132,23 +1562,23 @@ function BootScreen() {
   );
 
   const renderPageWorkspace = () => (
-    <Screen>
-      {renderPageChrome({ includeUpload: true })}
+    <Screen compact>
+      {renderPageChrome({ includeUpload: true, compact: true })}
       {renderJobAlerts()}
       {uploadNotice ? <Alert tone="info" message={uploadNotice} /> : null}
-      <View style={styles.batchList}>
-        {(batches.data ?? []).length === 0 ? <EmptyState title="Sin lotes" body="Sube fotos para crear el primero." /> : null}
-        {(batches.data ?? []).map((batch) => (
-          <BatchRow
-            key={batch.id}
-            batch={batch}
-            selected={batch.id === selectedBatch?.id}
-            deleting={removeBatch.isPending}
-            onPress={() => openBatch(batch)}
-            onDelete={() => confirmDeleteBatch(batch)}
-          />
-        ))}
-      </View>
+      <PageDashboardCalendar
+        posts={pagePosts}
+        selectedDay={selectedDay}
+        onSelectDay={setSelectedDay}
+        onOpenAgenda={() => setFlow("calendar")}
+      />
+      <DashboardBatchSummary
+        batches={batches.data ?? []}
+        selectedBatchId={selectedBatch?.id ?? null}
+        deleting={removeBatch.isPending}
+        onOpenBatch={openBatch}
+        onDeleteBatch={confirmDeleteBatch}
+      />
     </Screen>
   );
 
@@ -1207,7 +1637,7 @@ function BootScreen() {
               key={photo.id}
               photo={photo}
               index={index}
-              styleName={compactStyleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto)}
+              styleName={compactStyleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto, settingsDraft?.defaultStyleId)}
               onPress={() => setDetailPhotoId(photo.id)}
               onLongPress={() => setStylePhotoId(photo.id)}
             />
@@ -1216,8 +1646,9 @@ function BootScreen() {
         {stylePhotoId ? (
           <StylePicker
             photoId={stylePhotoId}
-            preference={photoPrefs[stylePhotoId] ?? { styleId: styleCatalog[0]!.id, intensity: generationIntensity }}
+            preference={photoPrefs[stylePhotoId] ?? { styleId: settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id, intensity: generationIntensity }}
             variantsPerPhoto={variantsPerPhoto}
+            fallbackStyleId={settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id}
             onChange={(next) => setPhotoPrefs((current) => ({ ...current, [stylePhotoId]: next }))}
             onClose={() => setStylePhotoId(null)}
           />
@@ -1225,7 +1656,7 @@ function BootScreen() {
         {detailPhotoId ? (
           <PhotoDetail
             photo={photos.find((photo) => photo.id === detailPhotoId) ?? null}
-            prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto, generationIntensity)}
+            prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto, generationIntensity, settingsDraft?.defaultStyleId)}
             onClose={() => setDetailPhotoId(null)}
           />
         ) : null}
@@ -1297,7 +1728,7 @@ function BootScreen() {
             label={generateVariants.isPending ? "Enviando..." : "Confirmar"}
             icon="checkmark-circle-outline"
             disabled={generateVariants.isPending || !photosReadyForGeneration || hasVariants}
-            onPress={() => generateVariants.mutate()}
+            onPress={startVariantGeneration}
           />
         </Panel>
         {reviewQueue.length > 0 ? (
@@ -1436,12 +1867,12 @@ function BootScreen() {
           onDelete={() => confirmDeleteBatch(selectedBatch)}
         />
       ) : null}
-      <CalendarGrid posts={posts} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
-      <Panel title={selectedDay ? `Publicaciones ${formatDate(selectedDay)}` : "Publicaciones"}>
-        {(selectedDay ? posts.filter((post) => dateKey(post.scheduledFor) === selectedDay) : posts).length === 0 ? (
+      <CalendarGrid posts={pagePosts} selectedDay={selectedDay} onSelectDay={setSelectedDay} />
+      <Panel title={selectedDay ? `Publicaciones ${formatDayKey(selectedDay)}` : "Publicaciones"}>
+        {(selectedDay ? pagePosts.filter((post) => localDateKey(post.scheduledFor) === selectedDay) : pagePosts).length === 0 ? (
           <EmptyState title="Sin publicaciones" body="Cuando programes variantes apareceran aqui." />
         ) : null}
-        {(selectedDay ? posts.filter((post) => dateKey(post.scheduledFor) === selectedDay) : posts).map((post) => (
+        {(selectedDay ? pagePosts.filter((post) => localDateKey(post.scheduledFor) === selectedDay) : pagePosts).map((post) => (
           <ScheduledPostRow
             key={post.id}
             post={post}
@@ -1456,42 +1887,335 @@ function BootScreen() {
     </Screen>
   );
 
-  const renderSettings = () => (
-    <Screen>
-      {renderPageChrome()}
-      <Panel title="Pagina activa">
-        <Text style={styles.muted}>{stateText}</Text>
-        <Button
-          label={connect.isPending ? "Conectando..." : "Reconectar Facebook"}
-          icon="logo-facebook"
-          variant="secondary"
-          disabled={connect.isPending}
-          onPress={() => connect.mutate()}
-        />
-      </Panel>
-      <Panel title="Paginas de Facebook">
-        {(pages.data ?? []).map((page) => (
-          <PageCard key={page.id} page={page} selected={page.isSelected} disabled={selectPage.isPending} onPress={() => openPage(page)} />
-        ))}
-      </Panel>
-      <Button
-        label={signOut.isPending ? "Saliendo..." : "Cerrar sesion"}
-        icon="log-out-outline"
-        variant="danger"
-        disabled={signOut.isPending}
-        onPress={() => signOut.mutate()}
-      />
-      {availableUpdate ? (
-        <Button
-          label={`Actualizar a ${availableUpdate.versionName}`}
-          icon="download-outline"
-          variant="secondary"
-          onPress={() => void openAppUpdate(availableUpdate)}
-        />
-      ) : null}
-      {config.appEnv === "development" ? <Text style={styles.muted}>API: {config.apiUrl}</Text> : null}
-    </Screen>
-  );
+  const renderSettings = () => {
+    const draft = settingsDraft;
+    const bootstrapFacebookStatus = bootstrap.data?.authenticated ? bootstrap.data.facebookTokenStatus : null;
+    const facebookStatus = activeBusiness?.tokenStatus ?? bootstrapFacebookStatus ?? "error_desconocido";
+    const facebookTone: "good" | "warn" | "neutral" =
+      facebookStatus === "valido" || facebookStatus === "por_vencer"
+        ? "good"
+        : facebookStatus === "expirado" || facebookStatus === "requiere_reconexion" || facebookStatus === "error_permiso"
+          ? "warn"
+          : "neutral";
+    const facebookLabel: Record<string, string> = {
+      valido: "Conectado",
+      por_vencer: "Por vencer",
+      expirado: "Expirado",
+      requiere_reconexion: "Reconectar",
+      error_permiso: "Permisos",
+      error_desconocido: "Sin verificar"
+    };
+
+    if (businessDetail.isLoading || !draft) {
+      return (
+        <Screen>
+          {renderPageChrome()}
+          <Panel title="Ajustes">
+            <ActivityIndicator color={palette.blue} />
+            <Text style={styles.muted}>Cargando ajustes de esta pagina...</Text>
+          </Panel>
+        </Screen>
+      );
+    }
+
+    return (
+      <Screen>
+        {renderPageChrome()}
+        {settingsNotice ? <Alert tone="info" message={settingsNotice} /> : null}
+        <Panel title="Ajustes de esta pagina" eyebrow="Configuracion">
+          <View style={styles.rowBetween}>
+            <View style={styles.flex}>
+              <Text style={styles.muted} numberOfLines={2}>
+                Guardados por separado para {selectedPage?.pageName ?? draft.name}.
+              </Text>
+            </View>
+            <Pill label={facebookLabel[facebookStatus] ?? "Conexion"} tone={facebookTone} />
+          </View>
+          <Button
+            label="Volver a la pagina"
+            icon="arrow-back-outline"
+            variant="secondary"
+            onPress={() => {
+              setSelectedBatchId(null);
+              setFlow("styles");
+            }}
+          />
+          <Button
+            label={saveBusinessSettings.isPending ? "Guardando..." : "Guardar ajustes"}
+            icon="save-outline"
+            disabled={saveBusinessSettings.isPending}
+            onPress={() => saveBusinessSettings.mutate(draft)}
+          />
+        </Panel>
+
+        <Panel title="Negocio">
+          <SettingsField label="Nombre interno" body="Se usa dentro de Maniaco para identificar esta pagina.">
+            <TextInput
+              value={draft.name}
+              onChangeText={(name) => updateSettingsDraft({ name })}
+              placeholder="Nombre de la pagina"
+              placeholderTextColor={palette.muted}
+              style={styles.settingInput}
+            />
+          </SettingsField>
+          <SettingsField label="Categoria" body="Ayuda a escribir captions con contexto correcto.">
+            <TextInput
+              value={draft.category}
+              onChangeText={(category) => updateSettingsDraft({ category })}
+              placeholder={selectedPage?.category ?? "Restaurante, tienda, servicio..."}
+              placeholderTextColor={palette.muted}
+              style={styles.settingInput}
+            />
+          </SettingsField>
+          <SettingsField label="Zona horaria" body="Se usa para programar publicaciones.">
+            <View style={styles.optionWrap}>
+              {timezoneOptions.map((timezone) => (
+                <SelectableChip
+                  key={timezone}
+                  label={timezone.replace("America/", "")}
+                  selected={draft.timezone === timezone}
+                  onPress={() => updateSettingsDraft({ timezone })}
+                />
+              ))}
+            </View>
+          </SettingsField>
+          <View style={styles.settingsActionRow}>
+            <Button
+              label={connect.isPending ? "Conectando..." : "Reconectar Meta"}
+              icon="link-outline"
+              variant="secondary"
+              disabled={connect.isPending}
+              onPress={() => connect.mutate()}
+            />
+            <Button label="Cambiar pagina" icon="albums-outline" variant="secondary" onPress={showPageDirectory} />
+          </View>
+        </Panel>
+
+        <Panel title="Generacion y agenda">
+          <SettingsField label="Variantes por foto" body="Valor inicial al crear un lote nuevo.">
+            <Stepper
+              value={draft.defaultVariantsPerPhoto}
+              min={1}
+              max={5}
+              onChange={(defaultVariantsPerPhoto) => updateSettingsDraft({ defaultVariantsPerPhoto })}
+            />
+          </SettingsField>
+          <SettingsField label="Periodo de publicacion" body="Valor inicial para distribuir aceptadas.">
+            <View style={styles.optionWrap}>
+              {periodOptions.map((option) => (
+                <SelectableChip
+                  key={option}
+                  label={`${option} dias`}
+                  selected={draft.defaultPeriodDays === option}
+                  onPress={() => updateSettingsDraft({ defaultPeriodDays: option })}
+                />
+              ))}
+            </View>
+          </SettingsField>
+          <GenerationIntensityControl
+            value={draft.defaultGenerationIntensity}
+            onChange={(defaultGenerationIntensity) => updateSettingsDraft({ defaultGenerationIntensity })}
+          />
+        </Panel>
+
+        <Panel title="Editores de imagen">
+          <Text style={styles.muted}>
+            Cada pagina puede usar su propio editor. Las llaves se guardan en el servidor; aqui solo se indica si ya hay una configurada.
+          </Text>
+          {draft.imageEditors.map((editor) => (
+            <View key={editor.id} style={styles.editorCard}>
+              <View style={styles.rowBetween}>
+                <View style={styles.flex}>
+                  <Text style={styles.rowTitle}>{editor.label || "Editor de imagen"}</Text>
+                  <Text style={styles.muted}>{editor.provider === "openai" ? "OpenAI Images" : "API compatible con /images/edits"}</Text>
+                </View>
+                <Pill label={editor.enabled ? "Activo" : "Pausado"} tone={editor.enabled ? "good" : "neutral"} />
+              </View>
+              <SettingsField label="Nombre">
+                <TextInput
+                  value={editor.label}
+                  onChangeText={(label) => updateImageEditor(editor.id, { label })}
+                  placeholder="Nombre del editor"
+                  placeholderTextColor={palette.muted}
+                  style={styles.settingInput}
+                />
+              </SettingsField>
+              <SettingsField label="Modelo" body="Ej. gpt-image-2 o el modelo que indique tu proveedor.">
+                <TextInput
+                  value={editor.model}
+                  onChangeText={(model) => updateImageEditor(editor.id, { model })}
+                  placeholder="gpt-image-2"
+                  placeholderTextColor={palette.muted}
+                  autoCapitalize="none"
+                  style={styles.settingInput}
+                />
+              </SettingsField>
+              {editor.provider === "openai_compatible" ? (
+                <SettingsField label="Base URL" body="Debe terminar antes de /images/edits.">
+                  <TextInput
+                    value={editor.baseUrl}
+                    onChangeText={(baseUrl) => updateImageEditor(editor.id, { baseUrl })}
+                    placeholder="https://api.proveedor.com/v1"
+                    placeholderTextColor={palette.muted}
+                    autoCapitalize="none"
+                    keyboardType="url"
+                    style={styles.settingInput}
+                  />
+                </SettingsField>
+              ) : null}
+              <SettingsField label="Llave API" body={editor.apiKeyConfigured ? "Hay una llave guardada. Escribe una nueva solo si quieres reemplazarla." : "Se manda al servidor y no se queda visible en la app."}>
+                <TextInput
+                  value={editor.apiKeyInput}
+                  onChangeText={(apiKeyInput) => updateImageEditor(editor.id, { apiKeyInput, clearApiKey: false })}
+                  placeholder={editor.apiKeyConfigured ? "Llave guardada" : "Pega la llave API"}
+                  placeholderTextColor={palette.muted}
+                  autoCapitalize="none"
+                  secureTextEntry
+                  style={styles.settingInput}
+                />
+              </SettingsField>
+              <SettingsField label="Ajustes del editor">
+                <View style={styles.optionWrap}>
+                  {imageEditorSizes.map((size) => (
+                    <SelectableChip
+                      key={size}
+                      label={size}
+                      selected={editor.size === size}
+                      onPress={() => updateImageEditor(editor.id, { size })}
+                    />
+                  ))}
+                </View>
+                <View style={styles.optionWrap}>
+                  {imageEditorQualities.map((quality) => (
+                    <SelectableChip
+                      key={quality}
+                      label={quality}
+                      selected={editor.quality === quality}
+                      onPress={() => updateImageEditor(editor.id, { quality })}
+                    />
+                  ))}
+                </View>
+                <View style={styles.inlineInputRow}>
+                  <TextInput
+                    value={String(editor.timeoutMs)}
+                    onChangeText={(value) => updateImageEditor(editor.id, { timeoutMs: clamp(Number(value) || 30000, 5000, 120000) })}
+                    placeholder="30000"
+                    placeholderTextColor={palette.muted}
+                    keyboardType="number-pad"
+                    style={[styles.settingInput, styles.flex]}
+                  />
+                  <Text style={styles.muted}>ms</Text>
+                </View>
+              </SettingsField>
+              <View style={styles.settingsActionRow}>
+                <Button label="Usar este editor" icon="checkmark-circle-outline" variant="secondary" onPress={() => useImageEditor(editor.id)} />
+                {editor.apiKeyConfigured || editor.apiKeyInput ? (
+                  <Button
+                    label="Quitar llave"
+                    icon="key-outline"
+                    variant="secondary"
+                    onPress={() => updateImageEditor(editor.id, { apiKeyInput: "", apiKeyConfigured: false, clearApiKey: true })}
+                  />
+                ) : null}
+                <Button label="Eliminar editor" icon="trash-outline" variant="danger" onPress={() => removeImageEditor(editor.id)} />
+              </View>
+            </View>
+          ))}
+          <View style={styles.settingsActionRow}>
+            <Button label="Agregar OpenAI" icon="add-circle-outline" variant="secondary" onPress={() => addImageEditor("openai")} />
+            <Button label="Agregar compatible" icon="code-outline" variant="secondary" onPress={() => addImageEditor("openai_compatible")} />
+          </View>
+        </Panel>
+
+        <Panel title="Estilo inicial">
+          <Text style={styles.muted}>Cada variante sigue rotando estilos; este es el punto de arranque para esta pagina.</Text>
+          {styleCatalog.map((style) => (
+            <Pressable
+              key={style.id}
+              style={[styles.styleRow, draft.defaultStyleId === style.id ? styles.styleRowActive : null]}
+              onPress={() => updateSettingsDraft({ defaultStyleId: style.id })}
+            >
+              <Ionicons name={style.icon} size={20} color={draft.defaultStyleId === style.id ? palette.blue : palette.muted} />
+              <View style={styles.flex}>
+                <Text style={styles.rowTitle}>{style.name}</Text>
+                <Text style={styles.muted}>{style.detail}</Text>
+              </View>
+              {draft.defaultStyleId === style.id ? <Ionicons name="checkmark-circle" size={18} color={palette.green} /> : null}
+            </Pressable>
+          ))}
+        </Panel>
+
+        <Panel title="Contenido">
+          <Text style={styles.muted}>Tipos de publicaciones que esta pagina suele usar.</Text>
+          <View style={styles.tagWrap}>
+            {draft.contentTypes.map((item) => (
+              <RemovableChip key={item} label={item} onRemove={() => removeSettingsListItem("contentTypes", item)} />
+            ))}
+          </View>
+          <View style={styles.inlineInputRow}>
+            <TextInput
+              value={newContentType}
+              onChangeText={setNewContentType}
+              placeholder="producto, promo, evento..."
+              placeholderTextColor={palette.muted}
+              style={[styles.settingInput, styles.flex]}
+            />
+            <MiniButton label="Agregar" icon="add-outline" onPress={() => addSettingsListItem("contentTypes", newContentType, () => setNewContentType(""))} />
+          </View>
+        </Panel>
+
+        <Panel title="SEO de redes">
+          <SettingsField label="Palabras clave" body="Se guardan por pagina para orientar textos de redes.">
+            <View style={styles.tagWrap}>
+              {draft.facebookSeoKeywords.length === 0 ? <Pill label="sin palabras" tone="neutral" /> : null}
+              {draft.facebookSeoKeywords.map((item) => (
+                <RemovableChip key={item} label={item} onRemove={() => removeSettingsListItem("facebookSeoKeywords", item)} />
+              ))}
+            </View>
+            <View style={styles.inlineInputRow}>
+              <TextInput
+                value={newSeoKeyword}
+                onChangeText={setNewSeoKeyword}
+                placeholder="sushi tapalpa, comida local..."
+                placeholderTextColor={palette.muted}
+                style={[styles.settingInput, styles.flex]}
+              />
+              <MiniButton label="Agregar" icon="add-outline" onPress={() => addSettingsListItem("facebookSeoKeywords", newSeoKeyword, () => setNewSeoKeyword(""))} />
+            </View>
+          </SettingsField>
+          <SettingsField label="Contexto para captions" body="Frases o datos que deben respetarse al escribir publicaciones.">
+            <TextInput
+              value={draft.facebookSeoContext}
+              onChangeText={(facebookSeoContext) => updateSettingsDraft({ facebookSeoContext })}
+              multiline
+              placeholder="Ej. servicio a domicilio, zona, especialidades, tono de la marca..."
+              placeholderTextColor={palette.muted}
+              style={[styles.settingInput, styles.settingTextArea]}
+            />
+          </SettingsField>
+        </Panel>
+
+        <Panel title="Cuenta">
+          <Button
+            label={signOut.isPending ? "Saliendo..." : "Cerrar sesion"}
+            icon="log-out-outline"
+            variant="danger"
+            disabled={signOut.isPending}
+            onPress={() => signOut.mutate()}
+          />
+          {availableUpdate ? (
+            <Button
+              label={`Actualizar a ${availableUpdate.versionName}`}
+              icon="download-outline"
+              variant="secondary"
+              onPress={() => void openAppUpdate(availableUpdate)}
+            />
+          ) : null}
+          {config.appEnv === "development" ? <Text style={styles.muted}>API: {config.apiUrl}</Text> : null}
+        </Panel>
+      </Screen>
+    );
+  };
 
   const renderCurrent = () => {
     if (tokenQuery.isLoading || (Boolean(token) && bootstrap.isLoading)) {
@@ -1516,16 +2240,20 @@ function BootScreen() {
     return renderPageDirectory();
   };
 
+  const isPageWorkspaceHome =
+    Boolean(bootstrap.data?.authenticated && bootstrap.data.nextStep === "home" && flow === "styles" && !selectedBatch);
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" backgroundColor={palette.bg} />
       <View style={styles.shell}>
         <ScrollView
-          contentContainerStyle={styles.container}
+          scrollEnabled={!isPageWorkspaceHome}
+          contentContainerStyle={[styles.container, isPageWorkspaceHome ? styles.pageHomeContainer : null]}
           refreshControl={
             <RefreshControl
-              refreshing={refreshing}
-              onRefresh={refreshAll}
+              refreshing={manualRefreshing}
+              onRefresh={() => void refreshAll({ showSpinner: true })}
               tintColor={palette.blue}
               colors={[palette.blue]}
               progressBackgroundColor={palette.surface}
@@ -1540,8 +2268,8 @@ function BootScreen() {
   );
 }
 
-function Screen({ children }: { children: ReactNode }) {
-  return <View style={styles.screen}>{children}</View>;
+function Screen({ children, compact }: { children: ReactNode; compact?: boolean }) {
+  return <View style={[styles.screen, compact ? styles.screenCompact : null]}>{children}</View>;
 }
 
 function CenteredScreen({ children }: { children: ReactNode }) {
@@ -1619,22 +2347,22 @@ function ActivePageBanner({
   );
 }
 
-function PageHeader({ page }: { page: MetaPage }) {
+function PageHeader({ page, compact }: { page: MetaPage; compact?: boolean }) {
   return (
-    <View style={styles.pageIdentity}>
-      <View style={styles.pageCoverFrame}>
+    <View style={[styles.pageIdentity, compact ? styles.pageIdentityCompact : null]}>
+      <View style={[styles.pageCoverFrame, compact ? styles.pageCoverFrameCompact : null]}>
         {page.coverPhotoUrl ? <Image source={{ uri: page.coverPhotoUrl }} style={asImageStyle(styles.pageCover)} /> : <View style={[styles.pageCover, styles.pageCoverPlaceholder]} />}
       </View>
-      <View style={styles.pageCardBody}>
+      <View style={[styles.pageCardBody, compact ? styles.pageCardBodyCompact : null]}>
         {page.profilePhotoUrl ? (
-          <Image source={{ uri: page.profilePhotoUrl }} style={asImageStyle(styles.pageAvatar)} />
+          <Image source={{ uri: page.profilePhotoUrl }} style={asImageStyle(compact ? styles.pageAvatarCompact : styles.pageAvatar)} />
         ) : (
-          <View style={styles.pageAvatarPlaceholder}>
-            <Text style={styles.pageAvatarText}>{page.pageName.slice(0, 1).toUpperCase()}</Text>
+          <View style={[styles.pageAvatarPlaceholder, compact ? styles.pageAvatarCompact : null]}>
+            <Text style={[styles.pageAvatarText, compact ? styles.pageAvatarTextCompact : null]}>{page.pageName.slice(0, 1).toUpperCase()}</Text>
           </View>
         )}
         <View style={styles.flex}>
-          <Text style={styles.pageName} numberOfLines={2}>{page.pageName}</Text>
+          <Text style={[styles.pageName, compact ? styles.pageNameCompact : null]} numberOfLines={compact ? 1 : 2}>{page.pageName}</Text>
           <Text style={styles.pageMeta} numberOfLines={1}>{page.category ?? "Facebook Page"}</Text>
         </View>
       </View>
@@ -1642,15 +2370,16 @@ function PageHeader({ page }: { page: MetaPage }) {
   );
 }
 
-function PageActionRail({ actions }: { actions: PageAction[] }) {
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pageActionRail}>
-      {actions.map((action) => (
+function PageActionRail({ actions, compact }: { actions: PageAction[]; compact?: boolean }) {
+  const buttons = actions.map((action) => (
         <Pressable
           key={action.label}
           accessibilityLabel={action.label}
           style={[
             styles.pageActionButton,
+            compact ? styles.pageActionButtonCompact : null,
+            compact && action.tone === "primary" ? styles.pageActionButtonCompactPrimary : null,
+            compact && action.tone !== "primary" ? styles.pageActionButtonCompactSide : null,
             action.tone === "primary" ? styles.pageActionButtonPrimary : null,
             action.tone === "danger" ? styles.pageActionButtonDanger : null,
             action.disabled ? styles.disabled : null
@@ -1671,7 +2400,11 @@ function PageActionRail({ actions }: { actions: PageAction[] }) {
             {action.label}
           </Text>
         </Pressable>
-      ))}
+  ));
+  if (compact) return <View style={styles.pageActionRailCompact}>{buttons}</View>;
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pageActionRail}>
+      {buttons}
     </ScrollView>
   );
 }
@@ -1764,6 +2497,35 @@ function Panel({ title, eyebrow, children }: { title: string; eyebrow?: string; 
       <Text style={styles.panelTitle}>{title}</Text>
       {children}
     </View>
+  );
+}
+
+function SettingsField({ label, body, children }: { label: string; body?: string; children: ReactNode }) {
+  return (
+    <View style={styles.settingsField}>
+      <View style={styles.settingsFieldHeader}>
+        <Text style={styles.settingsLabel}>{label}</Text>
+        {body ? <Text style={styles.settingsBody}>{body}</Text> : null}
+      </View>
+      {children}
+    </View>
+  );
+}
+
+function SelectableChip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  return (
+    <Pressable style={[styles.optionChip, selected ? styles.optionChipActive : null]} onPress={onPress}>
+      <Text style={[styles.optionText, selected ? styles.optionTextActive : null]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function RemovableChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <Pressable style={styles.removableChip} onPress={onRemove}>
+      <Text style={styles.removableText}>{label}</Text>
+      <Ionicons name="close" size={13} color={palette.text} />
+    </Pressable>
   );
 }
 
@@ -2058,12 +2820,14 @@ function StylePicker({
   photoId,
   preference,
   variantsPerPhoto,
+  fallbackStyleId,
   onChange,
   onClose
 }: {
   photoId: string;
   preference: PhotoStylePreference;
   variantsPerPhoto: number;
+  fallbackStyleId: string;
   onChange: (next: PhotoStylePreference) => void;
   onClose: () => void;
 }) {
@@ -2091,7 +2855,7 @@ function StylePicker({
           </Pressable>
         ))}
       </View>
-      <Text style={styles.promptBox}>{promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, preference.intensity)}</Text>
+      <Text style={styles.promptBox}>{promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, preference.intensity, fallbackStyleId)}</Text>
       <Button label="Listo" icon="checkmark-outline" variant="secondary" onPress={onClose} />
     </Panel>
   );
@@ -2203,12 +2967,183 @@ function SchedulePreview({ periodDays, acceptedCount }: { periodDays: PeriodDays
   );
 }
 
+function PageDashboardCalendar({
+  posts,
+  selectedDay,
+  onSelectDay,
+  onOpenAgenda
+}: {
+  posts: ScheduledPost[];
+  selectedDay: string | null;
+  onSelectDay: (day: string) => void;
+  onOpenAgenda: () => void;
+}) {
+  const today = new Date();
+  const activeDay = selectedDay ?? localDateKey(today);
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const firstOffset = (monthStart.getDay() + 6) % 7;
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  const cells: Array<Date | null> = [
+    ...Array.from({ length: firstOffset }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) => new Date(today.getFullYear(), today.getMonth(), index + 1))
+  ];
+  while (cells.length < 42) cells.push(null);
+
+  const activePosts = posts
+    .filter((post) => localDateKey(post.scheduledFor) === activeDay)
+    .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime());
+  const scheduledCount = posts.filter((post) => ["programada", "scheduled"].includes(post.status)).length;
+  const publishedCount = posts.filter(isPostGood).length;
+  const failedCount = posts.filter(isPostFailed).length;
+  const monthLabel = today.toLocaleDateString("es-MX", { month: "long", year: "numeric" });
+
+  return (
+    <View style={styles.pageCalendar}>
+      <View style={styles.pageCalendarHeader}>
+        <View>
+          <Text style={styles.pageCalendarTitle}>{monthLabel}</Text>
+          <Text style={styles.pageCalendarSub}>{posts.length} publicaciones de esta pagina</Text>
+        </View>
+        <Pressable style={styles.pageCalendarAgendaButton} onPress={onOpenAgenda}>
+          <Ionicons name="calendar-number-outline" size={16} color={palette.ink} />
+          <Text style={styles.pageCalendarAgendaText}>Agenda</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.pageCalendarStats}>
+        <CalendarStat label="Prog" value={scheduledCount} tone="warn" />
+        <CalendarStat label="Publ" value={publishedCount} tone="good" />
+        <CalendarStat label="Error" value={failedCount} tone="bad" />
+      </View>
+
+      <View style={styles.weekHeader}>
+        {["Lu", "Ma", "Mi", "Ju", "Vi", "Sa", "Do"].map((day) => <Text key={day} style={styles.weekText}>{day}</Text>)}
+      </View>
+      <View style={styles.pageCalendarGrid}>
+        {cells.map((date, index) => {
+          if (!date) return <View key={`dashboard-blank-${index}`} style={styles.pageCalendarCell} />;
+          const key = localDateKey(date);
+          const dayPosts = posts.filter((post) => localDateKey(post.scheduledFor) === key);
+          const selected = activeDay === key;
+          const isToday = localDateKey(today) === key;
+          const dotStyle = dayPosts.some(isPostFailed)
+            ? styles.dotBad
+            : dayPosts.some(isPostGood)
+              ? styles.dotGood
+              : dayPosts.length > 0
+                ? styles.dotWarn
+                : styles.dotEmpty;
+          return (
+            <Pressable
+              key={key}
+              style={[styles.pageCalendarCell, selected ? styles.pageCalendarCellSelected : null, isToday ? styles.pageCalendarCellToday : null]}
+              onPress={() => onSelectDay(key)}
+            >
+              <Text style={[styles.pageCalendarNumber, selected ? styles.pageCalendarNumberSelected : null]}>{date.getDate()}</Text>
+              <View style={[styles.dayDot, dotStyle]} />
+              {dayPosts.length > 1 ? <Text style={[styles.pageCalendarCount, selected ? styles.pageCalendarCountSelected : null]}>{dayPosts.length}</Text> : null}
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <View style={styles.pageCalendarDetail}>
+        {activePosts.length === 0 ? (
+          <>
+            <Text style={styles.pageCalendarDetailTitle}>Dia libre</Text>
+            <Text style={styles.pageCalendarDetailBody}>No hay publicaciones programadas.</Text>
+          </>
+        ) : (
+          activePosts.slice(0, 3).map((post) => (
+            <View key={post.id} style={styles.pageCalendarPostLine}>
+              <Text style={styles.pageCalendarPostTime}>{formatTime(post.scheduledFor)}</Text>
+              <Text style={styles.pageCalendarPostText} numberOfLines={1}>
+                {post.styleName ?? post.caption ?? postStatusLabel(post)}
+              </Text>
+              <View style={[styles.pageCalendarStatusDot, isPostFailed(post) ? styles.dotBad : isPostGood(post) ? styles.dotGood : styles.dotWarn]} />
+            </View>
+          ))
+        )}
+      </View>
+    </View>
+  );
+}
+
+function CalendarStat({ label, value, tone }: { label: string; value: number; tone: "good" | "warn" | "bad" }) {
+  return (
+    <View style={styles.calendarStat}>
+      <View style={[styles.calendarStatDot, tone === "good" ? styles.dotGood : tone === "bad" ? styles.dotBad : styles.dotWarn]} />
+      <Text style={styles.calendarStatValue}>{value}</Text>
+      <Text style={styles.calendarStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function DashboardBatchSummary({
+  batches,
+  selectedBatchId,
+  deleting,
+  onOpenBatch,
+  onDeleteBatch
+}: {
+  batches: BatchSummary[];
+  selectedBatchId: string | null;
+  deleting: boolean;
+  onOpenBatch: (batch: BatchSummary) => void;
+  onDeleteBatch: (batch: BatchSummary) => void;
+}) {
+  const visible = batches.slice(0, 2);
+  return (
+    <View style={styles.dashboardBatches}>
+      <View style={styles.dashboardBatchesHeader}>
+        <Text style={styles.dashboardBatchesTitle}>Lotes</Text>
+        <Text style={styles.dashboardBatchesCount}>{batches.length}</Text>
+      </View>
+      {visible.length === 0 ? (
+        <View style={styles.dashboardEmptyBatch}>
+          <Ionicons name="images-outline" size={17} color={palette.muted} />
+          <Text style={styles.dashboardEmptyBatchText}>Sube fotos para crear el primero.</Text>
+        </View>
+      ) : null}
+      {visible.map((batch) => (
+        <Pressable
+          key={batch.id}
+          style={[styles.dashboardBatchRow, batch.id === selectedBatchId ? styles.dashboardBatchRowActive : null]}
+          onPress={() => onOpenBatch(batch)}
+          android_ripple={{ color: "rgba(255,255,255,0.08)" }}
+        >
+          <View style={styles.dashboardBatchIcon}>
+            <Ionicons name="folder-open-outline" size={16} color={palette.blue} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.dashboardBatchTitle} numberOfLines={1}>{formatDate(batch.createdAt)}</Text>
+            <Text style={styles.dashboardBatchMeta} numberOfLines={1}>
+              {batch.photosCount} fotos - {batch.variantsCount} variantes - {batchStatusText(batch.status)}
+            </Text>
+          </View>
+          <Pressable
+            accessibilityLabel="Eliminar lote"
+            style={[styles.dashboardBatchDelete, deleting ? styles.disabled : null]}
+            disabled={deleting}
+            onPress={() => onDeleteBatch(batch)}
+          >
+            <Ionicons name="trash-outline" size={16} color={palette.danger} />
+          </Pressable>
+        </Pressable>
+      ))}
+      {batches.length > visible.length ? (
+        <Text style={styles.dashboardMoreBatches}>+{batches.length - visible.length} lotes mas en esta pagina</Text>
+      ) : null}
+    </View>
+  );
+}
+
 function MiniCalendar({ posts, onOpenCalendar }: { posts: ScheduledPost[]; onOpenCalendar: () => void }) {
   const days = Array.from({ length: 7 }, (_, index) => {
     const date = new Date();
     date.setDate(date.getDate() + index);
-    const key = dateKey(date);
-    const dayPosts = posts.filter((post) => dateKey(post.scheduledFor) === key);
+    const key = localDateKey(date);
+    const dayPosts = posts.filter((post) => localDateKey(post.scheduledFor) === key);
     return { date, posts: dayPosts };
   });
   return (
@@ -2243,8 +3178,8 @@ function CalendarGrid({ posts, selectedDay, onSelectDay }: { posts: ScheduledPos
       <View style={styles.calendarGrid}>
         {cells.map((date, index) => {
           if (!date) return <View key={`blank-${index}`} style={styles.calendarCell} />;
-          const key = dateKey(date);
-          const dayPosts = posts.filter((post) => dateKey(post.scheduledFor) === key);
+          const key = localDateKey(date);
+          const dayPosts = posts.filter((post) => localDateKey(post.scheduledFor) === key);
           const selected = selectedDay === key;
           return (
             <Pressable key={key} style={[styles.calendarCell, selected ? styles.calendarCellSelected : null]} onPress={() => onSelectDay(key)}>
@@ -2456,7 +3391,16 @@ const styles = StyleSheet.create({
     paddingTop: Platform.OS === "android" ? (NativeStatusBar.currentHeight ?? 0) + 12 : 12,
     paddingBottom: 28
   },
+  pageHomeContainer: {
+    height: "100%",
+    justifyContent: "space-between",
+    gap: 7,
+    paddingHorizontal: 10,
+    paddingTop: Platform.OS === "android" ? (NativeStatusBar.currentHeight ?? 0) + 7 : 7,
+    paddingBottom: 8
+  },
   screen: { gap: 10 },
+  screenCompact: { flex: 1, gap: 7, justifyContent: "space-between" },
   centeredScreen: { flex: 1, minHeight: 520, justifyContent: "center", gap: 12 },
   centeredBlock: { minHeight: 180, alignItems: "center", justifyContent: "center" },
   flex: { flex: 1 },
@@ -2513,7 +3457,9 @@ const styles = StyleSheet.create({
   changePagePill: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: palette.white, paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8 },
   changePageText: { color: palette.ink, fontSize: 12, fontWeight: "900" },
   pageIdentity: { overflow: "hidden", borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel2 },
+  pageIdentityCompact: { flexShrink: 0 },
   pageActionRail: { gap: 8, paddingVertical: 2 },
+  pageActionRailCompact: { flexDirection: "row", alignItems: "center", gap: 8, flexShrink: 0 },
   pageActionButton: {
     minWidth: 96,
     minHeight: 42,
@@ -2527,6 +3473,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     backgroundColor: palette.surface
   },
+  pageActionButtonCompact: {
+    minHeight: 44,
+    borderRadius: 8,
+    paddingHorizontal: 11,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.22,
+    shadowRadius: 5,
+    elevation: 3
+  },
+  pageActionButtonCompactSide: { width: 96, backgroundColor: palette.panel2 },
+  pageActionButtonCompactPrimary: { flex: 1, minWidth: 126 },
   pageActionButtonPrimary: { backgroundColor: palette.white, borderColor: palette.white },
   pageActionButtonDanger: { borderColor: "rgba(255,143,143,0.34)", backgroundColor: "rgba(255,143,143,0.10)" },
   pageActionText: { color: palette.text, fontSize: 12, fontWeight: "900" },
@@ -2562,6 +3520,33 @@ const styles = StyleSheet.create({
   heroBody: { color: palette.muted, fontSize: 15, lineHeight: 22, fontWeight: "600" },
   panel: { gap: 10, borderWidth: 1, borderColor: palette.border, borderRadius: 8, padding: 12, backgroundColor: palette.panel },
   panelTitle: { color: palette.text, fontSize: 18, fontWeight: "900" },
+  settingsField: { gap: 8, padding: 10, borderRadius: 8, backgroundColor: palette.surface },
+  settingsFieldHeader: { gap: 2 },
+  settingsLabel: { color: palette.text, fontSize: 14, fontWeight: "900" },
+  settingsBody: { color: palette.muted, fontSize: 12, lineHeight: 17, fontWeight: "600" },
+  settingInput: {
+    minHeight: 44,
+    color: palette.text,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    backgroundColor: palette.panel,
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  settingTextArea: { minHeight: 104, textAlignVertical: "top" },
+  optionWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  optionChip: { minHeight: 38, justifyContent: "center", borderRadius: 8, borderWidth: 1, borderColor: palette.border, paddingHorizontal: 11, backgroundColor: palette.panel },
+  optionChipActive: { backgroundColor: palette.white, borderColor: palette.white },
+  optionText: { color: palette.text, fontSize: 12, fontWeight: "900" },
+  optionTextActive: { color: palette.ink },
+  removableChip: { minHeight: 34, flexDirection: "row", alignItems: "center", gap: 6, borderRadius: 8, paddingHorizontal: 10, backgroundColor: palette.panel2 },
+  removableText: { color: palette.text, fontSize: 12, fontWeight: "900" },
+  inlineInputRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  settingsActionRow: { gap: 8 },
+  editorCard: { gap: 10, padding: 10, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.surface },
   rowTitle: { color: palette.text, fontSize: 15, fontWeight: "800" },
   muted: { color: palette.muted, fontSize: 14, lineHeight: 20, fontWeight: "600" },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
@@ -2591,16 +3576,24 @@ const styles = StyleSheet.create({
   alertInfoText: { color: "#cfe2ff" },
   alertWarningText: { color: palette.warning },
   alertCriticalText: { color: palette.danger },
+  pageDirectoryHeader: { gap: 2, paddingTop: 2, paddingBottom: 2 },
+  pageDirectoryTitle: { color: palette.text, fontSize: 22, fontWeight: "900" },
+  pageDirectorySubtitle: { color: palette.muted, fontSize: 13, fontWeight: "700" },
   pageCard: { overflow: "hidden", borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel2 },
   pageCardSelected: { borderColor: palette.green },
   pageCoverFrame: { height: 112, backgroundColor: palette.surface },
+  pageCoverFrameCompact: { height: 62 },
   pageCover: { width: "100%", height: "100%" },
   pageCoverPlaceholder: { backgroundColor: palette.surface },
   pageCardBody: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12 },
+  pageCardBodyCompact: { gap: 9, padding: 8 },
   pageAvatar: { width: 48, height: 48, borderRadius: 8 },
+  pageAvatarCompact: { width: 38, height: 38, borderRadius: 8 },
   pageAvatarPlaceholder: { width: 48, height: 48, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: palette.blue },
   pageAvatarText: { color: palette.ink, fontSize: 20, fontWeight: "900" },
+  pageAvatarTextCompact: { fontSize: 16 },
   pageName: { color: palette.text, fontSize: 18, fontWeight: "900" },
+  pageNameCompact: { fontSize: 16 },
   pageMeta: { color: palette.muted, fontSize: 13, fontWeight: "700" },
   batchRow: { minHeight: 72, flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 8, backgroundColor: palette.surface },
   batchRowMain: { flex: 1, minHeight: 48, flexDirection: "row", alignItems: "center", gap: 12 },
@@ -2654,6 +3647,69 @@ const styles = StyleSheet.create({
   periodNumber: { color: palette.text, fontSize: 24, fontWeight: "900" },
   periodNumberActive: { color: palette.ink },
   previewBox: { gap: 5, padding: 12, borderRadius: 8, backgroundColor: palette.surface },
+  pageCalendar: { flex: 1, justifyContent: "space-between", gap: 6, padding: 9, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
+  pageCalendarHeader: { minHeight: 34, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  pageCalendarTitle: { color: palette.text, fontSize: 17, fontWeight: "900", textTransform: "capitalize" },
+  pageCalendarSub: { color: palette.muted, fontSize: 11, fontWeight: "700" },
+  pageCalendarAgendaButton: {
+    minHeight: 32,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    backgroundColor: palette.white
+  },
+  pageCalendarAgendaText: { color: palette.ink, fontSize: 12, fontWeight: "900" },
+  pageCalendarStats: { flexDirection: "row", gap: 7 },
+  calendarStat: {
+    flex: 1,
+    minHeight: 30,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    borderRadius: 8,
+    backgroundColor: palette.surface
+  },
+  calendarStatDot: { width: 7, height: 7, borderRadius: 4 },
+  calendarStatValue: { color: palette.text, fontSize: 13, fontWeight: "900" },
+  calendarStatLabel: { color: palette.muted, fontSize: 11, fontWeight: "900" },
+  pageCalendarGrid: { flexDirection: "row", flexWrap: "wrap" },
+  pageCalendarCell: {
+    width: "14.285%",
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    borderRadius: 8
+  },
+  pageCalendarCellSelected: { backgroundColor: palette.white },
+  pageCalendarCellToday: { borderWidth: 1, borderColor: palette.blue },
+  pageCalendarNumber: { color: palette.text, fontSize: 13, fontWeight: "900" },
+  pageCalendarNumberSelected: { color: palette.ink },
+  pageCalendarCount: { color: palette.muted, fontSize: 9, fontWeight: "900", lineHeight: 10 },
+  pageCalendarCountSelected: { color: palette.ink },
+  pageCalendarDetail: { minHeight: 62, justifyContent: "center", gap: 4, borderRadius: 8, padding: 8, backgroundColor: palette.surface },
+  pageCalendarDetailTitle: { color: palette.text, fontSize: 14, fontWeight: "900" },
+  pageCalendarDetailBody: { color: palette.muted, fontSize: 12, fontWeight: "700" },
+  pageCalendarPostLine: { minHeight: 20, flexDirection: "row", alignItems: "center", gap: 7 },
+  pageCalendarPostTime: { width: 45, color: palette.text, fontSize: 12, fontWeight: "900" },
+  pageCalendarPostText: { flex: 1, color: palette.muted, fontSize: 12, fontWeight: "800" },
+  pageCalendarStatusDot: { width: 8, height: 8, borderRadius: 4 },
+  dashboardBatches: { flexShrink: 0, gap: 6, padding: 9, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
+  dashboardBatchesHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  dashboardBatchesTitle: { color: palette.text, fontSize: 15, fontWeight: "900" },
+  dashboardBatchesCount: { color: palette.muted, fontSize: 12, fontWeight: "900" },
+  dashboardEmptyBatch: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 8, paddingHorizontal: 10, backgroundColor: palette.surface },
+  dashboardEmptyBatchText: { flex: 1, color: palette.muted, fontSize: 12, fontWeight: "800" },
+  dashboardBatchRow: { minHeight: 50, flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 8, padding: 7, backgroundColor: palette.surface },
+  dashboardBatchRowActive: { borderWidth: 1, borderColor: palette.blue },
+  dashboardBatchIcon: { width: 30, height: 30, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: palette.panel2 },
+  dashboardBatchTitle: { color: palette.text, fontSize: 13, fontWeight: "900" },
+  dashboardBatchMeta: { color: palette.muted, fontSize: 11, fontWeight: "700" },
+  dashboardBatchDelete: { width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 8, backgroundColor: "rgba(255,143,143,0.10)" },
+  dashboardMoreBatches: { color: palette.muted, fontSize: 11, fontWeight: "800", textAlign: "center" },
   miniCalendar: { flexDirection: "row", gap: 6 },
   miniDay: { flex: 1, alignItems: "center", gap: 5, paddingVertical: 9, borderRadius: 8, backgroundColor: palette.surface },
   miniDayName: { color: palette.muted, fontSize: 11, fontWeight: "900", textTransform: "uppercase" },
