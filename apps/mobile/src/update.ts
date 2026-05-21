@@ -34,7 +34,25 @@ const isNewerVersion = (candidate: string, current: string) => {
   return false;
 };
 
-export const currentAppVersion = () => Constants.expoConfig?.version ?? "0.0.0";
+const numberValue = (value: unknown) => {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseManifest = (raw: string): UpdateManifest | null => {
+  try {
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, "").trim()) as Partial<UpdateManifest>;
+    if (parsed.platform !== "android" || !parsed.apkUrl || !parsed.versionName) return null;
+    return parsed as UpdateManifest;
+  } catch {
+    return null;
+  }
+};
+
+export const currentAppVersion = () =>
+  Constants.nativeAppVersion ?? Constants.expoConfig?.version ?? "0.0.0";
+
+export const currentAppVersionCode = () => numberValue(Constants.nativeBuildVersion);
 
 export const checkForAppUpdate = async (): Promise<AppUpdateInfo | null> => {
   const { updateManifestUrl } = getMobileConfig();
@@ -43,9 +61,12 @@ export const checkForAppUpdate = async (): Promise<AppUpdateInfo | null> => {
   });
   if (!response.ok) return null;
 
-  const manifest = (await response.json()) as UpdateManifest;
-  if (manifest.platform !== "android" || !manifest.apkUrl || !manifest.versionName) return null;
-  if (!isNewerVersion(manifest.versionName, currentAppVersion())) return null;
+  const manifest = parseManifest(await response.text());
+  if (!manifest) return null;
+  const manifestCode = numberValue(manifest.versionCode);
+  const currentCode = currentAppVersionCode();
+  const newerByCode = manifestCode !== null && currentCode !== null && manifestCode > currentCode;
+  if (!newerByCode && !isNewerVersion(manifest.versionName, currentAppVersion())) return null;
 
   return {
     versionName: manifest.versionName,

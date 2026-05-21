@@ -609,9 +609,10 @@ function BootScreen() {
   const [settingsDraft, setSettingsDraft] = useState<BusinessSettingsDraft | null>(null);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [manualRefreshing, setManualRefreshing] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
   const [newContentType, setNewContentType] = useState("");
   const [newSeoKeyword, setNewSeoKeyword] = useState("");
-  const updatePromptShown = useRef(false);
+  const updatePromptShown = useRef<string | null>(null);
   const authRecoveryAttempted = useRef(false);
 
   const handleMetaReturn = useCallback((url: string | null) => {
@@ -723,13 +724,33 @@ function BootScreen() {
     refetchInterval: 15000
   });
 
+  const checkUpdateAvailability = useCallback(
+    async (options: { manual?: boolean } = {}) => {
+      if (config.appEnv === "development") return null;
+      if (options.manual) setUpdateChecking(true);
+      try {
+        const update = await checkForAppUpdate();
+        setAvailableUpdate(update);
+        if (!update && options.manual) setSettingsNotice("Tu app ya esta en la version mas reciente.");
+        return update;
+      } catch {
+        if (options.manual) setSettingsNotice("No pudimos revisar actualizaciones. Intenta de nuevo.");
+        return null;
+      } finally {
+        if (options.manual) setUpdateChecking(false);
+      }
+    },
+    [config.appEnv]
+  );
+
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
       if (state !== "active") return;
       void refreshAll();
+      void checkUpdateAvailability();
     });
     return () => subscription.remove();
-  }, []);
+  }, [checkUpdateAvailability]);
 
   useEffect(() => {
     if (Platform.OS !== "android") return;
@@ -740,9 +761,8 @@ function BootScreen() {
   }, []);
 
   useEffect(() => {
-    if (config.appEnv === "development") return;
     let mounted = true;
-    void checkForAppUpdate()
+    void checkUpdateAvailability()
       .then((update) => {
         if (mounted) setAvailableUpdate(update);
       })
@@ -750,11 +770,11 @@ function BootScreen() {
     return () => {
       mounted = false;
     };
-  }, [config.appEnv]);
+  }, [checkUpdateAvailability]);
 
   useEffect(() => {
-    if (!availableUpdate || updatePromptShown.current) return;
-    updatePromptShown.current = true;
+    if (!availableUpdate || updatePromptShown.current === availableUpdate.versionName) return;
+    updatePromptShown.current = availableUpdate.versionName;
     NativeAlert.alert(
       availableUpdate.mandatory ? "Actualizacion requerida" : "Actualizacion disponible",
       availableUpdate.notes ?? `Ya esta lista Maniaco ${availableUpdate.versionName}.`,
@@ -2210,7 +2230,15 @@ function BootScreen() {
               variant="secondary"
               onPress={() => void openAppUpdate(availableUpdate)}
             />
-          ) : null}
+          ) : (
+            <Button
+              label={updateChecking ? "Buscando..." : "Buscar actualizacion"}
+              icon="refresh-outline"
+              variant="secondary"
+              disabled={updateChecking}
+              onPress={() => void checkUpdateAvailability({ manual: true })}
+            />
+          )}
           {config.appEnv === "development" ? <Text style={styles.muted}>API: {config.apiUrl}</Text> : null}
         </Panel>
       </Screen>
