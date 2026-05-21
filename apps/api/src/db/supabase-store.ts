@@ -1412,6 +1412,22 @@ export class SupabaseDataStoreCore {
       ]);
       if (!variantResult.rows[0]) this.variantNotFound();
       const current = toVariant(variantResult.rows[0]);
+      if (
+        job.type !== "generate_variant" ||
+        job.variantId !== current.id ||
+        job.photoId !== current.photoId ||
+        job.businessId !== current.businessId ||
+        job.batchId !== current.batchId
+      ) {
+        throw new AppError({
+          code: "variant_job_mismatch",
+          statusCode: 409,
+          message: "Generate variant job does not match the variant/photo/batch being completed",
+          userMessage: "La variante no coincide con el trabajo que la genero. Refresca e intenta de nuevo.",
+          retryable: false,
+          action: "refresh"
+        });
+      }
       const photoResult = await client.query("select * from public.photos where id = $1 and workspace_id = $2", [
         current.photoId,
         current.workspaceId

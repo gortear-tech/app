@@ -131,6 +131,22 @@ describe("worker processor", () => {
       requestId: "test-generate"
     });
     expect(generation.created).toBe(3);
+    const pendingVariants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
+    const pendingVariantJobs = (await store.listJobs(workspace.id)).filter((job) => job.type === "generate_variant");
+    const firstPendingJob = pendingVariantJobs.find((job) => job.variantId === pendingVariants[0]!.id);
+    expect(firstPendingJob).toBeTruthy();
+    await expect(
+      store.completeGenerateVariant({
+        jobId: firstPendingJob!.id,
+        variantId: pendingVariants[1]!.id,
+        generatedAsset: {
+          bucket: "business-media",
+          storageKey: `${workspace.id}/${business.id}/${batch.id}/generated/mismatched.jpg`,
+          mimeType: "image/jpeg",
+          fileSize: 16
+        }
+      })
+    ).rejects.toMatchObject({ code: "variant_job_mismatch" });
 
     const batchJob = await processOneJob({ store, workerId: "variant-worker" });
     const firstVariantJob = await processOneJob({ store, workerId: "variant-worker", imageEditProvider, captionProvider });

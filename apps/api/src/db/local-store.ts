@@ -1181,6 +1181,22 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const variant = this.requireVariant(state, job.workspaceId, job.businessId, job.batchId, input.variantId);
+    if (
+      job.type !== "generate_variant" ||
+      job.variantId !== variant.id ||
+      job.photoId !== variant.photoId ||
+      job.businessId !== variant.businessId ||
+      job.batchId !== variant.batchId
+    ) {
+      throw new AppError({
+        code: "variant_job_mismatch",
+        statusCode: 409,
+        message: "Generate variant job does not match the variant/photo/batch being completed",
+        userMessage: "La variante no coincide con el trabajo que la genero. Refresca e intenta de nuevo.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
     const photo = state.photos.find((item) => item.id === variant.photoId && item.workspaceId === variant.workspaceId);
     if (
       variant.generatedAssetId &&
