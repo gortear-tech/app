@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMetaProvider, loadMetaPagesFromUserAccessToken } from "./meta.js";
+import { createMetaProvider, loadMetaPagesFromUserAccessToken, publishFacebookPagePost } from "./meta.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -80,5 +80,30 @@ describe("GraphMetaProvider authorization URL", () => {
       coverPhotoUrl: "https://cdn.example.com/cover.jpg",
       profilePhotoUrl: "https://cdn.example.com/profile.jpg"
     });
+  });
+
+  it("sends scheduled photo posts to Graph with scheduled_publish_time", async () => {
+    let body = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: URL | string, init?: RequestInit) => {
+        body = String(init?.body ?? "");
+        return new Response(JSON.stringify({ id: "scheduled-photo-id", post_id: "page_123" }), { status: 200 });
+      })
+    );
+
+    const result = await publishFacebookPagePost({
+      graphApiVersion: "v23.0",
+      pageId: "page-1",
+      pageAccessToken: "page-token",
+      caption: "Texto",
+      imageUrl: "https://cdn.example.com/photo.jpg",
+      scheduledForUnix: 1779500000
+    });
+
+    expect(result.facebookPostId).toBe("page_123");
+    expect(body).toContain("published=false");
+    expect(body).toContain("scheduled_publish_time=1779500000");
+    expect(body).toContain("url=https%3A%2F%2Fcdn.example.com%2Fphoto.jpg");
   });
 });

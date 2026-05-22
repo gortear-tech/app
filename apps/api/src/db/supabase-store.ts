@@ -14,7 +14,7 @@ import {
   UploadIntent,
   VisionAnalysis,
   Variant,
-  variantStylePresetForIndex,
+  variantStylePresetForSlot,
   AssignedStyle,
   ScheduledPost,
   CaptionResult
@@ -1248,10 +1248,12 @@ export class SupabaseDataStoreCore {
       let available = 0;
       const variants: Variant[] = [];
       const styleOverrides = new Map((input.styleOverrides ?? []).map((override) => [override.photoId, override]));
+      let styleSlot = 0;
       for (const photo of validPhotos) {
         for (let index = 1; index <= input.variantsPerPhoto; index += 1) {
           const variantId = randomUUID();
-          const style = this.assignStyle(index, styleOverrides.get(photo.id));
+          styleSlot += 1;
+          const style = this.assignStyle(styleSlot, styleOverrides.get(photo.id), input.batchId);
           const promptVersion = "generation-plan-v1";
           const plan = this.generationPlan(style, promptVersion);
           const inserted = await client.query(
@@ -1758,6 +1760,8 @@ export class SupabaseDataStoreCore {
     ]);
     const posts = result.rows.map(toScheduledPost);
     for (const post of posts) {
+      const remoteScheduled = await this.scheduleRemotePostIfPossible(post, job);
+      if (remoteScheduled) continue;
       const existing = await this.pool.query(
         "select 1 from public.jobs where type = 'publish_post' and dedupe_key = $1 and status <> 'cancelled' limit 1",
         [`publish_post:${post.id}`]
@@ -1776,6 +1780,98 @@ export class SupabaseDataStoreCore {
       }
     }
     return { scheduledPosts: posts };
+  }
+
+  private async scheduleRemotePostIfPossible(post: ScheduledPost, job: StoredJob): Promise<boolean> {
+    if (post.status !== "programada" || post.remoteStatus !== "no_enviado") return post.remoteStatus === "confirmado_meta";
+    const variant = await this.requireVariant(post.workspaceId, post.businessId, post.batchId, post.variantId);
+    if (!variant.publishableAssetId) {
+      await this.failScheduledPost(post.id, "missing_publishable_media");
+      throw this.scheduledPostStateError("missing_publishable_media");
+    }
+    const asset = await this.pool.query(
+      "select * from public.media_assets where id = $1 and workspace_id = $2 and business_id = $3",
+      [variant.publishableAssetId, post.workspaceId, post.businessId]
+    );
+    if (!asset.rows[0]) {
+      await this.failScheduledPost(post.id, "media_not_available");
+      throw this.scheduledPostStateError("media_not_available");
+    }
+    const pageResult = await this.pool.query(
+      "select meta_page_id, encrypted_page_access_token from public.facebook_pages where id = $1 and workspace_id = $2",
+      [post.pageId, post.workspaceId]
+    );
+    const page = pageResult.rows[0] as { meta_page_id?: string; encrypted_page_access_token?: string | null } | undefined;
+    const pageAccessToken = decodeServerToken(page?.encrypted_page_access_token);
+    if (!pageAccessToken || !page?.meta_page_id || page.meta_page_id.startsWith("mock-")) return false;
+    const publishImageUrl = publicMediaUrl(String(asset.rows[0].id)) ?? (post.imageUrl && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null);
+    if (!publishImageUrl) {
+      await this.failScheduledPost(post.id, "missing_public_media_url");
+      throw this.scheduledPostStateError("missing_public_media_url");
+    }
+    const operationKey = `meta_schedule:${post.id}`;
+    await this.pool.query("update public.scheduled_posts set remote_status = 'actualizacion_pendiente', updated_at = now() where id = $1", [
+      post.id
+    ]);
+    await this.upsertExternalOperation({
+      operationKey,
+      workspaceId: post.workspaceId,
+      jobId: job.id,
+      provider: "meta",
+      operation: "schedule_post",
+      status: "started"
+    });
+    let publishResult: Awaited<ReturnType<typeof publishFacebookPagePost>>;
+    try {
+      publishResult = await publishFacebookPagePost({
+        graphApiVersion: post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0",
+        pageId: page.meta_page_id,
+        pageAccessToken,
+        caption: post.caption ?? "",
+        imageUrl: publishImageUrl,
+        scheduledForUnix: post.scheduledForUnix ?? Math.floor(new Date(post.scheduledFor).getTime() / 1000)
+      });
+    } catch (error) {
+      await this.pool.query(
+        `update public.scheduled_posts
+         set status = 'fallida', remote_status = 'incierto', remote_error_code = $2, updated_at = now()
+         where id = $1`,
+        [post.id, error instanceof AppError ? error.code : "meta_schedule_failed"]
+      );
+      await this.upsertExternalOperation({
+        operationKey,
+        workspaceId: post.workspaceId,
+        jobId: job.id,
+        provider: "meta",
+        operation: "schedule_post",
+        status: "failed"
+      });
+      throw error;
+    }
+    await this.pool.query(
+      `update public.scheduled_posts
+       set facebook_post_id = $2, remote_post_type = $3, remote_post_url = $4,
+           delivery_mode = 'remote_schedule', remote_status = 'confirmado_meta',
+           last_remote_sync_at = now(), image_url = $5, remote_trace_id = $6, updated_at = now()
+       where id = $1`,
+      [
+        post.id,
+        publishResult.facebookPostId,
+        publishResult.remotePostType,
+        publishResult.remotePostUrl,
+        publishImageUrl,
+        publishResult.providerTraceId ?? null
+      ]
+    );
+    await this.upsertExternalOperation({
+      operationKey,
+      workspaceId: post.workspaceId,
+      jobId: job.id,
+      provider: "meta",
+      operation: "schedule_post",
+      status: "succeeded"
+    });
+    return true;
   }
 
   async publishScheduledPost(input: Parameters<DataStore["publishScheduledPost"]>[0]): Promise<ScheduledPost> {
@@ -2150,9 +2246,9 @@ export class SupabaseDataStoreCore {
     return result.rows.map(toPhoto);
   }
 
-  private assignStyle(index: number, override?: GenerateStyleOverride): AssignedStyle {
+  private assignStyle(index: number, override?: GenerateStyleOverride, seed?: string | null): AssignedStyle {
     if (override) return this.manualStyle(index, override);
-    const selected = variantStylePresetForIndex(index);
+    const selected = variantStylePresetForSlot(index, seed);
     return {
       styleId: selected.styleId,
       styleName: selected.styleName,
@@ -2167,7 +2263,7 @@ export class SupabaseDataStoreCore {
   }
 
   private manualStyle(index: number, override: GenerateStyleOverride): AssignedStyle {
-    const selected = variantStylePresetForIndex(index, override.styleId);
+    const selected = variantStylePresetForSlot(index, null, override.styleId);
     const intensityValue = Math.max(0, Math.min(100, override.intensity));
     const intensity = intensityValue >= 80 ? "fuerte" : intensityValue <= 40 ? "ligera" : "media";
     const strength = intensityValue / 100;

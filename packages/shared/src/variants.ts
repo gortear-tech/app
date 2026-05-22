@@ -172,6 +172,19 @@ export const variantStylePresetForIndex = (variantIndex: number, startStyleId?: 
   return VARIANT_STYLE_PRESETS[(startIndex + Math.max(1, variantIndex) - 1) % VARIANT_STYLE_PRESETS.length]!;
 };
 
+const styleSeedOffset = (seed?: string | null) => {
+  if (!seed) return 0;
+  let hash = 0;
+  for (const char of seed) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash % VARIANT_STYLE_PRESETS.length;
+};
+
+export const variantStylePresetForSlot = (slotIndex: number, seed?: string | null, startStyleId?: string | null) => {
+  const startIndex = Math.max(0, VARIANT_STYLE_PRESETS.findIndex((item) => item.styleId === startStyleId));
+  const seedOffset = startStyleId ? 0 : styleSeedOffset(seed);
+  return VARIANT_STYLE_PRESETS[(startIndex + seedOffset + Math.max(1, slotIndex) - 1) % VARIANT_STYLE_PRESETS.length]!;
+};
+
 const backgroundWordForStyle = (styleName: string) => {
   const lower = styleName.toLowerCase();
   if (lower.includes("rmol")) return "marmol";

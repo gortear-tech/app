@@ -238,8 +238,10 @@ export const publishFacebookPagePost = async (input: {
   pageAccessToken: string;
   caption: string;
   imageUrl?: string | null;
+  scheduledForUnix?: number | null;
 }): Promise<MetaPublishResult> => {
   const canPublishPhoto = Boolean(input.imageUrl && /^https:\/\//i.test(input.imageUrl));
+  const isScheduled = typeof input.scheduledForUnix === "number" && Number.isFinite(input.scheduledForUnix);
   const endpoint = canPublishPhoto ? "photos" : "feed";
   const requestUrl = new URL(`https://graph.facebook.com/${input.graphApiVersion}/${input.pageId}/${endpoint}`);
   const body = new URLSearchParams();
@@ -247,9 +249,13 @@ export const publishFacebookPagePost = async (input: {
   if (canPublishPhoto && input.imageUrl) {
     body.set("url", input.imageUrl);
     body.set("caption", input.caption);
-    body.set("published", "true");
+    body.set("published", isScheduled ? "false" : "true");
   } else {
     body.set("message", input.caption);
+    if (isScheduled) body.set("published", "false");
+  }
+  if (isScheduled) {
+    body.set("scheduled_publish_time", String(Math.floor(input.scheduledForUnix!)));
   }
 
   const response = await fetch(requestUrl, { method: "POST", body });

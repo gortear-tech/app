@@ -363,13 +363,17 @@ const postStatusLabel = (post: ScheduledPost) => {
   if (isPostPublishing(post)) return "Publicando ahora";
   if (isPostFailed(post)) return post.status === "estado_incierto" ? "Sin confirmacion de Meta" : "Fallo al publicar";
   if (["cancelada", "cancelled"].includes(post.status)) return "Cancelada";
-  if (["programada", "scheduled"].includes(post.status)) return "Programada, aun no publicada";
+  if (["programada", "scheduled"].includes(post.status)) {
+    if (post.remoteStatus === "confirmado_meta") return "Programada en Facebook";
+    if (post.remoteStatus === "actualizacion_pendiente" || post.remoteStatus === "no_enviado") return "Enviando a Facebook";
+    return "Programada, aun no publicada";
+  }
   return post.status;
 };
 
 const postStatusTone = (post: ScheduledPost): "good" | "warn" | "neutral" => {
   if (isPostGood(post)) return "good";
-  if (isPostFailed(post) || isPostPublishing(post)) return "warn";
+  if (isPostFailed(post) || isPostPublishing(post) || post.remoteStatus === "no_enviado") return "warn";
   return "neutral";
 };
 
@@ -1133,7 +1137,7 @@ function BootScreen() {
     mutationFn: async () => confirmCalendar(token, selectedBusinessId ?? "", selectedBatch?.id ?? "", periodDays),
     onSuccess: async (result) => {
       setPublishNotice(
-        `Quedaron ${result.scheduledPosts.length} publicaciones programadas. Aun no estan publicadas; se enviaran automaticamente en su hora.`
+        `Quedaron ${result.scheduledPosts.length} publicaciones programadas. Las estamos enviando a Facebook para que aparezcan en el planificador.`
       );
       setFlow("calendar");
       await invalidateWork();

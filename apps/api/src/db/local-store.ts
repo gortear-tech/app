@@ -16,7 +16,7 @@ import {
   UploadIntent,
   User,
   Variant,
-  variantStylePresetForIndex,
+  variantStylePresetForSlot,
   VisionAnalysis,
   Workspace,
   WorkspaceMember,
@@ -1060,9 +1060,11 @@ export class LocalDataStore implements DataStore {
     let available = 0;
     const touched: Variant[] = [];
     const styleOverrides = new Map((input.styleOverrides ?? []).map((override) => [override.photoId, override]));
+    let styleSlot = 0;
     for (const photo of validPhotos) {
       for (let index = 1; index <= input.variantsPerPhoto; index += 1) {
-        const style = this.assignStyle(index, styleOverrides.get(photo.id));
+        styleSlot += 1;
+        const style = this.assignStyle(styleSlot, styleOverrides.get(photo.id), input.batchId);
         const promptVersion = "generation-plan-v1";
         let variant = state.variants.find(
           (item) =>
@@ -1452,6 +1454,8 @@ export class LocalDataStore implements DataStore {
     if (terminalBatchStatuses.has(batch.status)) return { scheduledPosts: [] };
     const scheduledPosts = state.scheduledPosts.filter((post) => post.workspaceId === job.workspaceId && post.batchId === input.batchId);
     for (const post of scheduledPosts) {
+      const remoteScheduled = await this.scheduleRemotePostIfPossible(state, post, job);
+      if (remoteScheduled) continue;
       const existingPublishJob = state.jobs.find(
         (item) => item.type === "publish_post" && item.dedupeKey === `publish_post:${post.id}` && item.status !== "cancelled"
       );
@@ -1470,6 +1474,91 @@ export class LocalDataStore implements DataStore {
     }
     await this.persist();
     return { scheduledPosts };
+  }
+
+  private async scheduleRemotePostIfPossible(state: LocalState, post: ScheduledPost, job: StoredJob): Promise<boolean> {
+    if (post.status !== "programada" || post.remoteStatus !== "no_enviado") return post.remoteStatus === "confirmado_meta";
+    const variant = state.variants.find((item) => item.id === post.variantId && item.workspaceId === post.workspaceId);
+    if (!variant?.publishableAssetId) {
+      post.status = "fallida";
+      post.remoteErrorCode = "missing_publishable_media";
+      post.updatedAt = now();
+      await this.persist();
+      throw this.scheduledPostStateError("missing_publishable_media");
+    }
+    const asset = state.mediaAssets.find((item) => item.id === variant.publishableAssetId && item.kind === "publishable");
+    if (!asset?.isPublic) {
+      post.status = "fallida";
+      post.remoteErrorCode = "media_not_publicable";
+      post.updatedAt = now();
+      await this.persist();
+      throw this.scheduledPostStateError("media_not_publicable");
+    }
+    const page = state.pages.find((item) => item.id === post.pageId && item.workspaceId === post.workspaceId);
+    const pageAccessToken = decodeServerToken(page?.encryptedPageAccessToken);
+    if (!pageAccessToken || !page?.metaPageId || page.metaPageId.startsWith("mock-")) return false;
+    const publishImageUrl = publicMediaUrl(asset.id) ?? (post.imageUrl && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null);
+    if (!publishImageUrl) {
+      post.status = "fallida";
+      post.remoteErrorCode = "missing_public_media_url";
+      post.updatedAt = now();
+      await this.persist();
+      throw this.scheduledPostStateError("missing_public_media_url");
+    }
+    const operationKey = `meta_schedule:${post.id}`;
+    post.remoteStatus = "actualizacion_pendiente";
+    post.updatedAt = now();
+    await this.upsertExternalOperation({
+      operationKey,
+      workspaceId: post.workspaceId,
+      jobId: job.id,
+      provider: "meta",
+      operation: "schedule_post",
+      status: "started"
+    });
+    try {
+      const publishResult = await publishFacebookPagePost({
+        graphApiVersion: post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0",
+        pageId: page.metaPageId,
+        pageAccessToken,
+        caption: post.caption ?? "",
+        imageUrl: publishImageUrl,
+        scheduledForUnix: post.scheduledForUnix ?? Math.floor(new Date(post.scheduledFor).getTime() / 1000)
+      });
+      post.facebookPostId = publishResult.facebookPostId;
+      post.remotePostType = publishResult.remotePostType;
+      post.remotePostUrl = publishResult.remotePostUrl;
+      post.deliveryMode = "remote_schedule";
+      post.remoteStatus = "confirmado_meta";
+      post.lastRemoteSyncAt = now();
+      post.imageUrl = publishImageUrl;
+      if (publishResult.providerTraceId) post.remoteTraceId = publishResult.providerTraceId;
+      post.updatedAt = now();
+      await this.upsertExternalOperation({
+        operationKey,
+        workspaceId: post.workspaceId,
+        jobId: job.id,
+        provider: "meta",
+        operation: "schedule_post",
+        status: "succeeded"
+      });
+      return true;
+    } catch (error) {
+      post.status = "fallida";
+      post.remoteStatus = "incierto";
+      post.remoteErrorCode = error instanceof AppError ? error.code : "meta_schedule_failed";
+      post.updatedAt = now();
+      await this.upsertExternalOperation({
+        operationKey,
+        workspaceId: post.workspaceId,
+        jobId: job.id,
+        provider: "meta",
+        operation: "schedule_post",
+        status: "failed"
+      });
+      await this.persist();
+      throw error;
+    }
   }
 
   async publishScheduledPost(input: { jobId: string; scheduledPostId: string; publishNow?: boolean }): Promise<ScheduledPost> {
@@ -1966,9 +2055,9 @@ export class LocalDataStore implements DataStore {
     });
   }
 
-  private assignStyle(variantIndex: number, override?: GenerateStyleOverride): AssignedStyle {
+  private assignStyle(variantIndex: number, override?: GenerateStyleOverride, seed?: string | null): AssignedStyle {
     if (override) return this.manualStyle(variantIndex, override);
-    const selected = variantStylePresetForIndex(variantIndex);
+    const selected = variantStylePresetForSlot(variantIndex, seed);
     return {
       styleId: selected.styleId,
       styleName: selected.styleName,
@@ -1986,7 +2075,7 @@ export class LocalDataStore implements DataStore {
     variantIndex: number,
     override: GenerateStyleOverride
   ): AssignedStyle {
-    const selected = variantStylePresetForIndex(variantIndex, override.styleId);
+    const selected = variantStylePresetForSlot(variantIndex, null, override.styleId);
     const intensityValue = Math.max(0, Math.min(100, override.intensity));
     const intensity = intensityValue >= 80 ? "fuerte" : intensityValue <= 40 ? "ligera" : "media";
     const strength = intensityValue / 100;

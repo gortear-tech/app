@@ -1,11 +1,15 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
 import { CaptionGenerationProvider, ImageEditProvider } from "@fbmaniaco/providers";
 import { variantEditPromptForStyle } from "@fbmaniaco/shared";
 import { processOneJob } from "./processor.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("worker processor", () => {
   it("claims image variant jobs one at a time", async () => {
@@ -213,6 +217,222 @@ describe("worker processor", () => {
     expect(published?.status).toBe("publicada");
     expect(published?.remoteStatus).toBe("confirmado_meta");
     expect(published?.facebookPostId).toBeTruthy();
+    if (previousPublicApiUrl === undefined) delete process.env.PUBLIC_API_URL;
+    else process.env.PUBLIC_API_URL = previousPublicApiUrl;
+    await rm(path, { force: true });
+  });
+
+  it("assigns styles across the whole batch instead of restarting per photo", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-styles-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "style-user", email: "style@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("style-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "style-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "style-user",
+      pageId: page.id,
+      requestId: "style-select"
+    });
+    const batch = await store.createBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "style-user",
+      requestId: "style-batch"
+    });
+    for (const name of ["foto-1.jpg", "foto-2.jpg"]) {
+      const intent = await store.createUploadIntent({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        originalFileName: name,
+        contentType: "image/jpeg",
+        fileSize: 2048
+      });
+      await store.completeUpload({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        storageKey: intent.storageKey,
+        originalFileName: name,
+        contentType: "image/jpeg",
+        fileSize: 2048,
+        actorId: "style-user",
+        requestId: `style-upload-${name}`
+      });
+    }
+
+    await store.requestGenerateBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      variantsPerPhoto: 2,
+      actorId: "style-user",
+      requestId: "style-generate"
+    });
+    const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
+    const styleIds = variants.map((variant) => variant.styleId);
+    const firstPhotoStyles = variants.filter((variant) => variant.photoId === variants[0]!.photoId).map((variant) => variant.styleId);
+    const secondPhotoStyles = variants.filter((variant) => variant.photoId !== variants[0]!.photoId).map((variant) => variant.styleId);
+
+    expect(variants).toHaveLength(4);
+    expect(new Set(styleIds).size).toBe(4);
+    expect(secondPhotoStyles).not.toEqual(firstPhotoStyles);
+    await rm(path, { force: true });
+  });
+
+  it("sends scheduled posts to Facebook during the schedule job when a real page token exists", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-remote-schedule-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    const previousPublicApiUrl = process.env.PUBLIC_API_URL;
+    process.env.PUBLIC_API_URL = "https://api.example.test";
+    let facebookRequestBody = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: URL | string, init?: RequestInit) => {
+        facebookRequestBody = String(init?.body ?? "");
+        return new Response(JSON.stringify({ id: "remote-photo-id", post_id: "page_456" }), { status: 200 });
+      })
+    );
+    const imageEditProvider: ImageEditProvider = {
+      mode: "mock",
+      edit: async (input) => ({
+        imageBytes: Buffer.from(`edited:${input.prompt}:${input.operationKey}`),
+        mimeType: "image/jpeg",
+        responseId: null,
+        model: "mock-image-edit",
+        usage: null,
+        latencyMs: 1
+      })
+    };
+    const captionProvider: CaptionGenerationProvider = {
+      mode: "mock",
+      generate: async (input) => ({
+        result: {
+          schemaVersion: "caption.v1",
+          promptVersion: input.promptVersion,
+          caption: `${input.pageName}: texto listo para programar.`,
+          seoTermsUsed: [input.pageName],
+          warnings: []
+        },
+        responseId: null,
+        model: "mock-caption",
+        usage: null,
+        latencyMs: 1
+      })
+    };
+    await store.upsertLocalUser({ userId: "remote-user", email: "remote@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("remote-user");
+    await store.upsertMetaAuthorization({
+      workspaceId: workspace.id,
+      actorId: "remote-user",
+      authorization: {
+        status: "valid",
+        grantedScopes: ["pages_show_list", "pages_read_engagement", "pages_manage_posts"],
+        declinedScopes: [],
+        missingRequiredScopes: [],
+        grantedPageIds: ["real-page-1"],
+        appMode: "live",
+        appReviewStatus: "approved",
+        graphApiVersion: "v23.0",
+        tokenStatus: "valido"
+      },
+      pages: [
+        {
+          metaPageId: "real-page-1",
+          pageName: "Pagina Real",
+          coverPhotoUrl: "https://cdn.example.com/cover.jpg",
+          profilePhotoUrl: "https://cdn.example.com/profile.jpg",
+          category: "Restaurant",
+          tasks: ["CREATE_CONTENT"],
+          isGranted: true,
+          canPublish: true,
+          pageAccessTokenStatus: "valido",
+          grantedScopes: ["pages_show_list", "pages_read_engagement", "pages_manage_posts"],
+          declinedScopes: [],
+          pageAccessToken: "page-token"
+        }
+      ]
+    });
+    const page = (await store.listMetaPages(workspace.id))[0]!;
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "remote-user",
+      pageId: page.id,
+      requestId: "remote-select"
+    });
+    const batch = await store.createBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "remote-user",
+      requestId: "remote-batch"
+    });
+    const intent = await store.createUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      originalFileName: "foto.jpg",
+      contentType: "image/jpeg",
+      fileSize: 2048
+    });
+    await store.completeUpload({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      storageKey: intent.storageKey,
+      originalFileName: "foto.jpg",
+      contentType: "image/jpeg",
+      fileSize: 2048,
+      actorId: "remote-user",
+      requestId: "remote-upload"
+    });
+    await store.requestGenerateBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      variantsPerPhoto: 1,
+      actorId: "remote-user",
+      requestId: "remote-generate"
+    });
+    await processOneJob({ store, workerId: "remote-worker" });
+    await processOneJob({ store, workerId: "remote-worker", imageEditProvider, captionProvider });
+    const variant = (await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id }))[0]!;
+    await store.approveVariant({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      variantId: variant.id,
+      actorId: "remote-user",
+      requestId: "remote-approve"
+    });
+    const calendar = await store.confirmCalendar({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      periodDays: 7,
+      actorId: "remote-user",
+      requestId: "remote-calendar"
+    });
+    const scheduleJob = await processOneJob({ store, workerId: "remote-worker" });
+    const scheduled = await store.getScheduledPost({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      scheduledPostId: calendar.scheduledPosts[0]!.id
+    });
+    const publishJobs = (await store.listJobs(workspace.id)).filter(
+      (job) => job.type === "publish_post" && job.batchId === batch.id && job.status !== "cancelled"
+    );
+
+    expect(scheduleJob.job?.type).toBe("schedule_posts");
+    expect(scheduled?.status).toBe("programada");
+    expect(scheduled?.remoteStatus).toBe("confirmado_meta");
+    expect(scheduled?.deliveryMode).toBe("remote_schedule");
+    expect(scheduled?.facebookPostId).toBe("page_456");
+    expect(publishJobs).toHaveLength(0);
+    expect(facebookRequestBody).toContain("published=false");
+    expect(facebookRequestBody).toContain("scheduled_publish_time=");
     if (previousPublicApiUrl === undefined) delete process.env.PUBLIC_API_URL;
     else process.env.PUBLIC_API_URL = previousPublicApiUrl;
     await rm(path, { force: true });
