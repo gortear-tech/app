@@ -7,6 +7,22 @@ import { CaptionGenerationProvider, ImageEditProvider } from "@fbmaniaco/provide
 import { variantEditPromptForStyle } from "@fbmaniaco/shared";
 import { processOneJob } from "./processor.js";
 
+const localScheduleTimeKey = (value: string) =>
+  new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Mexico_City",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).format(new Date(value));
+
+const localScheduleDayKey = (value: string) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Mexico_City",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(value));
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -280,6 +296,116 @@ describe("worker processor", () => {
     expect(variants).toHaveLength(4);
     expect(new Set(styleIds).size).toBe(4);
     expect(secondPhotoStyles).not.toEqual(firstPhotoStyles);
+    await rm(path, { force: true });
+  });
+
+  it("schedules 30 approved variants over 7 days without duplicate local times", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-large-schedule-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "large-user", email: "large@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("large-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "large-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "large-user",
+      pageId: page.id,
+      requestId: "large-select"
+    });
+    const batch = await store.createBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "large-user",
+      requestId: "large-batch"
+    });
+
+    for (let index = 1; index <= 6; index += 1) {
+      const intent = await store.createUploadIntent({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        originalFileName: `foto-${index}.jpg`,
+        contentType: "image/jpeg",
+        fileSize: 2048
+      });
+      await store.completeUpload({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        storageKey: intent.storageKey,
+        originalFileName: `foto-${index}.jpg`,
+        contentType: "image/jpeg",
+        fileSize: 2048,
+        actorId: "large-user",
+        requestId: `large-upload-${index}`
+      });
+    }
+
+    await store.requestGenerateBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      variantsPerPhoto: 5,
+      actorId: "large-user",
+      requestId: "large-generate"
+    });
+    const variants = await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
+    const variantJobs = (await store.listJobs(workspace.id)).filter((job) => job.type === "generate_variant");
+    for (const variant of variants) {
+      const job = variantJobs.find((item) => item.variantId === variant.id);
+      if (!job) throw new Error(`Missing variant job for ${variant.id}`);
+      await store.completeGenerateVariant({
+        jobId: job.id,
+        variantId: variant.id,
+        generatedAsset: {
+          bucket: "business-media",
+          storageKey: `${workspace.id}/${business.id}/${batch.id}/generated/${variant.id}.jpg`,
+          mimeType: "image/jpeg",
+          fileSize: 32
+        },
+        captionResult: {
+          schemaVersion: "caption.v1",
+          promptVersion: "caption-page-context-v1",
+          caption: `Caption ${variant.variantIndex}`,
+          seoTermsUsed: [],
+          warnings: []
+        }
+      });
+      await store.approveVariant({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        variantId: variant.id,
+        actorId: "large-user",
+        requestId: `large-approve-${variant.id}`
+      });
+    }
+
+    const calendar = await store.confirmCalendar({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      periodDays: 7,
+      actorId: "large-user",
+      requestId: "large-calendar"
+    });
+    const exactSlots = calendar.scheduledPosts.map((post) => post.scheduledFor.slice(0, 16));
+    const localTimes = calendar.scheduledPosts.map((post) => localScheduleTimeKey(post.scheduledFor));
+    const localDays = calendar.scheduledPosts.map((post) => localScheduleDayKey(post.scheduledFor));
+    const styleCounts = variants.reduce<Record<string, number>>((acc, variant) => {
+      const key = variant.styleId ?? "missing";
+      acc[key] = (acc[key] ?? 0) + 1;
+      return acc;
+    }, {});
+    const counts = Object.values(styleCounts);
+
+    expect(variants).toHaveLength(30);
+    expect(calendar.scheduledPosts).toHaveLength(30);
+    expect(new Set(exactSlots).size).toBe(30);
+    expect(new Set(localTimes).size).toBe(30);
+    expect(new Set(localDays).size).toBeLessThanOrEqual(7);
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
     await rm(path, { force: true });
   });
 

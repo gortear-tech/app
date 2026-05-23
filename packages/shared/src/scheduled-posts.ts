@@ -92,3 +92,138 @@ export type ScheduledPost = Static<typeof ScheduledPostSchema>;
 export type ConfirmCalendarResponse = Static<typeof ConfirmCalendarResponseSchema>;
 export type ScheduledPostsResponse = Static<typeof ScheduledPostsResponseSchema>;
 export type ScheduledPostMutationResponse = Static<typeof ScheduledPostMutationResponseSchema>;
+
+export type SchedulePeriodDays = 7 | 14 | 30;
+
+export const DEFAULT_SCHEDULE_TIME_ZONE = "America/Mexico_City";
+
+const preferredScheduleSlots: Array<readonly [number, number]> = [
+  [9, 0],
+  [13, 0],
+  [18, 0],
+  [10, 30],
+  [20, 0],
+  [8, 30],
+  [12, 0],
+  [15, 30],
+  [17, 0],
+  [19, 30],
+  [7, 30],
+  [11, 0],
+  [14, 0],
+  [16, 30],
+  [21, 0]
+];
+
+const scheduleSlotKeyOfParts = (hour: number, minute: number) => `${hour}:${minute}`;
+
+const buildScheduleTimeSlots = () => {
+  const seen = new Set<string>();
+  const slots: Array<readonly [number, number]> = [];
+  const add = (hour: number, minute: number) => {
+    const key = scheduleSlotKeyOfParts(hour, minute);
+    if (seen.has(key)) return;
+    seen.add(key);
+    slots.push([hour, minute]);
+  };
+  preferredScheduleSlots.forEach(([hour, minute]) => add(hour, minute));
+  for (let hour = 6; hour <= 22; hour += 1) {
+    for (const minute of [0, 15, 30, 45]) add(hour, minute);
+  }
+  return slots;
+};
+
+export const SCHEDULE_TIME_SLOTS = buildScheduleTimeSlots();
+
+export const scheduledPostSlotKey = (value: string | Date) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 16);
+};
+
+const localDateParts = (date: Date, timeZone: string) => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date);
+  const read = (type: "year" | "month" | "day" | "hour" | "minute" | "second") =>
+    Number(parts.find((part) => part.type === type)?.value ?? 0);
+  return {
+    year: read("year"),
+    month: read("month"),
+    day: read("day"),
+    hour: read("hour"),
+    minute: read("minute"),
+    second: read("second")
+  };
+};
+
+const timeZoneOffsetMs = (date: Date, timeZone: string) => {
+  const parts = localDateParts(date, timeZone);
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return localAsUtc - date.getTime();
+};
+
+const zonedTimeToUtcIso = (input: {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  timeZone: string;
+}) => {
+  const utcGuess = new Date(Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute, 0, 0));
+  const offset = timeZoneOffsetMs(utcGuess, input.timeZone);
+  return new Date(utcGuess.getTime() - offset).toISOString();
+};
+
+const calendarDateAfter = (base: Date, dayOffset: number, timeZone: string) => {
+  const baseParts = localDateParts(base, timeZone);
+  const target = new Date(Date.UTC(baseParts.year, baseParts.month - 1, baseParts.day + dayOffset));
+  return {
+    year: target.getUTCFullYear(),
+    month: target.getUTCMonth() + 1,
+    day: target.getUTCDate()
+  };
+};
+
+export const allocateScheduleSlots = (input: {
+  count: number;
+  periodDays: SchedulePeriodDays;
+  occupiedSlots?: Iterable<string | Date | null | undefined>;
+  now?: Date;
+  timeZone?: string;
+}) => {
+  const count = Math.max(0, Math.floor(input.count));
+  if (count === 0) return [];
+  const timeZone = input.timeZone ?? DEFAULT_SCHEDULE_TIME_ZONE;
+  const base = input.now ?? new Date();
+  const used = new Set(
+    Array.from(input.occupiedSlots ?? [])
+      .filter((value): value is string | Date => Boolean(value))
+      .map(scheduledPostSlotKey)
+      .filter(Boolean)
+  );
+  const selected: string[] = [];
+  const maxAttempts = input.periodDays * SCHEDULE_TIME_SLOTS.length * 2;
+
+  for (let sequence = 0; selected.length < count && sequence < maxAttempts; sequence += 1) {
+    const dayOffset = (sequence % input.periodDays) + 1;
+    const wave = Math.floor(sequence / input.periodDays);
+    const timeIndex = (wave * input.periodDays + (dayOffset - 1)) % SCHEDULE_TIME_SLOTS.length;
+    const [hour, minute] = SCHEDULE_TIME_SLOTS[timeIndex]!;
+    const targetDate = calendarDateAfter(base, dayOffset, timeZone);
+    const scheduledFor = zonedTimeToUtcIso({ ...targetDate, hour, minute, timeZone });
+    const key = scheduledPostSlotKey(scheduledFor);
+    if (used.has(key)) continue;
+    used.add(key);
+    selected.push(scheduledFor);
+  }
+
+  return selected;
+};

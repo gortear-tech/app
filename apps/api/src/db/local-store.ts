@@ -13,6 +13,7 @@ import {
   MetaPage,
   Photo,
   ScheduledPost,
+  allocateScheduleSlots,
   UploadIntent,
   User,
   Variant,
@@ -1360,6 +1361,34 @@ export class LocalDataStore implements DataStore {
       });
     }
     const timestamp = now();
+    const business = this.requireBusiness(state, input.workspaceId, input.businessId);
+    const inactiveStatuses = new Set(["cancelada", "cancelled", "fallida", "failed"]);
+    const occupiedSlots = state.scheduledPosts
+      .filter(
+        (post) =>
+          post.workspaceId === input.workspaceId &&
+          post.pageId === business.facebookPageId &&
+          !inactiveStatuses.has(post.status) &&
+          post.scheduledFor > timestamp
+      )
+      .map((post) => post.scheduledFor);
+    const scheduleSlots = allocateScheduleSlots({
+      count: approved.length,
+      periodDays: input.periodDays,
+      occupiedSlots,
+      now: new Date(timestamp),
+      timeZone: business.timezone
+    });
+    if (scheduleSlots.length < approved.length) {
+      throw new AppError({
+        code: "schedule_capacity_exceeded",
+        statusCode: 409,
+        message: "Not enough free schedule slots for the requested period",
+        userMessage: "No hay suficientes horarios libres en ese periodo para este lote.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
     const job = await this.createJob({
       type: "schedule_posts",
       workspaceId: input.workspaceId,
@@ -1375,14 +1404,14 @@ export class LocalDataStore implements DataStore {
         scheduledPosts.push(existing);
         return;
       }
-      const scheduledFor = this.scheduledFor(index, input.periodDays);
+      const scheduledFor = scheduleSlots[index]!;
       const post: ScheduledPost = {
         id: randomUUID(),
         workspaceId: input.workspaceId,
         businessId: input.businessId,
         batchId: input.batchId,
         variantId: variant.id,
-        pageId: this.requireBusiness(state, input.workspaceId, input.businessId).facebookPageId,
+        pageId: business.facebookPageId,
         scheduledFor,
         facebookPostId: null,
         remotePostType: null,
@@ -2034,14 +2063,6 @@ export class LocalDataStore implements DataStore {
       retryable: false,
       action: "refresh"
     });
-  }
-
-  private scheduledFor(index: number, periodDays: 7 | 14 | 30) {
-    const dayStep = Math.max(1, Math.floor(periodDays / Math.max(1, index + 1)));
-    const date = new Date();
-    date.setDate(date.getDate() + 1 + index * dayStep);
-    date.setHours(10 + (index % 4) * 2, 0, 0, 0);
-    return date.toISOString();
   }
 
   private variantStateError(code: string, userMessage: string) {

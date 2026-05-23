@@ -2,7 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import {
   variantEditPromptForStyle,
-  variantStylePresetForIndex,
+  variantStylePresetForSlot,
   type BatchDetail,
   type BatchSummary,
   type Business,
@@ -425,19 +425,23 @@ const variantStylesForPhoto = (
   photoId: string,
   preferences: Record<string, PhotoStylePreference>,
   count: number,
-  fallbackStyleId = styleCatalog[0]!.id
+  _fallbackStyleId = styleCatalog[0]!.id,
+  photoIndex = 0,
+  batchSeed?: string | null
 ) =>
   Array.from({ length: count }, (_, index) =>
-    variantStylePresetForIndex(index + 1, preferences[photoId]?.styleId ?? fallbackStyleId)
+    variantStylePresetForSlot(photoIndex * count + index + 1, batchSeed, preferences[photoId]?.styleId ?? null)
   );
 
 const styleSummaryForPhoto = (
   photoId: string,
   preferences: Record<string, PhotoStylePreference>,
   count: number,
-  fallbackStyleId = styleCatalog[0]!.id
+  fallbackStyleId = styleCatalog[0]!.id,
+  photoIndex = 0,
+  batchSeed?: string | null
 ) =>
-  variantStylesForPhoto(photoId, preferences, count, fallbackStyleId)
+  variantStylesForPhoto(photoId, preferences, count, fallbackStyleId, photoIndex, batchSeed)
     .map((style, index) => `V${index + 1} ${style.styleName}`)
     .join(" · ");
 
@@ -445,9 +449,11 @@ const compactStyleSummaryForPhoto = (
   photoId: string,
   preferences: Record<string, PhotoStylePreference>,
   count: number,
-  fallbackStyleId = styleCatalog[0]!.id
+  fallbackStyleId = styleCatalog[0]!.id,
+  photoIndex = 0,
+  batchSeed?: string | null
 ) => {
-  const styles = variantStylesForPhoto(photoId, preferences, count, fallbackStyleId);
+  const styles = variantStylesForPhoto(photoId, preferences, count, fallbackStyleId, photoIndex, batchSeed);
   if (styles.length <= 2) return styles.map((style) => style.styleName).join(" / ");
   return `${styles[0]?.styleName ?? "Estilo"} / ${styles[1]?.styleName ?? "Estilo"} +${styles.length - 2}`;
 };
@@ -457,10 +463,12 @@ const promptsForPhoto = (
   preferences: Record<string, PhotoStylePreference>,
   count: number,
   fallbackIntensity: number,
-  fallbackStyleId = styleCatalog[0]!.id
+  fallbackStyleId = styleCatalog[0]!.id,
+  photoIndex = 0,
+  batchSeed?: string | null
 ) => {
   const intensity = intensityLevel(preferences[photoId]?.intensity ?? fallbackIntensity);
-  return variantStylesForPhoto(photoId, preferences, count, fallbackStyleId)
+  return variantStylesForPhoto(photoId, preferences, count, fallbackStyleId, photoIndex, batchSeed)
     .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName, intensity)}`)
     .join("\n");
 };
@@ -506,29 +514,24 @@ const styleOverridesForGeneration = (
   fallbackIntensity: number,
   fallbackStyleId = styleCatalog[0]!.id
 ): GenerateBatchStyleOverride[] =>
-  photos.filter(isPhotoAnalyzed).map((photo) => {
+  photos.filter(isPhotoAnalyzed).flatMap((photo) => {
+    const preference = preferences[photo.id];
+    if (!preference) return [];
     const style = styleForPhoto(photo.id, preferences, fallbackStyleId);
     return {
       photoId: photo.id,
       styleId: style.id,
       styleName: style.name,
-      intensity: preferences[photo.id]?.intensity ?? fallbackIntensity
+      intensity: preference.intensity ?? fallbackIntensity
     };
   });
 
 const freezePhotoPreferencesForGeneration = (
-  photos: Photo[],
+  _photos: Photo[],
   preferences: Record<string, PhotoStylePreference>,
-  fallbackIntensity: number,
-  fallbackStyleId = styleCatalog[0]!.id
-) => {
-  const next = { ...preferences };
-  for (const photo of photos.filter(isPhotoAnalyzed)) {
-    if (next[photo.id]) continue;
-    next[photo.id] = { styleId: fallbackStyleId, intensity: fallbackIntensity };
-  }
-  return next;
-};
+  _fallbackIntensity: number,
+  _fallbackStyleId = styleCatalog[0]!.id
+) => ({ ...preferences });
 
 const visionLabels = (photo: Photo) => {
   const analysis = photo.visionAnalysis as
@@ -1629,6 +1632,8 @@ function BootScreen() {
       else if (reviewQueue.length > 0 || hasVariants) setFlow("review");
       else setFlow("generate");
     };
+    const stylePhotoIndex = stylePhotoId ? Math.max(0, photos.findIndex((photo) => photo.id === stylePhotoId)) : 0;
+    const detailPhotoIndex = detailPhotoId ? Math.max(0, photos.findIndex((photo) => photo.id === detailPhotoId)) : 0;
 
     return (
       <Screen>
@@ -1661,7 +1666,7 @@ function BootScreen() {
               key={photo.id}
               photo={photo}
               index={index}
-              styleName={compactStyleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto, settingsDraft?.defaultStyleId)}
+              styleName={compactStyleSummaryForPhoto(photo.id, photoPrefs, variantsPerPhoto, settingsDraft?.defaultStyleId, index, selectedBatch?.id)}
               onPress={() => setDetailPhotoId(photo.id)}
               onLongPress={() => setStylePhotoId(photo.id)}
             />
@@ -1673,6 +1678,8 @@ function BootScreen() {
             preference={photoPrefs[stylePhotoId] ?? { styleId: settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id, intensity: generationIntensity }}
             variantsPerPhoto={variantsPerPhoto}
             fallbackStyleId={settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id}
+            photoIndex={stylePhotoIndex}
+            batchSeed={selectedBatch?.id ?? null}
             onChange={(next) => setPhotoPrefs((current) => ({ ...current, [stylePhotoId]: next }))}
             onClose={() => setStylePhotoId(null)}
           />
@@ -1680,7 +1687,15 @@ function BootScreen() {
         {detailPhotoId ? (
           <PhotoDetail
             photo={photos.find((photo) => photo.id === detailPhotoId) ?? null}
-            prompt={promptsForPhoto(detailPhotoId, photoPrefs, variantsPerPhoto, generationIntensity, settingsDraft?.defaultStyleId)}
+            prompt={promptsForPhoto(
+              detailPhotoId,
+              photoPrefs,
+              variantsPerPhoto,
+              generationIntensity,
+              settingsDraft?.defaultStyleId,
+              detailPhotoIndex,
+              selectedBatch?.id
+            )}
             onClose={() => setDetailPhotoId(null)}
           />
         ) : null}
@@ -2853,6 +2868,8 @@ function StylePicker({
   preference,
   variantsPerPhoto,
   fallbackStyleId,
+  photoIndex,
+  batchSeed,
   onChange,
   onClose
 }: {
@@ -2860,6 +2877,8 @@ function StylePicker({
   preference: PhotoStylePreference;
   variantsPerPhoto: number;
   fallbackStyleId: string;
+  photoIndex: number;
+  batchSeed?: string | null;
   onChange: (next: PhotoStylePreference) => void;
   onClose: () => void;
 }) {
@@ -2887,7 +2906,9 @@ function StylePicker({
           </Pressable>
         ))}
       </View>
-      <Text style={styles.promptBox}>{promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, preference.intensity, fallbackStyleId)}</Text>
+      <Text style={styles.promptBox}>
+        {promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, preference.intensity, fallbackStyleId, photoIndex, batchSeed)}
+      </Text>
       <Button label="Listo" icon="checkmark-outline" variant="secondary" onPress={onClose} />
     </Panel>
   );

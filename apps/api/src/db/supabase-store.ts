@@ -14,6 +14,7 @@ import {
   UploadIntent,
   VisionAnalysis,
   Variant,
+  allocateScheduleSlots,
   variantStylePresetForSlot,
   AssignedStyle,
   ScheduledPost,
@@ -1664,6 +1665,31 @@ export class SupabaseDataStoreCore {
         action: "refresh"
       });
     }
+    const inactiveStatuses = ["cancelada", "cancelled", "fallida", "failed"];
+    const occupiedResult = await this.pool.query(
+      `select scheduled_for from public.scheduled_posts
+       where workspace_id = $1
+         and page_id = $2
+         and not (status = any($3::text[]))
+         and scheduled_for > now()`,
+      [input.workspaceId, business.facebookPageId, inactiveStatuses]
+    );
+    const scheduleSlots = allocateScheduleSlots({
+      count: approved.length,
+      periodDays: input.periodDays,
+      occupiedSlots: occupiedResult.rows.map((row) => new Date(row.scheduled_for).toISOString()),
+      timeZone: business.timezone
+    });
+    if (scheduleSlots.length < approved.length) {
+      throw new AppError({
+        code: "schedule_capacity_exceeded",
+        statusCode: 409,
+        message: "Not enough free schedule slots for the requested period",
+        userMessage: "No hay suficientes horarios libres en ese periodo para este lote.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -1677,7 +1703,7 @@ export class SupabaseDataStoreCore {
       });
       const scheduledPosts: ScheduledPost[] = [];
       for (const [index, variant] of approved.entries()) {
-        const scheduledFor = this.scheduledFor(index, input.periodDays);
+        const scheduledFor = scheduleSlots[index]!;
         const inserted = await client.query(
           `insert into public.scheduled_posts
            (id, workspace_id, business_id, batch_id, variant_id, page_id, scheduled_for, facebook_post_id,
@@ -2416,14 +2442,6 @@ export class SupabaseDataStoreCore {
       retryable: false,
       action: "refresh"
     });
-  }
-
-  private scheduledFor(index: number, periodDays: 7 | 14 | 30) {
-    const dayStep = Math.max(1, Math.floor(periodDays / Math.max(1, index + 1)));
-    const date = new Date();
-    date.setDate(date.getDate() + 1 + index * dayStep);
-    date.setHours(10 + (index % 4) * 2, 0, 0, 0);
-    return date.toISOString();
   }
 
   private async failScheduledPost(scheduledPostId: string, remoteErrorCode: string): Promise<ScheduledPost> {
