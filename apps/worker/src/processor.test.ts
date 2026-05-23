@@ -541,7 +541,9 @@ describe("worker processor", () => {
       actorId: "remote-user",
       requestId: "remote-calendar"
     });
+    const beforeScheduleJob = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
     const scheduleJob = await processOneJob({ store, workerId: "remote-worker" });
+    const afterScheduleJob = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
     const scheduled = await store.getScheduledPost({
       workspaceId: workspace.id,
       businessId: business.id,
@@ -551,7 +553,9 @@ describe("worker processor", () => {
       (job) => job.type === "publish_post" && job.batchId === batch.id && job.status !== "cancelled"
     );
 
+    expect(beforeScheduleJob?.batch.status).toBe("scheduled");
     expect(scheduleJob.job?.type).toBe("schedule_posts");
+    expect(afterScheduleJob?.batch.status).toBe("completado");
     expect(scheduled?.status).toBe("programada");
     expect(scheduled?.remoteStatus).toBe("confirmado_meta");
     expect(scheduled?.deliveryMode).toBe("remote_schedule");

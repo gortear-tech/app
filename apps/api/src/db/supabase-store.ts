@@ -1740,7 +1740,7 @@ export class SupabaseDataStoreCore {
         await client.query("update public.variants set status = 'programada', updated_at = now() where id = $1", [variant.id]);
       }
       await client.query(
-        "update public.batches set status = 'completado', last_activity_at = now(), updated_at = now() where id = $1",
+        "update public.batches set status = 'scheduled', last_activity_at = now(), updated_at = now() where id = $1",
         [batch.id]
       );
       await client.query("commit");
@@ -1804,6 +1804,12 @@ export class SupabaseDataStoreCore {
           payload: { scheduledPostId: post.id, deliveryMode: post.deliveryMode }
         });
       }
+    }
+    if (posts.length > 0) {
+      await this.pool.query(
+        "update public.batches set status = 'completado', last_activity_at = now(), updated_at = now() where id = $1",
+        [batch.id]
+      );
     }
     return { scheduledPosts: posts };
   }

@@ -1438,9 +1438,10 @@ export class LocalDataStore implements DataStore {
       variant.updatedAt = timestamp;
       scheduledPosts.push(post);
     });
-    batch.status = "completado";
-    batch.lastActivityAt = timestamp;
-    batch.updatedAt = timestamp;
+    const updatedBatch = this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
+    updatedBatch.status = "scheduled";
+    updatedBatch.lastActivityAt = timestamp;
+    updatedBatch.updatedAt = timestamp;
     await this.persist();
     return { scheduledPosts, job };
   }
@@ -1500,6 +1501,12 @@ export class LocalDataStore implements DataStore {
           payload: { scheduledPostId: post.id, deliveryMode: post.deliveryMode }
         });
       }
+    }
+    if (scheduledPosts.length > 0) {
+      const updatedBatch = this.requireBatch(state, job.workspaceId, job.businessId, input.batchId);
+      updatedBatch.status = "completado";
+      updatedBatch.lastActivityAt = now();
+      updatedBatch.updatedAt = updatedBatch.lastActivityAt;
     }
     await this.persist();
     return { scheduledPosts };

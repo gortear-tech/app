@@ -567,7 +567,7 @@ const isBatchWorking = (batch: BatchSummary) =>
   ["pending_upload", "pendiente", "subiendo", "uploading", "analizando", "analyzing", "generando", "generating"].includes(batch.status);
 
 const flowForBatchSummary = (batch: BatchSummary): FlowStep => {
-  if (["completado", "completed"].includes(batch.status)) return "calendar";
+  if (["scheduled", "completado", "completed"].includes(batch.status)) return "calendar";
   if (["generando", "generating"].includes(batch.status)) return "generate";
   if (batch.variantsCount > 0 || ["generado_parcial", "ready_for_review"].includes(batch.status)) return "review";
   return "styles";
