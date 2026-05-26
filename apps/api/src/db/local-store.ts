@@ -24,6 +24,7 @@ import {
   allocateScheduleSlots,
   UploadIntent,
   User,
+  VARIANT_STYLE_PRESETS,
   Variant,
   variantStylePresetForSlot,
   VisionAnalysis,
@@ -1610,11 +1611,11 @@ export class LocalDataStore implements DataStore {
     let available = 0;
     const touched: Variant[] = [];
     const styleOverrides = new Map((input.styleOverrides ?? []).map((override) => [override.photoId, override]));
-    let styleSlot = 0;
+    let styleSlot = this.styleSlotOffsetForBusiness(state, input.workspaceId, input.businessId, input.batchId);
     for (const photo of validPhotos) {
       for (let index = 1; index <= input.variantsPerPhoto; index += 1) {
         styleSlot += 1;
-        const style = this.assignStyle(styleSlot, styleOverrides.get(photo.id), input.batchId);
+        const style = this.assignStyle(styleSlot, styleOverrides.get(photo.id));
         const promptVersion = "generation-plan-v1";
         let variant = state.variants.find(
           (item) =>
@@ -2833,6 +2834,29 @@ export class LocalDataStore implements DataStore {
       lowConfidence: false,
       manualOverride: false
     };
+  }
+
+  private styleSlotOffsetForBusiness(state: LocalState, workspaceId: string, businessId: string, batchId: string) {
+    const counts = new Map<string, number>();
+    for (const variant of state.variants) {
+      if (
+        variant.workspaceId !== workspaceId ||
+        variant.businessId !== businessId ||
+        variant.batchId === batchId ||
+        variant.status === "eliminada" ||
+        !variant.styleId
+      ) {
+        continue;
+      }
+      counts.set(variant.styleId, (counts.get(variant.styleId) ?? 0) + 1);
+    }
+    return this.styleSlotOffsetFromCounts(counts);
+  }
+
+  private styleSlotOffsetFromCounts(counts: Map<string, number>) {
+    const usages = VARIANT_STYLE_PRESETS.map((preset) => counts.get(preset.styleId) ?? 0);
+    const minUsage = Math.min(...usages);
+    return Math.max(0, usages.findIndex((usage) => usage === minUsage));
   }
 
   private manualStyle(

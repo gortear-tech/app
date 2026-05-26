@@ -437,6 +437,76 @@ describe("worker processor", () => {
     await rm(path, { force: true });
   });
 
+  it("continues style rotation across batches for the same page", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-style-rotation-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "rotation-user", email: "rotation@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("rotation-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "rotation-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "rotation-user",
+      pageId: page.id,
+      requestId: "rotation-select"
+    });
+
+    const createBatchWithTwoVariants = async (label: string) => {
+      const batch = await store.createBatch({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        actorId: "rotation-user",
+        requestId: `${label}-batch`
+      });
+      const intent = await store.createUploadIntent({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        originalFileName: `${label}.jpg`,
+        contentType: "image/jpeg",
+        fileSize: 2048
+      });
+      await store.completeUpload({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        storageKey: intent.storageKey,
+        originalFileName: `${label}.jpg`,
+        contentType: "image/jpeg",
+        fileSize: 2048,
+        actorId: "rotation-user",
+        requestId: `${label}-upload`
+      });
+      const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
+      const photoId = detail?.photos[0]?.id;
+      if (!photoId) throw new Error("Missing uploaded photo");
+      await store.requestGenerateBatch({
+        workspaceId: workspace.id,
+        businessId: business.id,
+        batchId: batch.id,
+        variantsPerPhoto: 2,
+        styleOverrides: [{ photoId, styleId: "atardecer", styleName: "Atardecer" }],
+        actorId: "rotation-user",
+        requestId: `${label}-generate`
+      });
+      return (await store.listVariants({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id }))
+        .map((variant) => variant.styleId ?? "missing")
+        .sort();
+    };
+
+    const firstBatchStyles = await createBatchWithTwoVariants("rotation-1");
+    const secondBatchStyles = await createBatchWithTwoVariants("rotation-2");
+    const thirdBatchStyles = await createBatchWithTwoVariants("rotation-3");
+
+    expect(firstBatchStyles).toEqual(["atardecer", "marmol"]);
+    expect(secondBatchStyles).toEqual(["jardin", "madera"]);
+    expect(thirdBatchStyles).toEqual(["estudio", "playa"]);
+    expect(firstBatchStyles.some((styleId) => secondBatchStyles.includes(styleId))).toBe(false);
+    expect(secondBatchStyles.some((styleId) => thirdBatchStyles.includes(styleId))).toBe(false);
+    await rm(path, { force: true });
+  });
+
   it("schedules 30 approved variants over 7 days with unique exact slots and commercial priority", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-large-schedule-${Date.now()}.json`);
     const store = new LocalDataStore(path);

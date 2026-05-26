@@ -23,6 +23,7 @@ import {
   VisionAnalysis,
   Variant,
   allocateScheduleSlots,
+  VARIANT_STYLE_PRESETS,
   variantStylePresetForSlot,
   AssignedStyle,
   ScheduledPost,
@@ -1934,12 +1935,12 @@ export class SupabaseDataStoreCore {
       let available = 0;
       const variants: Variant[] = [];
       const styleOverrides = new Map((input.styleOverrides ?? []).map((override) => [override.photoId, override]));
-      let styleSlot = 0;
+      let styleSlot = await this.styleSlotOffsetForBusiness(client, input.workspaceId, input.businessId, input.batchId);
       for (const photo of validPhotos) {
         for (let index = 1; index <= input.variantsPerPhoto; index += 1) {
           const variantId = randomUUID();
           styleSlot += 1;
-          const style = this.assignStyle(styleSlot, styleOverrides.get(photo.id), input.batchId);
+          const style = this.assignStyle(styleSlot, styleOverrides.get(photo.id));
           const promptVersion = "generation-plan-v1";
           const plan = this.generationPlan(style, promptVersion);
           const inserted = await client.query(
@@ -3158,6 +3159,30 @@ export class SupabaseDataStoreCore {
       lowConfidence: false,
       manualOverride: false
     };
+  }
+
+  private async styleSlotOffsetForBusiness(
+    client: pg.PoolClient,
+    workspaceId: string,
+    businessId: string,
+    batchId: string
+  ) {
+    const result = await client.query(
+      `select style_id, count(*)::int as usage_count
+       from public.variants
+       where workspace_id = $1 and business_id = $2 and batch_id <> $3
+         and status <> 'eliminada' and style_id is not null
+       group by style_id`,
+      [workspaceId, businessId, batchId]
+    );
+    const counts = new Map(result.rows.map((row) => [String(row.style_id), Number(row.usage_count) || 0]));
+    return this.styleSlotOffsetFromCounts(counts);
+  }
+
+  private styleSlotOffsetFromCounts(counts: Map<string, number>) {
+    const usages = VARIANT_STYLE_PRESETS.map((preset) => counts.get(preset.styleId) ?? 0);
+    const minUsage = Math.min(...usages);
+    return Math.max(0, usages.findIndex((usage) => usage === minUsage));
   }
 
   private manualStyle(index: number, override: GenerateStyleOverride): AssignedStyle {
