@@ -123,6 +123,28 @@ const extensionMimeHints = new Map([
   [".webp", "image/webp"]
 ]);
 
+const workspaceRecoveryRank = (state: LocalState, workspaceId: string) => {
+  const hasActiveBatch = state.batches.some((batch) => batch.workspaceId === workspaceId && activeBatchStatuses.has(batch.status));
+  const hasSelectedPublishablePage = state.businesses.some((business) => {
+    if (business.workspaceId !== workspaceId || !business.facebookPageId) return false;
+    return state.pages.some(
+      (page) =>
+        page.workspaceId === workspaceId &&
+        page.id === business.facebookPageId &&
+        page.isSelected &&
+        page.isGranted &&
+        page.canPublish
+    );
+  });
+  return (hasActiveBatch ? 2 : 0) + (hasSelectedPublishablePage ? 1 : 0);
+};
+
+const compareMembershipForRecovery = (state: LocalState, left: WorkspaceMember, right: WorkspaceMember) => {
+  const rankDelta = workspaceRecoveryRank(state, right.workspaceId) - workspaceRecoveryRank(state, left.workspaceId);
+  if (rankDelta !== 0) return rankDelta;
+  return new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+};
+
 const emptyState = (): LocalState => ({
   users: [],
   workspaces: [],
@@ -352,7 +374,9 @@ export class LocalDataStore implements DataStore {
 
   async ensureDefaultWorkspace(userId: string): Promise<{ workspace: Workspace; membership: WorkspaceMember }> {
     const state = await this.load();
-    const existing = state.members.find((member) => member.userId === userId && member.status === "active");
+    const existing = state.members
+      .filter((member) => member.userId === userId && member.status === "active")
+      .sort((left, right) => compareMembershipForRecovery(state, left, right))[0];
     if (existing) {
       const workspace = state.workspaces.find((item) => item.id === existing.workspaceId);
       if (workspace) return { workspace, membership: existing };
@@ -384,6 +408,7 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     return state.members
       .filter((membership) => membership.userId === userId && membership.status === "active")
+      .sort((left, right) => compareMembershipForRecovery(state, left, right))
       .flatMap((membership) => {
         const workspace = state.workspaces.find((item) => item.id === membership.workspaceId);
         return workspace ? [{ workspace, membership }] : [];

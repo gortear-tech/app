@@ -34,6 +34,15 @@ type MediaSelectionMutationResponse = {
   requestId: string;
 };
 
+type BatchUploadIntentResponse = {
+  uploadIntent: { storageKey: string };
+  upload: {
+    uploadUrl: string;
+    method: "PUT";
+    headers?: Record<string, string>;
+  };
+};
+
 const LEGACY_SESSION_TOKEN_KEY = "fbmaniaco.sessionToken";
 const SESSION_KEY = "fbmaniaco.authSession.v1";
 const REFRESH_WINDOW_SECONDS = 90;
@@ -48,6 +57,7 @@ type StoredAuthSession = {
 };
 
 let memorySession: StoredAuthSession | null = null;
+let refreshInFlight: Promise<StoredAuthSession> | null = null;
 
 export class ApiClientError extends Error {
   public readonly status: number;
@@ -100,7 +110,32 @@ const apiError = (response: Response, json: Record<string, unknown>, fallback: s
   return new ApiClientError(input);
 };
 
-const jsonRequest = async (url: string, init: RequestInit, fallback: string) => {
+const getHeaderValue = (headers: HeadersInit | undefined, key: string) => {
+  if (!headers) return undefined;
+  const lowerKey = key.toLowerCase();
+  if (headers instanceof Headers) return headers.get(key) ?? undefined;
+  if (Array.isArray(headers)) {
+    const pair = headers.find(([name]) => name.toLowerCase() === lowerKey);
+    return pair ? String(pair[1]) : undefined;
+  }
+  const record = headers as Record<string, string>;
+  const match = Object.keys(record).find((name) => name.toLowerCase() === lowerKey);
+  return match ? record[match] : undefined;
+};
+
+const setHeaderValue = (headers: HeadersInit | undefined, key: string, value: string): HeadersInit => {
+  if (headers instanceof Headers) {
+    const next = new Headers(headers);
+    next.set(key, value);
+    return next;
+  }
+  if (Array.isArray(headers)) {
+    return [...headers.filter(([name]) => name.toLowerCase() !== key.toLowerCase()), [key, value]];
+  }
+  return { ...(headers as Record<string, string> | undefined), [key]: value };
+};
+
+const jsonRequest = async (url: string, init: RequestInit, fallback: string, allowAuthRetry = true): Promise<Record<string, unknown>> => {
   let response: Response;
   try {
     response = await fetch(url, init);
@@ -113,7 +148,25 @@ const jsonRequest = async (url: string, init: RequestInit, fallback: string) => 
     });
   }
   const json = await responseJson(response);
-  if (!response.ok) throw apiError(response, json, fallback);
+  if (!response.ok) {
+    const error = apiError(response, json, fallback);
+    const authorization = getHeaderValue(init.headers, "authorization");
+    if (allowAuthRetry && isAuthSessionError(error) && authorization?.toLowerCase().startsWith("bearer ")) {
+      const refreshedToken = await refreshStoredSessionToken();
+      if (refreshedToken) {
+        return jsonRequest(
+          url,
+          {
+            ...init,
+            headers: setHeaderValue(init.headers, "authorization", `Bearer ${refreshedToken}`)
+          },
+          fallback,
+          false
+        );
+      }
+    }
+    throw error;
+  }
   return json;
 };
 
@@ -212,10 +265,19 @@ const sessionFromApiResponse = (json: MobileAuthSessionResponse): StoredAuthSess
 };
 
 const refreshStoredSession = async (refreshToken: string) => {
-  const json = await mobileAuthRequest("refresh", { refreshToken });
-  const session = sessionFromApiResponse(json);
-  await storeSession(session);
-  return session;
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const json = await mobileAuthRequest("refresh", { refreshToken });
+      const session = sessionFromApiResponse(json);
+      await storeSession(session);
+      return session;
+    })();
+  }
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
 };
 
 export const refreshStoredSessionToken = async () => {
@@ -259,6 +321,17 @@ export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus
 };
 
 const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const authorizedJsonRequest = async (token: string, path: string, init: RequestInit, fallback: string) => {
+  const { apiUrl } = getMobileConfig();
+  return jsonRequest(
+    `${apiUrl}${path}`,
+    {
+      ...init,
+      headers: setHeaderValue(init.headers, "authorization", `Bearer ${token}`)
+    },
+    fallback
+  );
+};
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const transientUploadStatus = (status: number) => status === 408 || status === 429 || status >= 500;
 const duplicateUploadResponse = (status: number, body: string) => status === 409 || /already exists|resource already exists|duplicate/i.test(body);
@@ -323,45 +396,33 @@ export const connectMeta = async (token: string, flow: "oauth" | "device_login" 
 };
 
 export const listMetaPages = async (token: string): Promise<MetaPage[]> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/meta/pages`, {
+  const json = await authorizedJsonRequest(token, "/meta/pages", {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer tus paginas.");
+  }, "No pudimos leer tus paginas.");
   return json.pages as MetaPage[];
 };
 
 export const selectMetaPage = async (token: string, pageId: string): Promise<{ business: Business; bootstrap: BootstrapStatus }> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/meta/pages/select`, {
+  const json = await authorizedJsonRequest(token, "/meta/pages/select", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("select-page"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ pageId })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos seleccionar esa pagina.");
+  }, "No pudimos seleccionar esa pagina.");
   return json as { business: Business; bootstrap: BootstrapStatus };
 };
 
 export const getBusinessDetail = async (token: string, businessId: string): Promise<BusinessDetailResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer la configuracion del negocio.");
+  }, "No pudimos leer la configuracion del negocio.");
   return json as BusinessDetailResponse;
 };
 
@@ -370,90 +431,67 @@ export const updateBusiness = async (
   businessId: string,
   body: UpdateBusinessBody
 ): Promise<BusinessMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}`, {
     method: "PATCH",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("update-business"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify(body)
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos guardar los ajustes.");
+  }, "No pudimos guardar los ajustes.");
   return json as BusinessMutationResponse;
 };
 
 export const getActiveBatch = async (token: string, businessId: string): Promise<BatchSummary | null> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/active`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/active`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer el lote activo.");
-  return (json.batches?.[0] ?? null) as BatchSummary | null;
+  }, "No pudimos leer el lote activo.");
+  const batches = Array.isArray(json.batches) ? json.batches : [];
+  return (batches[0] ?? null) as BatchSummary | null;
 };
 
 export const listBatches = async (token: string, businessId: string): Promise<BatchSummary[]> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer tus lotes.");
+  }, "No pudimos leer tus lotes.");
   return (json.batches ?? []) as BatchSummary[];
 };
 
 export const createBatch = async (token: string, businessId: string): Promise<BatchSummary> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("create-batch"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos crear el lote.");
+  }, "No pudimos crear el lote.");
   return json.batch as BatchSummary;
 };
 
 export const getBatchDetail = async (token: string, businessId: string, batchId: string): Promise<BatchDetail> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer ese lote.");
+  }, "No pudimos leer ese lote.");
   return json as BatchDetail;
 };
 
 export const deleteBatch = async (token: string, businessId: string, batchId: string): Promise<BatchMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}`, {
     method: "DELETE",
     headers: {
-      authorization: `Bearer ${token}`,
       "idempotency-key": idempotencyKey("delete-batch"),
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos eliminar ese lote.");
+  }, "No pudimos eliminar ese lote.");
   return json as BatchMutationResponse;
 };
 
@@ -467,7 +505,6 @@ export type PhotoUploadFile = {
 };
 
 export const uploadPhoto = async (token: string, businessId: string, batchId: string, file: PhotoUploadFile) => {
-  const { apiUrl } = getMobileConfig();
   const fileName = file.name || `foto-${Date.now()}.jpg`;
   let fileSize = file.fileSize;
   if (fileSize === undefined) {
@@ -476,18 +513,15 @@ export const uploadPhoto = async (token: string, businessId: string, batchId: st
     const blob = await source.blob();
     fileSize = blob.size;
   }
-  const intentResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/upload-intent`, {
+  const intentJson = (await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/photos/upload-intent`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("upload-intent"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ originalFileName: fileName, contentType: file.contentType, fileSize })
-  });
-  const intentJson = await intentResponse.json();
-  if (!intentResponse.ok) throw new Error(intentJson.userMessage ?? "No pudimos preparar la foto.");
+  }, "No pudimos preparar la foto.")) as BatchUploadIntentResponse;
 
   await uploadToSignedStorage({
     uploadUrl: intentJson.upload.uploadUrl,
@@ -498,10 +532,9 @@ export const uploadPhoto = async (token: string, businessId: string, batchId: st
     contentType: file.contentType
   });
 
-  const completeResponse = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/photos/complete-upload`, {
+  const completeJson = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/photos/complete-upload`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("complete-upload"),
       "x-request-id": `mobile-${Date.now()}`
@@ -514,9 +547,7 @@ export const uploadPhoto = async (token: string, businessId: string, batchId: st
       width: file.width,
       height: file.height
     })
-  });
-  const completeJson = await completeResponse.json();
-  if (!completeResponse.ok) throw new Error(completeJson.userMessage ?? "No pudimos confirmar la foto.");
+  }, "No pudimos confirmar la foto.");
   return completeJson;
 };
 
@@ -718,19 +749,15 @@ export const generateBatchVariants = async (
   variantsPerPhoto: number,
   styleOverrides?: GenerateBatchStyleOverride[]
 ): Promise<GenerateBatchResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/generate`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/generate`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("generate-batch"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ variantsPerPhoto, ...(styleOverrides?.length ? { styleOverrides } : {}) })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos generar variantes.");
+  }, "No pudimos generar variantes.");
   return json as GenerateBatchResponse;
 };
 
@@ -741,19 +768,15 @@ export const updateVariantCaption = async (
   variantId: string,
   caption: string
 ): Promise<VariantMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/variants/${variantId}/caption`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/variants/${variantId}/caption`, {
     method: "PATCH",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("variant-caption"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ caption })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos editar el caption.");
+  }, "No pudimos editar el caption.");
   return json as VariantMutationResponse;
 };
 
@@ -763,19 +786,15 @@ export const approveVariant = async (
   batchId: string,
   variantId: string
 ): Promise<VariantMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/variants/${variantId}/approve`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/variants/${variantId}/approve`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("approve-variant"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos aprobar la variante.");
+  }, "No pudimos aprobar la variante.");
   return json as VariantMutationResponse;
 };
 
@@ -785,19 +804,15 @@ export const rejectVariant = async (
   batchId: string,
   variantId: string
 ): Promise<VariantMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/variants/${variantId}/reject`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/variants/${variantId}/reject`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("reject-variant"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos rechazar la variante.");
+  }, "No pudimos rechazar la variante.");
   return json as VariantMutationResponse;
 };
 
@@ -807,32 +822,24 @@ export const confirmCalendar = async (
   batchId: string,
   periodDays: 7 | 14 | 30
 ): Promise<ConfirmCalendarResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/calendar/confirm`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/calendar/confirm`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("confirm-calendar"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ periodDays })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos confirmar el calendario.");
+  }, "No pudimos confirmar el calendario.");
   return json as ConfirmCalendarResponse;
 };
 
 export const listScheduledPosts = async (token: string, businessId: string): Promise<ScheduledPost[]> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/scheduled-posts`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/scheduled-posts`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos leer el calendario.");
+  }, "No pudimos leer el calendario.");
   return (json as ScheduledPostsResponse).scheduledPosts;
 };
 
@@ -842,19 +849,15 @@ export const publishScheduledPost = async (
   batchId: string,
   scheduledPostId: string
 ): Promise<ScheduledPostMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/publish`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/publish`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("publish-post"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos publicar ahora.");
+  }, "No pudimos publicar ahora.");
   return json as ScheduledPostMutationResponse;
 };
 
@@ -864,19 +867,15 @@ export const cancelScheduledPost = async (
   batchId: string,
   scheduledPostId: string
 ): Promise<ScheduledPostMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/cancel`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/cancel`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("cancel-post"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos cancelar la publicacion.");
+  }, "No pudimos cancelar la publicacion.");
   return json as ScheduledPostMutationResponse;
 };
 
@@ -887,19 +886,15 @@ export const updateScheduledPost = async (
   scheduledPostId: string,
   scheduledFor: string
 ): Promise<ScheduledPostMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}`, {
     method: "PATCH",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("update-post"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({ scheduledFor })
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos reprogramar la publicacion.");
+  }, "No pudimos reprogramar la publicacion.");
   return json as ScheduledPostMutationResponse;
 };
 
@@ -909,18 +904,14 @@ export const retryScheduledPost = async (
   batchId: string,
   scheduledPostId: string
 ): Promise<ScheduledPostMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const response = await fetch(`${apiUrl}/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/retry`, {
+  const json = await authorizedJsonRequest(token, `/businesses/${businessId}/batches/${batchId}/scheduled-posts/${scheduledPostId}/retry`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("retry-post"),
       "x-request-id": `mobile-${Date.now()}`
     },
     body: JSON.stringify({})
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.userMessage ?? "No pudimos reintentar la publicacion.");
+  }, "No pudimos reintentar la publicacion.");
   return json as ScheduledPostMutationResponse;
 };

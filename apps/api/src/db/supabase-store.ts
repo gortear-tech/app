@@ -501,14 +501,25 @@ export class SupabaseDataStoreCore {
   }
 
   async ensureDefaultWorkspace(userId: string): Promise<{ workspace: Workspace; membership: WorkspaceMember }> {
+    const recoverableBatchStatuses = Array.from(activeBatchStatuses);
     const existing = await this.pool.query(
       `select w.*, wm.role, wm.status as member_status, wm.created_at as member_created_at
        from public.workspace_members wm
        join public.workspaces w on w.id = wm.workspace_id
        where wm.user_id = $1 and wm.status = 'active'
-       order by wm.created_at asc
+       order by
+         exists (
+           select 1 from public.batches b
+           where b.workspace_id = w.id and b.status = any($2::text[])
+         ) desc,
+         exists (
+           select 1 from public.businesses b
+           join public.facebook_pages fp on fp.id = b.facebook_page_id
+           where b.workspace_id = w.id and fp.is_selected = true and fp.is_granted = true and fp.can_publish = true
+         ) desc,
+         wm.created_at asc
        limit 1`,
-      [userId]
+      [userId, recoverableBatchStatuses]
     );
     if (existing.rows[0]) {
       const row = existing.rows[0];
@@ -551,13 +562,24 @@ export class SupabaseDataStoreCore {
   }
 
   async listMemberships(userId: string): Promise<Array<{ workspace: Workspace; membership: WorkspaceMember }>> {
+    const recoverableBatchStatuses = Array.from(activeBatchStatuses);
     const result = await this.pool.query(
       `select w.*, wm.workspace_id, wm.user_id, wm.role, wm.status as member_status, wm.created_at as member_created_at
        from public.workspace_members wm
        join public.workspaces w on w.id = wm.workspace_id
        where wm.user_id = $1 and wm.status = 'active'
-       order by wm.created_at asc`,
-      [userId]
+       order by
+         exists (
+           select 1 from public.batches b
+           where b.workspace_id = w.id and b.status = any($2::text[])
+         ) desc,
+         exists (
+           select 1 from public.businesses b
+           join public.facebook_pages fp on fp.id = b.facebook_page_id
+           where b.workspace_id = w.id and fp.is_selected = true and fp.is_granted = true and fp.can_publish = true
+         ) desc,
+         wm.created_at asc`,
+      [userId, recoverableBatchStatuses]
     );
     return result.rows.map((row) => ({
       workspace: toWorkspace(row),

@@ -649,7 +649,6 @@ function BootScreen() {
     setMetaReturnMessage(
       succeeded ? "Facebook conectado. Actualizando tus paginas..." : "Facebook no completo la autorizacion. Intenta conectar otra vez."
     );
-    void queryClient.invalidateQueries({ queryKey: ["session-token"] });
     void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
     void queryClient.invalidateQueries({ queryKey: ["pages"] });
     void queryClient.invalidateQueries({ queryKey: ["business-detail"] });
@@ -924,8 +923,9 @@ function BootScreen() {
         return await connectMeta(sessionToken);
       } catch (error) {
         if (!isAuthSessionError(error)) throw error;
-        await clearStoredSession();
-        sessionToken = await ensureSessionForMeta();
+        const refreshedToken = await refreshStoredSessionToken();
+        if (!refreshedToken) throw error;
+        sessionToken = refreshedToken;
         queryClient.setQueryData(["session-token"], sessionToken);
         return connectMeta(sessionToken);
       }
