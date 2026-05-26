@@ -57,7 +57,7 @@ type StoredAuthSession = {
 };
 
 let memorySession: StoredAuthSession | null = null;
-let refreshInFlight: Promise<StoredAuthSession> | null = null;
+let refreshInFlight: { refreshToken: string; promise: Promise<StoredAuthSession> } | null = null;
 
 export class ApiClientError extends Error {
   public readonly status: number;
@@ -192,7 +192,7 @@ export const getStoredSessionToken = async () => {
       return refreshed.accessToken;
     } catch (error) {
       if (isAuthSessionError(error)) {
-        await clearStoredSession();
+        await clearStoredSessionIfRefreshTokenMatches(session.refreshToken);
         return null;
       }
       return session.accessToken;
@@ -238,6 +238,13 @@ export const clearStoredSession = async () => {
   }
 };
 
+const clearStoredSessionIfRefreshTokenMatches = async (refreshToken: string) => {
+  const current = await getStoredSession();
+  if (!current?.refreshToken || current.refreshToken === refreshToken) {
+    await clearStoredSession();
+  }
+};
+
 const mobileAuthRequest = async (path: "anonymous" | "refresh", body: Record<string, unknown>): Promise<MobileAuthSessionResponse> => {
   const { apiUrl } = getMobileConfig();
   const json = await jsonRequest(`${apiUrl}/auth/mobile/${path}`, {
@@ -265,18 +272,21 @@ const sessionFromApiResponse = (json: MobileAuthSessionResponse): StoredAuthSess
 };
 
 const refreshStoredSession = async (refreshToken: string) => {
-  if (!refreshInFlight) {
-    refreshInFlight = (async () => {
+  if (refreshInFlight?.refreshToken !== refreshToken) {
+    const promise = (async () => {
       const json = await mobileAuthRequest("refresh", { refreshToken });
       const session = sessionFromApiResponse(json);
+      const current = await getStoredSession();
+      if (current?.refreshToken && current.refreshToken !== refreshToken) return current;
       await storeSession(session);
       return session;
     })();
+    refreshInFlight = { refreshToken, promise };
   }
   try {
-    return await refreshInFlight;
+    return await refreshInFlight.promise;
   } finally {
-    refreshInFlight = null;
+    if (refreshInFlight?.refreshToken === refreshToken) refreshInFlight = null;
   }
 };
 
@@ -288,7 +298,7 @@ export const refreshStoredSessionToken = async () => {
     return refreshed.accessToken;
   } catch (error) {
     if (isAuthSessionError(error)) {
-      await clearStoredSession();
+      await clearStoredSessionIfRefreshTokenMatches(session.refreshToken);
       return null;
     }
     throw error;
@@ -310,10 +320,8 @@ export const ensureSessionForMeta = async () => {
 };
 
 export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus> => {
-  const { apiUrl } = getMobileConfig();
-  const json = await jsonRequest(`${apiUrl}/auth/bootstrap-status`, {
+  const json = await authorizedJsonRequest(token, "/auth/bootstrap-status", {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
   }, "No pudimos iniciar Maniaco.");
@@ -323,11 +331,12 @@ export const getBootstrapStatus = async (token: string): Promise<BootstrapStatus
 const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const authorizedJsonRequest = async (token: string, path: string, init: RequestInit, fallback: string) => {
   const { apiUrl } = getMobileConfig();
+  const freshToken = (await getStoredSessionToken()) ?? token;
   return jsonRequest(
     `${apiUrl}${path}`,
     {
       ...init,
-      headers: setHeaderValue(init.headers, "authorization", `Bearer ${token}`)
+      headers: setHeaderValue(init.headers, "authorization", `Bearer ${freshToken}`)
     },
     fallback
   );
@@ -381,11 +390,9 @@ const uploadToSignedStorage = async (input: {
 };
 
 export const connectMeta = async (token: string, flow: "oauth" | "device_login" = "oauth"): Promise<MetaConnectResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const json = await jsonRequest(`${apiUrl}/auth/meta/connect`, {
+  const json = await authorizedJsonRequest(token, "/auth/meta/connect", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("meta-connect"),
       "x-request-id": `mobile-${Date.now()}`
@@ -562,16 +569,14 @@ export const listMediaAssets = async (
     limit?: number;
   }
 ): Promise<MediaAssetsResponse> => {
-  const { apiUrl } = getMobileConfig();
   const params = new URLSearchParams({ workspaceId: input.workspaceId });
   if (input.categoryId) params.set("categoryId", input.categoryId);
   if (input.search) params.set("search", input.search);
   if (input.unused !== undefined) params.set("unused", String(input.unused));
   if (input.archived !== undefined) params.set("archived", String(input.archived));
   if (input.limit !== undefined) params.set("limit", String(input.limit));
-  const json = await jsonRequest(`${apiUrl}/media/assets?${params.toString()}`, {
+  const json = await authorizedJsonRequest(token, `/media/assets?${params.toString()}`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
   }, "No pudimos leer la galeria.");
@@ -579,11 +584,9 @@ export const listMediaAssets = async (
 };
 
 export const listMediaCategories = async (token: string, workspaceId: string): Promise<MediaCategory[]> => {
-  const { apiUrl } = getMobileConfig();
   const params = new URLSearchParams({ workspaceId });
-  const json = await jsonRequest(`${apiUrl}/media/categories?${params.toString()}`, {
+  const json = await authorizedJsonRequest(token, `/media/categories?${params.toString()}`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
   }, "No pudimos leer categorias.");
@@ -594,11 +597,9 @@ export const ingestMenuText = async (
   token: string,
   input: { workspaceId: string; businessId?: string; text: string }
 ): Promise<MenuIngestResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const json = await jsonRequest(`${apiUrl}/menu/ingest`, {
+  const json = await authorizedJsonRequest(token, "/menu/ingest", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("menu-ingest"),
       "x-request-id": `mobile-${Date.now()}`
@@ -614,11 +615,9 @@ export const ingestMenuText = async (
 };
 
 export const listMenuItems = async (token: string, workspaceId: string): Promise<MenuItem[]> => {
-  const { apiUrl } = getMobileConfig();
   const params = new URLSearchParams({ workspaceId });
-  const json = await jsonRequest(`${apiUrl}/menu/items?${params.toString()}`, {
+  const json = await authorizedJsonRequest(token, `/menu/items?${params.toString()}`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
   }, "No pudimos leer el menu importado.");
@@ -626,11 +625,9 @@ export const listMenuItems = async (token: string, workspaceId: string): Promise
 };
 
 export const listMediaSelections = async (token: string, workspaceId: string): Promise<MediaSelection[]> => {
-  const { apiUrl } = getMobileConfig();
   const params = new URLSearchParams({ workspaceId });
-  const json = await jsonRequest(`${apiUrl}/media/selections/active?${params.toString()}`, {
+  const json = await authorizedJsonRequest(token, `/media/selections/active?${params.toString()}`, {
     headers: {
-      authorization: `Bearer ${token}`,
       "x-request-id": `mobile-${Date.now()}`
     }
   }, "No pudimos leer la seleccion activa.");
@@ -641,11 +638,9 @@ export const createMediaSelection = async (
   token: string,
   body: { workspaceId: string; name?: string; assetIds?: string[]; metadata?: Record<string, unknown> }
 ): Promise<MediaSelectionMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const json = await jsonRequest(`${apiUrl}/media/selections`, {
+  const json = await authorizedJsonRequest(token, "/media/selections", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("media-selection"),
       "x-request-id": `mobile-${Date.now()}`
@@ -660,11 +655,9 @@ export const updateMediaSelection = async (
   selectionId: string,
   body: { name?: string | null; assetIds?: string[]; metadata?: Record<string, unknown> }
 ): Promise<MediaSelectionMutationResponse> => {
-  const { apiUrl } = getMobileConfig();
-  const json = await jsonRequest(`${apiUrl}/media/selections/${selectionId}`, {
+  const json = await authorizedJsonRequest(token, `/media/selections/${selectionId}`, {
     method: "PATCH",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("media-selection-update"),
       "x-request-id": `mobile-${Date.now()}`
@@ -681,7 +674,6 @@ export const uploadGalleryAsset = async (
   sha256: string,
   workspaceId?: string
 ): Promise<GalleryMediaAsset> => {
-  const { apiUrl } = getMobileConfig();
   const fileName = file.name || `foto-${Date.now()}.jpg`;
   let fileSize = file.fileSize;
   if (fileSize === undefined) {
@@ -689,10 +681,9 @@ export const uploadGalleryAsset = async (
     if (!source.ok) throw new Error("No pudimos leer la foto seleccionada.");
     fileSize = (await source.blob()).size;
   }
-  const intentJson = await jsonRequest(`${apiUrl}/media/upload-intent`, {
+  const intentJson = await authorizedJsonRequest(token, "/media/upload-intent", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("media-upload-intent"),
       "x-request-id": `mobile-${Date.now()}`
@@ -721,10 +712,9 @@ export const uploadGalleryAsset = async (
     contentType: file.contentType
   });
 
-  await jsonRequest(`${apiUrl}/media/upload-complete`, {
+  await authorizedJsonRequest(token, "/media/upload-complete", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${token}`,
       "content-type": "application/json",
       "idempotency-key": idempotencyKey("media-upload-complete"),
       "x-request-id": `mobile-${Date.now()}`

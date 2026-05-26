@@ -684,7 +684,6 @@ function BootScreen() {
           return;
         }
         setSessionRecoveryState(null);
-        await clearStoredSession();
         await queryClient.invalidateQueries({ queryKey: ["session-token"] });
         await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       })

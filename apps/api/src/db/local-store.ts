@@ -113,6 +113,7 @@ const metadataList = (metadata: Record<string, unknown> | undefined, key: string
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 };
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
+const recoverableBatchStatuses = new Set([...activeBatchStatuses, "scheduled"]);
 const hiddenBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const terminalBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "photo";
@@ -124,7 +125,7 @@ const extensionMimeHints = new Map([
 ]);
 
 const workspaceRecoveryRank = (state: LocalState, workspaceId: string) => {
-  const hasActiveBatch = state.batches.some((batch) => batch.workspaceId === workspaceId && activeBatchStatuses.has(batch.status));
+  const hasRecoverableBatch = state.batches.some((batch) => batch.workspaceId === workspaceId && recoverableBatchStatuses.has(batch.status));
   const hasSelectedPublishablePage = state.businesses.some((business) => {
     if (business.workspaceId !== workspaceId || !business.facebookPageId) return false;
     return state.pages.some(
@@ -136,7 +137,7 @@ const workspaceRecoveryRank = (state: LocalState, workspaceId: string) => {
         page.canPublish
     );
   });
-  return (hasActiveBatch ? 2 : 0) + (hasSelectedPublishablePage ? 1 : 0);
+  return (hasRecoverableBatch ? 2 : 0) + (hasSelectedPublishablePage ? 1 : 0);
 };
 
 const compareMembershipForRecovery = (state: LocalState, left: WorkspaceMember, right: WorkspaceMember) => {

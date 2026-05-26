@@ -73,6 +73,7 @@ const metadataList = (metadata: Record<string, unknown> | undefined, key: string
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 };
 const activeBatchStatuses = new Set(["pending_upload", "pendiente_confirmacion", "confirmado", "generando", "generado_parcial"]);
+const recoverableBatchStatuses = new Set([...activeBatchStatuses, "scheduled"]);
 const hiddenBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const terminalBatchStatuses = new Set(["abandonado", "abandoned", "cancelado", "cancelled"]);
 const safeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "photo";
@@ -501,7 +502,7 @@ export class SupabaseDataStoreCore {
   }
 
   async ensureDefaultWorkspace(userId: string): Promise<{ workspace: Workspace; membership: WorkspaceMember }> {
-    const recoverableBatchStatuses = Array.from(activeBatchStatuses);
+    const workspaceRecoveryStatuses = Array.from(recoverableBatchStatuses);
     const existing = await this.pool.query(
       `select w.*, wm.role, wm.status as member_status, wm.created_at as member_created_at
        from public.workspace_members wm
@@ -519,7 +520,7 @@ export class SupabaseDataStoreCore {
          ) desc,
          wm.created_at asc
        limit 1`,
-      [userId, recoverableBatchStatuses]
+      [userId, workspaceRecoveryStatuses]
     );
     if (existing.rows[0]) {
       const row = existing.rows[0];
@@ -562,7 +563,7 @@ export class SupabaseDataStoreCore {
   }
 
   async listMemberships(userId: string): Promise<Array<{ workspace: Workspace; membership: WorkspaceMember }>> {
-    const recoverableBatchStatuses = Array.from(activeBatchStatuses);
+    const workspaceRecoveryStatuses = Array.from(recoverableBatchStatuses);
     const result = await this.pool.query(
       `select w.*, wm.workspace_id, wm.user_id, wm.role, wm.status as member_status, wm.created_at as member_created_at
        from public.workspace_members wm
@@ -579,7 +580,7 @@ export class SupabaseDataStoreCore {
            where b.workspace_id = w.id and fp.is_selected = true and fp.is_granted = true and fp.can_publish = true
          ) desc,
          wm.created_at asc`,
-      [userId, recoverableBatchStatuses]
+      [userId, workspaceRecoveryStatuses]
     );
     return result.rows.map((row) => ({
       workspace: toWorkspace(row),
