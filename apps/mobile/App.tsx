@@ -73,6 +73,7 @@ import {
   refreshStoredSessionToken,
   retryScheduledPost,
   selectMetaPage,
+  startAnonymousSession,
   updateBusiness,
   updateScheduledPost,
   updateVariantCaption,
@@ -884,7 +885,13 @@ function BootScreen() {
       } catch (error) {
         if (!isAuthSessionError(error)) throw error;
         const refreshedToken = await refreshStoredSessionToken();
-        if (!refreshedToken) throw error;
+        if (!refreshedToken) {
+          await clearStoredSession();
+          const freshSession = await startAnonymousSession();
+          sessionToken = freshSession.accessToken;
+          queryClient.setQueryData(["session-token"], sessionToken);
+          return connectMeta(sessionToken);
+        }
         sessionToken = refreshedToken;
         queryClient.setQueryData(["session-token"], sessionToken);
         return connectMeta(sessionToken);

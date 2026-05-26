@@ -82,6 +82,9 @@ export const isTransientSessionError = (error: unknown) =>
   error instanceof ApiClientError &&
   (error.status === 0 || error.status >= 500 || error.code === "network_request_failed" || error.code === "mobile_session_failed");
 
+const isRefreshPayloadError = (error: unknown) =>
+  error instanceof ApiClientError && error.status === 400 && error.action === "refresh";
+
 const responseJson = async (response: Response): Promise<Record<string, unknown>> => {
   try {
     const json = (await response.json()) as unknown;
@@ -207,8 +210,12 @@ const getStoredSession = async (): Promise<StoredAuthSession | null> => {
     const raw = await SecureStore.getItemAsync(SESSION_KEY);
     if (raw) {
       try {
-        memorySession = JSON.parse(raw) as StoredAuthSession;
-        return memorySession;
+        const parsed = normalizeStoredSession(JSON.parse(raw));
+        if (parsed) {
+          memorySession = parsed;
+          return memorySession;
+        }
+        await SecureStore.deleteItemAsync(SESSION_KEY);
       } catch {
         await SecureStore.deleteItemAsync(SESSION_KEY);
       }
@@ -220,6 +227,19 @@ const getStoredSession = async (): Promise<StoredAuthSession | null> => {
     }
   }
   return memorySession;
+};
+
+const normalizeStoredSession = (input: unknown): StoredAuthSession | null => {
+  if (!input || typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  if (typeof record.accessToken !== "string" || record.accessToken.length < 16) return null;
+  const session: StoredAuthSession = { accessToken: record.accessToken };
+  if (typeof record.refreshToken === "string" && record.refreshToken.length >= 16) session.refreshToken = record.refreshToken;
+  if (typeof record.expiresAt === "number" && Number.isFinite(record.expiresAt)) session.expiresAt = record.expiresAt;
+  if (typeof record.tokenType === "string") session.tokenType = record.tokenType;
+  if (typeof record.userId === "string") session.userId = record.userId;
+  if (typeof record.email === "string") session.email = record.email;
+  return session;
 };
 
 const storeSession = async (session: StoredAuthSession) => {
@@ -297,7 +317,7 @@ export const refreshStoredSessionToken = async () => {
     const refreshed = await refreshStoredSession(session.refreshToken);
     return refreshed.accessToken;
   } catch (error) {
-    if (isAuthSessionError(error)) {
+    if (isAuthSessionError(error) || isRefreshPayloadError(error)) {
       await clearStoredSessionIfRefreshTokenMatches(session.refreshToken);
       return null;
     }
