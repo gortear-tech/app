@@ -3151,7 +3151,6 @@ export class SupabaseDataStoreCore {
     return {
       styleId: selected.styleId,
       styleName: selected.styleName,
-      intensity: "media",
       contrast: 0.48,
       saturation: selected.saturation + 0.2,
       warmth: selected.warmth,
@@ -3163,17 +3162,13 @@ export class SupabaseDataStoreCore {
 
   private manualStyle(index: number, override: GenerateStyleOverride): AssignedStyle {
     const selected = variantStylePresetForSlot(index, null, override.styleId);
-    const intensityValue = Math.max(0, Math.min(100, override.intensity));
-    const intensity = intensityValue >= 80 ? "fuerte" : intensityValue <= 40 ? "ligera" : "media";
-    const strength = intensityValue / 100;
     return {
       styleId: selected.styleId,
       styleName: selected.styleName,
-      intensity,
-      contrast: 0.18 + strength * 0.38,
-      saturation: selected.saturation + strength * 0.24,
+      contrast: 0.48,
+      saturation: selected.saturation + 0.2,
       warmth: selected.warmth,
-      sharpness: 0.22 + strength * 0.24,
+      sharpness: 0.42,
       lowConfidence: false,
       manualOverride: true
     };

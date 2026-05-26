@@ -104,7 +104,6 @@ type BusinessSettingsDraft = {
   timezone: string;
   category: string;
   defaultVariantsPerPhoto: number;
-  defaultGenerationIntensity: number;
   defaultPeriodDays: PeriodDays;
   defaultStyleId: string;
   contentTypes: string[];
@@ -274,7 +273,6 @@ const settingsDraftFromBusiness = (business: Business, page: MetaPage | null | u
     timezone: business.timezone || defaultTimezone,
     category: stringSetting(metadata, "category", page?.category ?? ""),
     defaultVariantsPerPhoto: numberSetting(metadata, "defaultVariantsPerPhoto", 3, 1, 5),
-    defaultGenerationIntensity: numberSetting(metadata, "defaultGenerationIntensity", 40, 25, 80),
     defaultPeriodDays: periodSetting(metadata, 14),
     defaultStyleId: styleCatalog.some((style) => style.id === defaultStyleId) ? defaultStyleId : styleCatalog[0]!.id,
     contentTypes: stringArraySetting(metadata, "contentTypes", defaultContentTypes),
@@ -288,7 +286,6 @@ const metadataFromSettingsDraft = (draft: BusinessSettingsDraft, current: Record
   ...current,
   category: draft.category.trim(),
   defaultVariantsPerPhoto: clamp(draft.defaultVariantsPerPhoto, 1, 5),
-  defaultGenerationIntensity: clamp(draft.defaultGenerationIntensity, 25, 80),
   defaultPeriodDays: draft.defaultPeriodDays,
   defaultStyleId: draft.defaultStyleId,
   contentTypes: normalizeList(draft.contentTypes),
@@ -297,7 +294,7 @@ const metadataFromSettingsDraft = (draft: BusinessSettingsDraft, current: Record
   imageEditors: imageEditorsForMetadata(draft.imageEditors)
 });
 
-type PhotoStylePreference = { styleId: string; intensity: number };
+type PhotoStylePreference = { styleId: string };
 type LocalPhotoPreview = { id: string; uri: string; name: string };
 const asImageStyle = (style: unknown) => style as StyleProp<ImageStyle>;
 const asViewStyle = (style: unknown) => style as StyleProp<ViewStyle>;
@@ -474,56 +471,18 @@ const promptsForPhoto = (
   photoId: string,
   preferences: Record<string, PhotoStylePreference>,
   count: number,
-  fallbackIntensity: number,
   fallbackStyleId = styleCatalog[0]!.id,
   photoIndex = 0,
   batchSeed?: string | null
 ) => {
-  const intensity = intensityLevel(preferences[photoId]?.intensity ?? fallbackIntensity);
   return variantStylesForPhoto(photoId, preferences, count, fallbackStyleId, photoIndex, batchSeed)
-    .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName, intensity)}`)
+    .map((style, index) => `V${index + 1}: ${variantEditPromptForStyle(style.styleName)}`)
     .join("\n");
 };
-
-const intensityLevel = (value: number): "ligera" | "media" | "fuerte" => {
-  if (value <= 40) return "ligera";
-  if (value >= 80) return "fuerte";
-  return "media";
-};
-
-const intensityCopy = (value: number) => {
-  if (value <= 40) return "Conserva la comida casi intacta; solo mejora foto.";
-  if (value >= 80) return "Cambia mas el ambiente, sin cambiar el platillo.";
-  return "Mejora presentacion sin transformar el producto.";
-};
-
-const GenerationIntensityControl = ({
-  value,
-  onChange
-}: {
-  value: number;
-  onChange: (next: number) => void;
-}) => (
-  <View style={styles.intensityBox}>
-    <View style={styles.rowBetween}>
-      <Text style={styles.rowTitle}>Intensidad de generacion</Text>
-      <Pill label={`${value}%`} tone={value <= 40 ? "good" : value >= 80 ? "warn" : "neutral"} />
-    </View>
-    <Text style={styles.muted}>{intensityCopy(value)}</Text>
-    <View style={styles.sliderRow}>
-      {[25, 40, 60, 80].map((option) => (
-        <Pressable key={option} style={[styles.sliderDot, value === option ? styles.sliderDotActive : null]} onPress={() => onChange(option)}>
-          <Text style={[styles.sliderText, value === option ? styles.sliderTextActive : null]}>{option}</Text>
-        </Pressable>
-      ))}
-    </View>
-  </View>
-);
 
 const styleOverridesForGeneration = (
   photos: Photo[],
   preferences: Record<string, PhotoStylePreference>,
-  fallbackIntensity: number,
   fallbackStyleId = styleCatalog[0]!.id
 ): GenerateBatchStyleOverride[] =>
   photos.filter(isPhotoAnalyzed).flatMap((photo) => {
@@ -533,15 +492,13 @@ const styleOverridesForGeneration = (
     return {
       photoId: photo.id,
       styleId: style.id,
-      styleName: style.name,
-      intensity: preference.intensity ?? fallbackIntensity
+      styleName: style.name
     };
   });
 
 const freezePhotoPreferencesForGeneration = (
   _photos: Photo[],
   preferences: Record<string, PhotoStylePreference>,
-  _fallbackIntensity: number,
   _fallbackStyleId = styleCatalog[0]!.id
 ) => ({ ...preferences });
 
@@ -617,7 +574,6 @@ function BootScreen() {
   const [photoPrefs, setPhotoPrefs] = useState<Record<string, PhotoStylePreference>>({});
   const [stylePhotoId, setStylePhotoId] = useState<string | null>(null);
   const [detailPhotoId, setDetailPhotoId] = useState<string | null>(null);
-  const [generationIntensity, setGenerationIntensity] = useState(40);
   const [variantsPerPhoto, setVariantsPerPhoto] = useState(5);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [periodDays, setPeriodDays] = useState<PeriodDays>(14);
@@ -742,7 +698,6 @@ function BootScreen() {
     if (!activeBusiness) return;
     const defaults = settingsDraftFromBusiness(activeBusiness, selectedPage);
     setVariantsPerPhoto(defaults.defaultVariantsPerPhoto);
-    setGenerationIntensity(defaults.defaultGenerationIntensity);
     setPeriodDays(defaults.defaultPeriodDays);
     setPhotoPrefs({});
   }, [activeBusiness?.id, activeBusiness?.updatedAt, selectedPage?.id]);
@@ -976,7 +931,6 @@ function BootScreen() {
         timezone: draft.timezone.trim() || defaultTimezone,
         category: draft.category.trim(),
         defaultVariantsPerPhoto: clamp(draft.defaultVariantsPerPhoto, 1, 5),
-        defaultGenerationIntensity: clamp(draft.defaultGenerationIntensity, 25, 80),
         contentTypes: normalizeList(draft.contentTypes),
         facebookSeoKeywords: normalizeList(draft.facebookSeoKeywords),
         facebookSeoContext: draft.facebookSeoContext.trim()
@@ -991,7 +945,6 @@ function BootScreen() {
       const nextDraft = settingsDraftFromBusiness(result.business, selectedPage);
       setSettingsDraft(nextDraft);
       setVariantsPerPhoto(nextDraft.defaultVariantsPerPhoto);
-      setGenerationIntensity(nextDraft.defaultGenerationIntensity);
       setPeriodDays(nextDraft.defaultPeriodDays);
       setSettingsNotice("Ajustes guardados para esta pagina.");
       queryClient.setQueryData(["business-detail", selectedBusinessId], {
@@ -1142,7 +1095,6 @@ function BootScreen() {
         setReviewIndex(0);
         if (defaults) {
           setVariantsPerPhoto(defaults.defaultVariantsPerPhoto);
-          setGenerationIntensity(defaults.defaultGenerationIntensity);
           setPeriodDays(defaults.defaultPeriodDays);
         }
         queryClient.setQueryData(["batches", businessId], (current: BatchSummary[] | undefined) => [batch, ...(current ?? [])]);
@@ -1449,10 +1401,9 @@ function BootScreen() {
     const frozenPreferences = freezePhotoPreferencesForGeneration(
       photos,
       photoPrefs,
-      generationIntensity,
       fallbackStyleId
     );
-    const styleOverrides = styleOverridesForGeneration(photos, frozenPreferences, generationIntensity, fallbackStyleId);
+    const styleOverrides = styleOverridesForGeneration(photos, frozenPreferences, fallbackStyleId);
     setPhotoPrefs(frozenPreferences);
     generateVariants.mutate({
       businessId: selectedBusinessId,
@@ -1837,7 +1788,7 @@ function BootScreen() {
         {stylePhotoId ? (
           <StylePicker
             photoId={stylePhotoId}
-            preference={photoPrefs[stylePhotoId] ?? { styleId: settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id, intensity: generationIntensity }}
+            preference={photoPrefs[stylePhotoId] ?? { styleId: settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id }}
             variantsPerPhoto={variantsPerPhoto}
             fallbackStyleId={settingsDraft?.defaultStyleId ?? styleCatalog[0]!.id}
             photoIndex={stylePhotoIndex}
@@ -1853,7 +1804,6 @@ function BootScreen() {
               detailPhotoId,
               photoPrefs,
               variantsPerPhoto,
-              generationIntensity,
               settingsDraft?.defaultStyleId,
               detailPhotoIndex,
               selectedBatch?.id
@@ -2278,10 +2228,6 @@ function BootScreen() {
               ))}
             </View>
           </SettingsField>
-          <GenerationIntensityControl
-            value={draft.defaultGenerationIntensity}
-            onChange={(defaultGenerationIntensity) => updateSettingsDraft({ defaultGenerationIntensity })}
-          />
         </Panel>
 
         <Panel title="Editores de imagen">
@@ -3148,16 +3094,8 @@ function StylePicker({
           {preference.styleId === style.id ? <Ionicons name="checkmark-circle" size={18} color={palette.green} /> : null}
         </Pressable>
       ))}
-      <Text style={styles.rowTitle}>Intensidad: {preference.intensity}%</Text>
-      <View style={styles.sliderRow}>
-        {[30, 50, 70, 90].map((value) => (
-          <Pressable key={value} style={[styles.sliderDot, preference.intensity === value ? styles.sliderDotActive : null]} onPress={() => onChange({ ...preference, intensity: value })}>
-            <Text style={[styles.sliderText, preference.intensity === value ? styles.sliderTextActive : null]}>{value}</Text>
-          </Pressable>
-        ))}
-      </View>
       <Text style={styles.promptBox}>
-        {promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, preference.intensity, fallbackStyleId, photoIndex, batchSeed)}
+        {promptsForPhoto(photoId, { [photoId]: preference }, variantsPerPhoto, fallbackStyleId, photoIndex, batchSeed)}
       </Text>
       <Button label="Listo" icon="checkmark-outline" variant="secondary" onPress={onClose} />
     </Panel>
@@ -4033,12 +3971,6 @@ const styles = StyleSheet.create({
   photoTileBody: { gap: 5, padding: 10 },
   styleRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 58, padding: 10, borderRadius: 8, backgroundColor: palette.surface },
   styleRowActive: { borderWidth: 1, borderColor: palette.blue },
-  intensityBox: { gap: 8, padding: 10, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.surface },
-  sliderRow: { flexDirection: "row", gap: 8 },
-  sliderDot: { flex: 1, alignItems: "center", justifyContent: "center", minHeight: 40, borderRadius: 8, backgroundColor: palette.surface },
-  sliderDotActive: { backgroundColor: palette.white },
-  sliderText: { color: palette.muted, fontWeight: "900" },
-  sliderTextActive: { color: palette.ink },
   promptBox: { color: palette.text, fontSize: 13, lineHeight: 19, fontWeight: "700", padding: 10, borderRadius: 8, backgroundColor: palette.surface },
   detailImage: { width: "100%", height: 320, borderRadius: 8, backgroundColor: palette.mediaBg },
   tagWrap: { flexDirection: "row", flexWrap: "wrap", gap: 6 },

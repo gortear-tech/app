@@ -5,7 +5,6 @@ import { VariantStatus } from "./states.js";
 export const AssignedStyleSchema = Type.Object({
   styleId: Type.String(),
   styleName: Type.String(),
-  intensity: Type.Union([Type.Literal("ligera"), Type.Literal("media"), Type.Literal("fuerte")]),
   contrast: Type.Number(),
   saturation: Type.Number(),
   warmth: Type.Number(),
@@ -104,8 +103,7 @@ export const VariantSchema = Type.Object({
 export const GenerateBatchStyleOverrideSchema = Type.Object({
   photoId: Type.String(),
   styleId: Type.String({ minLength: 1, maxLength: 64 }),
-  styleName: Type.String({ minLength: 1, maxLength: 80 }),
-  intensity: Type.Number({ minimum: 0, maximum: 100 })
+  styleName: Type.String({ minLength: 1, maxLength: 80 })
 });
 
 export const GenerateBatchBodySchema = Type.Object({
@@ -197,5 +195,5 @@ const backgroundWordForStyle = (styleName: string) => {
     .trim();
 };
 
-export const variantEditPromptForStyle = (styleName: string, _intensity: AssignedStyle["intensity"] = "media") =>
+export const variantEditPromptForStyle = (styleName: string) =>
   `Corrige la iluminacion y los colores. Cambia el fondo a uno de ${backgroundWordForStyle(styleName)}.`;

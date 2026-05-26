@@ -673,7 +673,7 @@ describe("api bootstrap and tenancy", () => {
       headers: { authorization, "idempotency-key": "generate-batch-1" },
       payload: {
         variantsPerPhoto: 1,
-        styleOverrides: [{ photoId: detail.json().photos[0].id, styleId: "playa", styleName: "Playa", intensity: 90 }]
+        styleOverrides: [{ photoId: detail.json().photos[0].id, styleId: "playa", styleName: "Playa" }]
       }
     });
     expect(generate.statusCode).toBe(200);

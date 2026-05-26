@@ -284,7 +284,7 @@ describe("worker processor", () => {
       businessId: business.id,
       batchId: batch.id,
       variantsPerPhoto: 3,
-      styleOverrides: [{ photoId: detail?.photos[0]?.id ?? "", styleId: "playa", styleName: "Playa", intensity: 90 }],
+      styleOverrides: [{ photoId: detail?.photos[0]?.id ?? "", styleId: "playa", styleName: "Playa" }],
       actorId: "u2",
       requestId: "test-generate"
     });
@@ -325,9 +325,9 @@ describe("worker processor", () => {
     expect(variants.map((variant) => variant.assignedStyle?.styleName)).toEqual(["Playa", "Estudio", "Nocturno"]);
     expect(new Set(variants.map((variant) => variant.styleId)).size).toBe(3);
     expect(imagePrompts).toEqual([
-      variantEditPromptForStyle("Playa", "fuerte"),
-      variantEditPromptForStyle("Estudio", "fuerte"),
-      variantEditPromptForStyle("Nocturno", "fuerte")
+      variantEditPromptForStyle("Playa"),
+      variantEditPromptForStyle("Estudio"),
+      variantEditPromptForStyle("Nocturno")
     ]);
     expect(variants.every((variant) => variant.generatedAssetId && variant.generatedAssetId !== detail?.photos[0]?.originalAssetId)).toBe(
       true

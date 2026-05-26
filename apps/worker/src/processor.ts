@@ -35,7 +35,7 @@ const mediaAssetPaths = (input: { workspaceId: string; assetId: string }) => ({
 });
 const backgroundPromptForVariant = (variantIndex: number, style?: AssignedStyle) => {
   const background = style?.styleName.trim() || variantStylePresetForIndex(variantIndex).styleName;
-  return variantEditPromptForStyle(background, style?.intensity ?? "media");
+  return variantEditPromptForStyle(background);
 };
 type ImageEditorRuntime = {
   providerName: string;
