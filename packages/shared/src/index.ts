@@ -8,6 +8,7 @@ export * from "./businesses.js";
 export * from "./idempotency.js";
 export * from "./batches.js";
 export * from "./media.js";
+export * from "./media-gallery.js";
 export * from "./vision.js";
 export * from "./variants.js";
 export * from "./scheduled-posts.js";

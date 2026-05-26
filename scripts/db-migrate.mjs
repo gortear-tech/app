@@ -32,8 +32,10 @@ const migrations = readdirSync(migrationsDir)
   .sort()
   .map((filename) => {
     const sql = readFileSync(join(migrationsDir, filename), "utf8");
-    const checksum = createHash("sha256").update(sql).digest("hex");
-    return { filename, sql, checksum };
+    const normalizedSql = sql.replace(/\r\n/g, "\n");
+    const rawChecksum = createHash("sha256").update(sql).digest("hex");
+    const checksum = createHash("sha256").update(normalizedSql).digest("hex");
+    return { filename, sql, checksum, compatibleChecksums: new Set([rawChecksum, checksum]) };
   });
 
 if (migrations.length === 0) {
@@ -64,7 +66,7 @@ const main = async () => {
 
     const changed = migrations.filter((migration) => {
       const existing = applied.get(migration.filename);
-      return existing && existing.checksum !== migration.checksum;
+      return existing && !migration.compatibleChecksums.has(existing.checksum);
     });
     if (changed.length > 0) {
       fail(`applied migration checksum changed: ${changed.map((migration) => migration.filename).join(", ")}`);

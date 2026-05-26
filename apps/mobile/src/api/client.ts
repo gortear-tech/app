@@ -9,6 +9,13 @@ import {
   ConfirmCalendarResponse,
   GenerateBatchResponse,
   GenerateBatchStyleOverride,
+  GalleryMediaAsset,
+  MediaAssetsResponse,
+  MediaCategory,
+  MediaSelection,
+  MenuIngestResponse,
+  MenuItem,
+  MenuItemsResponse,
   MetaConnectResponse,
   MetaPage,
   MobileAuthSessionResponse,
@@ -20,6 +27,12 @@ import {
 } from "@fbmaniaco/shared";
 import * as SecureStore from "expo-secure-store";
 import { getMobileConfig } from "../config";
+
+type MediaSelectionMutationResponse = {
+  schemaVersion: "media_selection_mutation.v1";
+  selection: MediaSelection;
+  requestId: string;
+};
 
 const LEGACY_SESSION_TOKEN_KEY = "fbmaniaco.sessionToken";
 const SESSION_KEY = "fbmaniaco.authSession.v1";
@@ -52,7 +65,12 @@ export class ApiClientError extends Error {
 }
 
 export const isAuthSessionError = (error: unknown) =>
-  error instanceof ApiClientError && (error.status === 401 || error.code === "unauthorized");
+  error instanceof ApiClientError &&
+  (error.status === 401 || error.code === "unauthorized" || error.code === "session_refresh_invalid");
+
+export const isTransientSessionError = (error: unknown) =>
+  error instanceof ApiClientError &&
+  (error.status === 0 || error.status >= 500 || error.code === "network_request_failed" || error.code === "mobile_session_failed");
 
 const responseJson = async (response: Response): Promise<Record<string, unknown>> => {
   try {
@@ -120,7 +138,7 @@ export const getStoredSessionToken = async () => {
       const refreshed = await refreshStoredSession(session.refreshToken);
       return refreshed.accessToken;
     } catch (error) {
-      if (session.expiresAt <= now || isAuthSessionError(error)) {
+      if (isAuthSessionError(error)) {
         await clearStoredSession();
         return null;
       }
@@ -198,6 +216,21 @@ const refreshStoredSession = async (refreshToken: string) => {
   const session = sessionFromApiResponse(json);
   await storeSession(session);
   return session;
+};
+
+export const refreshStoredSessionToken = async () => {
+  const session = await getStoredSession();
+  if (!session?.refreshToken) return null;
+  try {
+    const refreshed = await refreshStoredSession(session.refreshToken);
+    return refreshed.accessToken;
+  } catch (error) {
+    if (isAuthSessionError(error)) {
+      await clearStoredSession();
+      return null;
+    }
+    throw error;
+  }
 };
 
 export const startAnonymousSession = async () => {
@@ -485,6 +518,197 @@ export const uploadPhoto = async (token: string, businessId: string, batchId: st
   const completeJson = await completeResponse.json();
   if (!completeResponse.ok) throw new Error(completeJson.userMessage ?? "No pudimos confirmar la foto.");
   return completeJson;
+};
+
+export const listMediaAssets = async (
+  token: string,
+  input: {
+    workspaceId: string;
+    categoryId?: string;
+    search?: string;
+    unused?: boolean;
+    archived?: boolean;
+    limit?: number;
+  }
+): Promise<MediaAssetsResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const params = new URLSearchParams({ workspaceId: input.workspaceId });
+  if (input.categoryId) params.set("categoryId", input.categoryId);
+  if (input.search) params.set("search", input.search);
+  if (input.unused !== undefined) params.set("unused", String(input.unused));
+  if (input.archived !== undefined) params.set("archived", String(input.archived));
+  if (input.limit !== undefined) params.set("limit", String(input.limit));
+  const json = await jsonRequest(`${apiUrl}/media/assets?${params.toString()}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-request-id": `mobile-${Date.now()}`
+    }
+  }, "No pudimos leer la galeria.");
+  return json as MediaAssetsResponse;
+};
+
+export const listMediaCategories = async (token: string, workspaceId: string): Promise<MediaCategory[]> => {
+  const { apiUrl } = getMobileConfig();
+  const params = new URLSearchParams({ workspaceId });
+  const json = await jsonRequest(`${apiUrl}/media/categories?${params.toString()}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-request-id": `mobile-${Date.now()}`
+    }
+  }, "No pudimos leer categorias.");
+  return (json.categories ?? []) as MediaCategory[];
+};
+
+export const ingestMenuText = async (
+  token: string,
+  input: { workspaceId: string; businessId?: string; text: string }
+): Promise<MenuIngestResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const json = await jsonRequest(`${apiUrl}/menu/ingest`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("menu-ingest"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify({
+      workspaceId: input.workspaceId,
+      ...(input.businessId ? { businessId: input.businessId } : {}),
+      sourceType: "text",
+      text: input.text
+    })
+  }, "No pudimos importar el menu.");
+  return json as MenuIngestResponse;
+};
+
+export const listMenuItems = async (token: string, workspaceId: string): Promise<MenuItem[]> => {
+  const { apiUrl } = getMobileConfig();
+  const params = new URLSearchParams({ workspaceId });
+  const json = await jsonRequest(`${apiUrl}/menu/items?${params.toString()}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-request-id": `mobile-${Date.now()}`
+    }
+  }, "No pudimos leer el menu importado.");
+  return ((json as MenuItemsResponse).items ?? []) as MenuItem[];
+};
+
+export const listMediaSelections = async (token: string, workspaceId: string): Promise<MediaSelection[]> => {
+  const { apiUrl } = getMobileConfig();
+  const params = new URLSearchParams({ workspaceId });
+  const json = await jsonRequest(`${apiUrl}/media/selections/active?${params.toString()}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "x-request-id": `mobile-${Date.now()}`
+    }
+  }, "No pudimos leer la seleccion activa.");
+  return (json.selections ?? []) as MediaSelection[];
+};
+
+export const createMediaSelection = async (
+  token: string,
+  body: { workspaceId: string; name?: string; assetIds?: string[]; metadata?: Record<string, unknown> }
+): Promise<MediaSelectionMutationResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const json = await jsonRequest(`${apiUrl}/media/selections`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("media-selection"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify(body)
+  }, "No pudimos crear la seleccion.");
+  return json as MediaSelectionMutationResponse;
+};
+
+export const updateMediaSelection = async (
+  token: string,
+  selectionId: string,
+  body: { name?: string | null; assetIds?: string[]; metadata?: Record<string, unknown> }
+): Promise<MediaSelectionMutationResponse> => {
+  const { apiUrl } = getMobileConfig();
+  const json = await jsonRequest(`${apiUrl}/media/selections/${selectionId}`, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("media-selection-update"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify(body)
+  }, "No pudimos guardar la seleccion.");
+  return json as MediaSelectionMutationResponse;
+};
+
+export const uploadGalleryAsset = async (
+  token: string,
+  businessId: string,
+  file: PhotoUploadFile,
+  sha256: string,
+  workspaceId?: string
+): Promise<GalleryMediaAsset> => {
+  const { apiUrl } = getMobileConfig();
+  const fileName = file.name || `foto-${Date.now()}.jpg`;
+  let fileSize = file.fileSize;
+  if (fileSize === undefined) {
+    const source = await fetch(file.uri);
+    if (!source.ok) throw new Error("No pudimos leer la foto seleccionada.");
+    fileSize = (await source.blob()).size;
+  }
+  const intentJson = await jsonRequest(`${apiUrl}/media/upload-intent`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("media-upload-intent"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify({
+      businessId,
+      sha256,
+      bytes: fileSize,
+      mime: file.contentType,
+      originalName: fileName,
+      width: file.width,
+      height: file.height
+    })
+  }, "No pudimos preparar la foto para galeria.");
+  if (intentJson.exists && intentJson.asset) return intentJson.asset as GalleryMediaAsset;
+  if (!intentJson.uploadUrl || !intentJson.storagePath || !intentJson.assetId) {
+    throw new Error("La galeria no regreso una URL de subida valida.");
+  }
+
+  await uploadToSignedStorage({
+    uploadUrl: String(intentJson.uploadUrl),
+    method: "PUT",
+    headers: {},
+    uri: file.uri,
+    fileName,
+    contentType: file.contentType
+  });
+
+  await jsonRequest(`${apiUrl}/media/upload-complete`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey("media-upload-complete"),
+      "x-request-id": `mobile-${Date.now()}`
+    },
+    body: JSON.stringify({
+      assetId: intentJson.assetId,
+      storagePath: intentJson.storagePath
+    })
+  }, "No pudimos confirmar la foto de galeria.");
+
+  return {
+    ...(intentJson.asset as GalleryMediaAsset),
+    id: String(intentJson.assetId),
+    status: "processing"
+  };
 };
 
 export const generateBatchVariants = async (

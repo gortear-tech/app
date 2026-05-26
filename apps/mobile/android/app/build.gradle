@@ -96,8 +96,8 @@ android {
         applicationId 'com.gabriel.fbmaniaco'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 24
-        versionName "0.1.23"
+        versionCode 27
+        versionName "0.1.26"
         ndk {
             abiFilters(*releaseArchitectures)
         }
@@ -142,6 +142,7 @@ android {
     packagingOptions {
         jniLibs {
             useLegacyPackaging (findProperty('expo.useLegacyPackaging')?.toBoolean() ?: false)
+            pickFirsts += ["**/libc++_shared.so", "**/libfbjni.so", "**/libjsi.so", "**/libreactnative.so"]
         }
     }
     androidResources {

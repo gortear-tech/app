@@ -1,4 +1,5 @@
 import { AppError, FacebookTokenStatus, MetaPage } from "@fbmaniaco/shared";
+import pRetry, { AbortError } from "p-retry";
 
 export type NormalizedMetaAuthorization = {
   status: "valid" | "missing_scopes" | "error";
@@ -36,6 +37,11 @@ export type MetaPublishResult = {
   providerTraceId?: string;
 };
 
+export type MetaPhotoUploadResult = {
+  fbPhotoId: string;
+  providerTraceId?: string;
+};
+
 export type MetaProviderConfig = {
   appId: string | undefined;
   appSecret: string | undefined;
@@ -52,6 +58,152 @@ type GraphMetaProviderConfig = {
   loginConfigurationId?: string | undefined;
   graphApiVersion: string;
   requiredScopes: string[];
+};
+
+class MetaGraphRequestError extends Error {
+  readonly status: number;
+  readonly metaCode?: number;
+  readonly metaType?: string;
+  readonly traceId?: string;
+  readonly retryAfterMs?: number;
+  readonly retryable: boolean;
+
+  constructor(input: {
+    message: string;
+    status: number;
+    metaCode?: number;
+    metaType?: string;
+    traceId?: string;
+    retryAfterMs?: number;
+    retryable: boolean;
+  }) {
+    super(input.message);
+    this.name = "MetaGraphRequestError";
+    this.status = input.status;
+    if (input.metaCode !== undefined) this.metaCode = input.metaCode;
+    if (input.metaType !== undefined) this.metaType = input.metaType;
+    if (input.traceId !== undefined) this.traceId = input.traceId;
+    if (input.retryAfterMs !== undefined) this.retryAfterMs = input.retryAfterMs;
+    this.retryable = input.retryable;
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const parseRetryAfterMs = (headers: Headers) => {
+  const retryAfter = headers.get("retry-after");
+  const retryAfterSeconds = retryAfter ? Number(retryAfter) : NaN;
+  const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 0;
+  const usage = headers.get("x-business-use-case-usage");
+  let usageMs = 0;
+  if (usage) {
+    try {
+      const parsed = JSON.parse(usage) as Record<string, Array<{ estimated_time_to_regain_access?: number }>>;
+      usageMs = Math.max(
+        0,
+        ...Object.values(parsed)
+          .flat()
+          .map((item) =>
+            typeof item.estimated_time_to_regain_access === "number" ? item.estimated_time_to_regain_access * 1000 : 0
+          )
+      );
+    } catch {
+      usageMs = 0;
+    }
+  }
+  const selected = Math.max(retryAfterMs, usageMs);
+  return selected > 0 ? selected : undefined;
+};
+
+const retryableMetaCodes = new Set([1, 2, 4, 17, 32, 613]);
+const nonRetryableMetaCodes = new Set([10, 100, 190, 200]);
+
+const isRetryableGraphFailure = (status: number, code?: number) => {
+  if (status === 429 || status === 408 || status === 425 || status >= 500) return true;
+  if (code !== undefined && retryableMetaCodes.has(code)) return true;
+  if (code !== undefined && nonRetryableMetaCodes.has(code)) return false;
+  return status >= 500;
+};
+
+const toMetaPublishAppError = (error: unknown, code: string, fallbackMessage: string) => {
+  if (error instanceof MetaGraphRequestError) {
+    return new AppError({
+      code,
+      statusCode: error.retryable ? 502 : 409,
+      message: error.message || fallbackMessage,
+      userMessage: error.retryable
+        ? "Facebook no pudo completar la publicacion. Vamos a reintentar."
+        : "Facebook rechazo la publicacion. Revisa permisos y vuelve a conectar la pagina.",
+      retryable: error.retryable,
+      action: error.retryable ? "retry" : "reconnect",
+      details: { metaCode: error.metaCode, metaType: error.metaType, traceId: error.traceId }
+    });
+  }
+  if (error instanceof AppError) return error;
+  return new AppError({
+    code,
+    statusCode: 502,
+    message: error instanceof Error ? error.message : fallbackMessage,
+    userMessage: "Facebook no pudo completar la publicacion. Vamos a reintentar.",
+    retryable: true,
+    action: "retry"
+  });
+};
+
+const postGraphForm = async <T>(input: {
+  graphApiVersion: string;
+  pageId: string;
+  endpoint: "feed" | "photos";
+  body: () => URLSearchParams;
+  missingResult: (json: T) => boolean;
+  failureCode: string;
+  failureMessage: string;
+}) => {
+  const requestUrl = new URL(`https://graph.facebook.com/${input.graphApiVersion}/${input.pageId}/${input.endpoint}`);
+  try {
+    return await pRetry(
+      async () => {
+        const response = await fetch(requestUrl, { method: "POST", body: input.body() });
+        const traceId = response.headers.get("x-fb-trace-id") ?? response.headers.get("x-fb-rev") ?? undefined;
+        const json = (await response.json().catch(() => ({}))) as T & {
+          error?: { code?: number; message?: string; type?: string };
+        };
+        if (!response.ok || input.missingResult(json)) {
+          const status = response.status || 502;
+          const retryable = isRetryableGraphFailure(status, json.error?.code);
+          const graphErrorInput: ConstructorParameters<typeof MetaGraphRequestError>[0] = {
+            status,
+            retryable,
+            message: json.error?.message ?? input.failureMessage
+          };
+          if (json.error?.code !== undefined) graphErrorInput.metaCode = json.error.code;
+          if (json.error?.type !== undefined) graphErrorInput.metaType = json.error.type;
+          if (traceId !== undefined) graphErrorInput.traceId = traceId;
+          const retryAfterMs = parseRetryAfterMs(response.headers);
+          if (retryAfterMs !== undefined) graphErrorInput.retryAfterMs = retryAfterMs;
+          const graphError = new MetaGraphRequestError(graphErrorInput);
+          if (!retryable) throw new AbortError(graphError);
+          throw graphError;
+        }
+        return { json, traceId };
+      },
+      {
+        retries: 5,
+        factor: 2,
+        minTimeout: 1000,
+        maxTimeout: 60000,
+        randomize: true,
+        shouldRetry: ({ error }) => error instanceof MetaGraphRequestError && error.retryable,
+        onFailedAttempt: async ({ error, retryDelay }) => {
+          if (error instanceof MetaGraphRequestError && error.retryAfterMs && error.retryAfterMs > retryDelay) {
+            await sleep(Math.min(error.retryAfterMs, 60000));
+          }
+        }
+      }
+    );
+  } catch (error) {
+    throw toMetaPublishAppError(error instanceof AbortError ? error.originalError : error, input.failureCode, input.failureMessage);
+  }
 };
 
 export const createMetaProvider = (config: MetaProviderConfig): MetaProvider => {
@@ -238,47 +390,75 @@ export const publishFacebookPagePost = async (input: {
   pageAccessToken: string;
   caption: string;
   imageUrl?: string | null;
+  attachedMediaFbid?: string | null;
   scheduledForUnix?: number | null;
 }): Promise<MetaPublishResult> => {
+  const hasAttachedPhoto = Boolean(input.attachedMediaFbid);
   const canPublishPhoto = Boolean(input.imageUrl && /^https:\/\//i.test(input.imageUrl));
   const isScheduled = typeof input.scheduledForUnix === "number" && Number.isFinite(input.scheduledForUnix);
-  const endpoint = canPublishPhoto ? "photos" : "feed";
-  const requestUrl = new URL(`https://graph.facebook.com/${input.graphApiVersion}/${input.pageId}/${endpoint}`);
-  const body = new URLSearchParams();
-  body.set("access_token", input.pageAccessToken);
-  if (canPublishPhoto && input.imageUrl) {
-    body.set("url", input.imageUrl);
-    body.set("caption", input.caption);
-    body.set("published", isScheduled ? "false" : "true");
-  } else {
-    body.set("message", input.caption);
-    if (isScheduled) body.set("published", "false");
-  }
-  if (isScheduled) {
-    body.set("scheduled_publish_time", String(Math.floor(input.scheduledForUnix!)));
-  }
-
-  const response = await fetch(requestUrl, { method: "POST", body });
-  const traceId = response.headers.get("x-fb-trace-id") ?? response.headers.get("x-fb-rev") ?? undefined;
-  const json = (await response.json()) as { id?: string; post_id?: string; error?: { code?: number; message?: string; type?: string } };
-  if (!response.ok || (!json.id && !json.post_id)) {
-    throw new AppError({
-      code: "meta_publish_failed",
-      statusCode: 502,
-      message: json.error?.message ?? "Meta Graph publish request failed",
-      userMessage: "Facebook no pudo publicar en esa pagina. Revisa permisos y vuelve a intentar.",
-      retryable: true,
-      action: "reconnect",
-      details: { metaCode: json.error?.code, metaType: json.error?.type, traceId }
-    });
-  }
+  const endpoint = hasAttachedPhoto || !canPublishPhoto ? "feed" : "photos";
+  const { json, traceId } = await postGraphForm<{ id?: string; post_id?: string }>({
+    graphApiVersion: input.graphApiVersion,
+    pageId: input.pageId,
+    endpoint,
+    missingResult: (json) => !json.id && !json.post_id,
+    failureCode: "meta_publish_failed",
+    failureMessage: "Meta Graph publish request failed",
+    body: () => {
+      const body = new URLSearchParams();
+      body.set("access_token", input.pageAccessToken);
+      if (hasAttachedPhoto) {
+        body.set("message", input.caption);
+        body.set("attached_media[0]", JSON.stringify({ media_fbid: input.attachedMediaFbid }));
+        body.set("published", isScheduled ? "false" : "true");
+      } else if (canPublishPhoto && input.imageUrl) {
+        body.set("url", input.imageUrl);
+        body.set("caption", input.caption);
+        body.set("published", isScheduled ? "false" : "true");
+      } else {
+        body.set("message", input.caption);
+        if (isScheduled) body.set("published", "false");
+      }
+      if (isScheduled) {
+        body.set("scheduled_publish_time", String(Math.floor(input.scheduledForUnix!)));
+      }
+      return body;
+    }
+  });
 
   const facebookPostId = json.post_id ?? json.id ?? "";
   const result: MetaPublishResult = {
     facebookPostId,
-    remotePostType: canPublishPhoto ? "photo" : "feed",
+    remotePostType: endpoint === "photos" ? "photo" : "feed",
     remotePostUrl: `https://www.facebook.com/${facebookPostId}`
   };
+  if (traceId) result.providerTraceId = traceId;
+  return result;
+};
+
+export const uploadUnpublishedFacebookPagePhoto = async (input: {
+  graphApiVersion: string;
+  pageId: string;
+  pageAccessToken: string;
+  imageUrl: string;
+}): Promise<MetaPhotoUploadResult> => {
+  const { json, traceId } = await postGraphForm<{ id?: string }>({
+    graphApiVersion: input.graphApiVersion,
+    pageId: input.pageId,
+    endpoint: "photos",
+    missingResult: (json) => !json.id,
+    failureCode: "meta_photo_upload_failed",
+    failureMessage: "Meta Graph unpublished photo upload failed",
+    body: () => {
+      const body = new URLSearchParams();
+      body.set("access_token", input.pageAccessToken);
+      body.set("url", input.imageUrl);
+      body.set("published", "false");
+      return body;
+    }
+  });
+
+  const result: MetaPhotoUploadResult = { fbPhotoId: json.id ?? "" };
   if (traceId) result.providerTraceId = traceId;
   return result;
 };

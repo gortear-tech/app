@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { FlashList } from "@shopify/flash-list";
 import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import {
   variantEditPromptForStyle,
@@ -6,6 +7,9 @@ import {
   type BatchDetail,
   type BatchSummary,
   type Business,
+  type GalleryMediaAsset,
+  type MediaCategory,
+  type MediaSelection,
   type GenerateBatchStyleOverride,
   type MetaPage,
   type Photo,
@@ -13,6 +17,7 @@ import {
   type Variant
 } from "@fbmaniaco/shared";
 import * as FileSystem from "expo-file-system";
+import { Image as ExpoImage } from "expo-image";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import { StatusBar } from "expo-status-bar";
@@ -56,12 +61,15 @@ import {
   getBootstrapStatus,
   getBusinessDetail,
   getStoredSessionToken,
+  ingestMenuText,
   isAuthSessionError,
   listBatches,
+  listMenuItems,
   listMetaPages,
   listScheduledPosts,
   publishScheduledPost,
   rejectVariant,
+  refreshStoredSessionToken,
   retryScheduledPost,
   selectMetaPage,
   updateBusiness,
@@ -69,14 +77,18 @@ import {
   updateVariantCaption,
   uploadPhoto
 } from "./src/api/client";
+import { loadGalleryOfflineFirst, saveGallerySelectionOfflineFirst } from "./src/data/repositories/mediaAssets";
+import { drainGalleryUploadQueue, enqueueGalleryUploads } from "./src/services/uploadQueue";
 import type { PhotoUploadFile } from "./src/api/client";
 import { getMobileConfig } from "./src/config";
+import { captureMobileException, initMobileSentry } from "./src/sentry";
 import { checkForAppUpdate, openAppUpdate, type AppUpdateInfo } from "./src/update";
 
 const queryClient = new QueryClient();
+initMobileSentry();
 WebBrowser.maybeCompleteAuthSession();
 
-type FlowStep = "home" | "styles" | "generate" | "review" | "schedule" | "calendar" | "settings";
+type FlowStep = "home" | "gallery" | "styles" | "generate" | "review" | "schedule" | "calendar" | "settings";
 type IconName = ComponentProps<typeof Ionicons>["name"];
 type PeriodDays = 7 | 14 | 30;
 type BatchFlowStep = Extract<FlowStep, "styles" | "generate" | "review" | "schedule" | "calendar">;
@@ -619,8 +631,17 @@ function BootScreen() {
   const [updateChecking, setUpdateChecking] = useState(false);
   const [newContentType, setNewContentType] = useState("");
   const [newSeoKeyword, setNewSeoKeyword] = useState("");
+  const [menuImportText, setMenuImportText] = useState("");
+  const [gallerySearch, setGallerySearch] = useState("");
+  const [galleryCategoryId, setGalleryCategoryId] = useState<string | null>(null);
+  const [galleryUnusedOnly, setGalleryUnusedOnly] = useState(false);
+  const [gallerySelectedIds, setGallerySelectedIds] = useState<string[]>([]);
+  const [galleryUploadProgress, setGalleryUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const [galleryNotice, setGalleryNotice] = useState<string | null>(null);
+  const [sessionRecoveryState, setSessionRecoveryState] = useState<"recovering" | "blocked" | null>(null);
   const updatePromptShown = useRef<string | null>(null);
   const authRecoveryAttempted = useRef(false);
+  const suppressedBatchRecovery = useRef<string | null>(null);
 
   const handleMetaReturn = useCallback((url: string | null) => {
     if (!url?.startsWith("fbmaniaco://meta-connected")) return;
@@ -634,7 +655,12 @@ function BootScreen() {
     void queryClient.invalidateQueries({ queryKey: ["business-detail"] });
   }, []);
 
-  const tokenQuery = useQuery({ queryKey: ["session-token"], queryFn: getStoredSessionToken });
+  const tokenQuery = useQuery({
+    queryKey: ["session-token"],
+    queryFn: getStoredSessionToken,
+    retry: 0,
+    staleTime: 60_000
+  });
   const token = tokenQuery.data ?? "";
   const bootstrap = useQuery({
     queryKey: ["bootstrap"],
@@ -649,19 +675,37 @@ function BootScreen() {
   useEffect(() => {
     if (!bootstrap.isError || !isAuthSessionError(bootstrap.error) || authRecoveryAttempted.current) return;
     authRecoveryAttempted.current = true;
-    void clearStoredSession().then(async () => {
-      queryClient.setQueryData(["session-token"], null);
-      await queryClient.invalidateQueries({ queryKey: ["session-token"] });
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-    });
+    setSessionRecoveryState("recovering");
+    void refreshStoredSessionToken()
+      .then(async (sessionToken) => {
+        queryClient.setQueryData(["session-token"], sessionToken);
+        if (sessionToken) {
+          setSessionRecoveryState(null);
+          await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+          return;
+        }
+        setSessionRecoveryState(null);
+        await clearStoredSession();
+        await queryClient.invalidateQueries({ queryKey: ["session-token"] });
+        await queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
+      })
+      .catch((error) => {
+        authRecoveryAttempted.current = false;
+        setSessionRecoveryState("blocked");
+        captureMobileException(error, { flow: "session_recovery" });
+      });
   }, [bootstrap.error, bootstrap.isError]);
 
   useEffect(() => {
-    if (bootstrap.isSuccess) authRecoveryAttempted.current = false;
+    if (bootstrap.isSuccess) {
+      authRecoveryAttempted.current = false;
+      setSessionRecoveryState(null);
+    }
   }, [bootstrap.isSuccess]);
 
   const selectedBusinessId = bootstrap.data?.authenticated ? bootstrap.data.selectedBusinessId : null;
   const selectedPageId = bootstrap.data?.authenticated ? bootstrap.data.selectedPageId : null;
+  const workspaceId = bootstrap.data?.authenticated ? bootstrap.data.workspace?.id ?? null : null;
 
   const pages = useQuery({
     queryKey: ["pages"],
@@ -715,6 +759,15 @@ function BootScreen() {
     () => (selectedBatchId ? (batches.data ?? []).find((batch) => batch.id === selectedBatchId) ?? null : null),
     [batches.data, selectedBatchId]
   );
+  useEffect(() => {
+    if (!bootstrap.data?.authenticated || bootstrap.data.nextStep !== "home") return;
+    if (selectedBatchId) return;
+    const recoverableBatch = (batches.data ?? []).find(isBatchWorking);
+    if (!recoverableBatch || suppressedBatchRecovery.current === recoverableBatch.id) return;
+    setSelectedBatchId(recoverableBatch.id);
+    setPendingAutoRouteBatchId(recoverableBatch.id);
+    setFlow(flowForBatchSummary(recoverableBatch));
+  }, [batches.data, bootstrap.data?.authenticated, bootstrap.data?.nextStep, selectedBatchId]);
   const batchDetail = useQuery({
     queryKey: ["batch-detail", selectedBusinessId, selectedBatch?.id],
     queryFn: async () => getBatchDetail(token, selectedBusinessId ?? "", selectedBatch?.id ?? ""),
@@ -730,6 +783,31 @@ function BootScreen() {
     enabled: Boolean(token && selectedBusinessId && bootstrap.data?.nextStep === "home"),
     refetchInterval: 15000
   });
+  const gallery = useQuery({
+    queryKey: ["gallery", workspaceId, gallerySearch, galleryCategoryId, galleryUnusedOnly],
+    queryFn: async () =>
+      loadGalleryOfflineFirst({
+        token,
+        workspaceId: workspaceId ?? "",
+        search: gallerySearch,
+        categoryId: galleryCategoryId,
+        unused: galleryUnusedOnly
+      }),
+    enabled: Boolean(token && workspaceId && bootstrap.data?.nextStep === "home" && flow === "gallery"),
+    retry: 1
+  });
+  const menuItems = useQuery({
+    queryKey: ["menu-items", workspaceId],
+    queryFn: async () => listMenuItems(token, workspaceId ?? ""),
+    enabled: Boolean(token && workspaceId && bootstrap.data?.nextStep === "home" && flow === "settings"),
+    retry: 1
+  });
+  const activeGallerySelection = gallery.data?.selections.find((selection) => selection.status === "draft") ?? null;
+
+  useEffect(() => {
+    if (!activeGallerySelection) return;
+    setGallerySelectedIds(activeGallerySelection.assetIds);
+  }, [activeGallerySelection?.id, activeGallerySelection?.updatedAt]);
 
   const checkUpdateAvailability = useCallback(
     async (options: { manual?: boolean } = {}) => {
@@ -755,9 +833,14 @@ function BootScreen() {
       if (state !== "active") return;
       void refreshAll();
       void checkUpdateAvailability();
+      if (token && workspaceId && selectedBusinessId) {
+        void drainGalleryUploadQueue({ token, workspaceId, businessId: selectedBusinessId })
+          .then(() => queryClient.invalidateQueries({ queryKey: ["gallery"] }))
+          .catch((error) => captureMobileException(error, { flow: "gallery_queue_drain" }));
+      }
     });
     return () => subscription.remove();
-  }, [checkUpdateAvailability]);
+  }, [checkUpdateAvailability, selectedBusinessId, token, workspaceId]);
 
   useEffect(() => {
     if (Platform.OS !== "android") return;
@@ -799,19 +882,6 @@ function BootScreen() {
   }, [handleMetaReturn]);
 
   useEffect(() => {
-    if (!tokenQuery.isSuccess || token) return;
-    let cancelled = false;
-    void ensureSessionForMeta()
-      .then((sessionToken) => {
-        if (!cancelled) queryClient.setQueryData(["session-token"], sessionToken);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [token, tokenQuery.isSuccess]);
-
-  useEffect(() => {
     if (selectedBatchId && batches.data && !batches.data.some((batch) => batch.id === selectedBatchId)) {
       setSelectedBatchId(null);
       setPendingAutoRouteBatchId(null);
@@ -823,7 +893,8 @@ function BootScreen() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["batches"] }),
       queryClient.invalidateQueries({ queryKey: ["batch-detail"] }),
-      queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] })
+      queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] }),
+      queryClient.invalidateQueries({ queryKey: ["gallery"] })
     ]);
   };
 
@@ -832,13 +903,13 @@ function BootScreen() {
     if (showSpinner) setManualRefreshing(true);
     try {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["session-token"] }),
         queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
         queryClient.invalidateQueries({ queryKey: ["pages"] }),
         queryClient.invalidateQueries({ queryKey: ["business-detail"] }),
         queryClient.invalidateQueries({ queryKey: ["batches"] }),
         queryClient.invalidateQueries({ queryKey: ["batch-detail"] }),
-        queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] })
+        queryClient.invalidateQueries({ queryKey: ["scheduled-posts"] }),
+        queryClient.invalidateQueries({ queryKey: ["gallery"] })
       ]);
     } finally {
       if (showSpinner) setManualRefreshing(false);
@@ -933,6 +1004,26 @@ function BootScreen() {
         queryClient.invalidateQueries({ queryKey: ["business-detail", selectedBusinessId] }),
         queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
         queryClient.invalidateQueries({ queryKey: ["batches", selectedBusinessId] })
+      ]);
+    }
+  });
+
+  const importMenu = useMutation({
+    mutationFn: async () => {
+      if (!workspaceId) throw new Error("Abre una pagina antes de importar menu.");
+      if (!menuImportText.trim()) throw new Error("Pega el menu antes de importarlo.");
+      return ingestMenuText(token, {
+        workspaceId,
+        ...(selectedBusinessId ? { businessId: selectedBusinessId } : {}),
+        text: menuImportText.trim()
+      });
+    },
+    onSuccess: async () => {
+      setMenuImportText("");
+      setSettingsNotice("Menu enviado. En unos momentos apareceran los productos y categorias sugeridas.");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["menu-items", workspaceId] }),
+        queryClient.invalidateQueries({ queryKey: ["gallery"] })
       ]);
     }
   });
@@ -1102,6 +1193,70 @@ function BootScreen() {
     onError: () => setUploadProgress(null)
   });
 
+  const uploadGalleryPhotos = useMutation({
+    mutationFn: async () => {
+      if (!workspaceId || !selectedBusinessId) throw new Error("Selecciona una pagina antes de subir a galeria.");
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) throw new Error("Necesitamos permiso para elegir fotos.");
+      const selection = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.95,
+        allowsMultipleSelection: true,
+        selectionLimit: MAX_PHOTOS_PER_PICK
+      });
+      if (selection.canceled || selection.assets.length === 0) return { queued: 0, processed: 0, remaining: 0 };
+      const prepared: PhotoUploadFile[] = [];
+      setGalleryUploadProgress({ done: 0, total: selection.assets.length });
+      setGalleryNotice(null);
+      for (const [index, asset] of selection.assets.slice(0, MAX_PHOTOS_PER_PICK).entries()) {
+        prepared.push(await preparePhotoForUpload(asset, index));
+      }
+      const result = await enqueueGalleryUploads({
+        token,
+        workspaceId,
+        businessId: selectedBusinessId,
+        files: prepared,
+        onProgress: (done, total) => setGalleryUploadProgress({ done: Math.min(done, total), total })
+      });
+      return {
+        queued: result.jobs.length,
+        processed: result.result.processed,
+        remaining: result.result.remaining
+      };
+    },
+    onSuccess: async (result) => {
+      setGalleryUploadProgress(null);
+      setGalleryNotice(
+        result.remaining > 0
+          ? `${result.remaining} fotos quedaron en cola y se subiran al volver internet.`
+          : result.queued > 0
+            ? `Galeria actualizada con ${result.processed} foto${result.processed === 1 ? "" : "s"}.`
+            : null
+      );
+      await queryClient.invalidateQueries({ queryKey: ["gallery"] });
+    },
+    onError: (error) => {
+      setGalleryUploadProgress(null);
+      captureMobileException(error, { flow: "gallery_upload" });
+    }
+  });
+
+  const saveGallerySelection = useMutation({
+    mutationFn: async (assetIds: string[]) => {
+      if (!workspaceId) throw new Error("No encontramos tu workspace.");
+      return saveGallerySelectionOfflineFirst({
+        token,
+        workspaceId,
+        selection: activeGallerySelection,
+        assetIds
+      });
+    },
+    onSuccess: async (selection) => {
+      setGallerySelectedIds(selection.assetIds);
+      await queryClient.invalidateQueries({ queryKey: ["gallery"] });
+    }
+  });
+
   const generateVariants = useMutation({
     mutationFn: async (input: {
       businessId: string;
@@ -1269,13 +1424,14 @@ function BootScreen() {
   ]);
 
   const leaveBatch = useCallback(() => {
+    if (selectedBatchId) suppressedBatchRecovery.current = selectedBatchId;
     setSelectedBatchId(null);
     setStylePhotoId(null);
     setDetailPhotoId(null);
     setSelectedDay(null);
     setPendingAutoRouteBatchId(null);
     setFlow(selectedPage ? "styles" : "home");
-  }, [selectedPage]);
+  }, [selectedBatchId, selectedPage]);
 
   const confirmDeleteBatch = (batch: BatchSummary) => {
     NativeAlert.alert(
@@ -1342,6 +1498,7 @@ function BootScreen() {
     businessDetail.error ??
     selectPage.error ??
     saveBusinessSettings.error ??
+    importMenu.error ??
     batches.error ??
     batchDetail.error ??
     scheduledPosts.error ??
@@ -1369,6 +1526,7 @@ function BootScreen() {
   };
 
   const openBatch = (batch: BatchSummary) => {
+    suppressedBatchRecovery.current = null;
     setStylePhotoId(null);
     setDetailPhotoId(null);
     setSelectedDay(null);
@@ -1459,6 +1617,10 @@ function BootScreen() {
         return true;
       }
     }
+    if (flow === "gallery" && selectedPage) {
+      setFlow("styles");
+      return true;
+    }
     if (selectedPage && flow === "styles") {
       showPageDirectory();
       return true;
@@ -1497,6 +1659,7 @@ function BootScreen() {
     if (!selectedPage) return null;
     const actions: PageAction[] = [
       { label: "Paginas", icon: "albums-outline", onPress: showPageDirectory },
+      { label: "Galeria", icon: "grid-outline", onPress: () => setFlow("gallery") },
       ...(options.includeUpload
         ? [
             {
@@ -1926,6 +2089,38 @@ function BootScreen() {
     </Screen>
   );
 
+  const toggleGalleryAsset = (assetId: string) => {
+    const next = gallerySelectedIds.includes(assetId)
+      ? gallerySelectedIds.filter((id) => id !== assetId)
+      : [...gallerySelectedIds, assetId];
+    setGallerySelectedIds(next);
+    saveGallerySelection.mutate(next);
+  };
+
+  const renderGallery = () => (
+    <Screen>
+      {renderPageChrome()}
+      {galleryNotice ? <Alert tone="info" message={galleryNotice} /> : null}
+      {gallery.data?.source === "cache" ? <Alert tone="warning" message="Mostrando galeria guardada en este telefono." /> : null}
+      <GalleryScreen
+        assets={gallery.data?.assets ?? []}
+        categories={gallery.data?.categories ?? []}
+        selectedIds={gallerySelectedIds}
+        activeCategoryId={galleryCategoryId}
+        unusedOnly={galleryUnusedOnly}
+        search={gallerySearch}
+        loading={gallery.isLoading || uploadGalleryPhotos.isPending}
+        uploadProgress={galleryUploadProgress}
+        onSearchChange={setGallerySearch}
+        onCategoryChange={setGalleryCategoryId}
+        onUnusedChange={setGalleryUnusedOnly}
+        onToggleAsset={toggleGalleryAsset}
+        onUpload={() => uploadGalleryPhotos.mutate()}
+        onRefresh={() => void queryClient.invalidateQueries({ queryKey: ["gallery"] })}
+      />
+    </Screen>
+  );
+
   const renderSettings = () => {
     const draft = settingsDraft;
     const bootstrapFacebookStatus = bootstrap.data?.authenticated ? bootstrap.data.facebookTokenStatus : null;
@@ -2027,6 +2222,39 @@ function BootScreen() {
               onPress={() => connect.mutate()}
             />
             <Button label="Cambiar pagina" icon="albums-outline" variant="secondary" onPress={showPageDirectory} />
+          </View>
+        </Panel>
+
+        <Panel title="Menu importado" eyebrow="Categorias sugeridas">
+          <Text style={styles.muted}>
+            Pega texto del menu para extraer productos, palabras clave y sugerencias de categoria para la galeria.
+          </Text>
+          <TextInput
+            value={menuImportText}
+            onChangeText={setMenuImportText}
+            multiline
+            placeholder="Ej. Sushi rolls\nCalifornia $120\nBebidas\nTe helado $35"
+            placeholderTextColor={palette.muted}
+            style={[styles.settingInput, styles.settingTextArea]}
+          />
+          <Button
+            label={importMenu.isPending ? "Importando..." : "Importar menu"}
+            icon="restaurant-outline"
+            variant="secondary"
+            disabled={importMenu.isPending || !menuImportText.trim()}
+            onPress={() => importMenu.mutate()}
+          />
+          <View style={styles.settingsActionRow}>
+            {menuItems.isLoading ? <ActivityIndicator color={palette.blue} /> : null}
+            {(menuItems.data ?? []).slice(0, 8).map((item) => (
+              <View key={item.id} style={styles.menuItemRow}>
+                <Text style={styles.rowTitle}>{item.name}</Text>
+                <Text style={styles.muted}>
+                  {item.priceCents ? `$${(item.priceCents / 100).toFixed(0)}` : "sin precio"} - {item.keywords.slice(0, 4).join(", ") || "sin keywords"}
+                </Text>
+              </View>
+            ))}
+            {!menuItems.isLoading && (menuItems.data ?? []).length === 0 ? <Pill label="sin menu importado" tone="neutral" /> : null}
           </View>
         </Panel>
 
@@ -2265,10 +2493,32 @@ function BootScreen() {
   };
 
   const renderCurrent = () => {
-    if (tokenQuery.isLoading || (Boolean(token) && bootstrap.isLoading)) {
+    if (tokenQuery.isLoading) {
       return (
         <CenteredScreen>
           <ActivityIndicator color={palette.blue} />
+        </CenteredScreen>
+      );
+    }
+    if (token && bootstrap.isError && (sessionRecoveryState || !isAuthSessionError(bootstrap.error))) {
+      return (
+        <CenteredScreen>
+          <Panel title={sessionRecoveryState === "recovering" ? "Recuperando tu sesion" : "No pudimos actualizar la sesion"}>
+            <Text style={styles.muted}>Tu trabajo sigue guardado. Revisa internet e intenta de nuevo.</Text>
+            {sessionRecoveryState === "recovering" ? (
+              <ActivityIndicator color={palette.blue} />
+            ) : (
+              <Button
+                label="Reintentar"
+                icon="refresh-outline"
+                onPress={() => {
+                  authRecoveryAttempted.current = false;
+                  setSessionRecoveryState(null);
+                  void refreshAll({ showSpinner: true });
+                }}
+              />
+            )}
+          </Panel>
         </CenteredScreen>
       );
     }
@@ -2277,6 +2527,7 @@ function BootScreen() {
     }
     if (bootstrap.data.nextStep === "select_page") return renderPageDirectory();
     if (flow === "home") return renderPageDirectory();
+    if (flow === "gallery") return renderGallery();
     if (flow === "styles" && !selectedBatch) return renderPageWorkspace();
     if (flow === "styles") return renderStyles();
     if (flow === "generate") return renderGenerate();
@@ -3020,6 +3271,119 @@ function SchedulePreview({ periodDays, acceptedCount }: { periodDays: PeriodDays
   );
 }
 
+function GalleryScreen({
+  assets,
+  categories,
+  selectedIds,
+  activeCategoryId,
+  unusedOnly,
+  search,
+  loading,
+  uploadProgress,
+  onSearchChange,
+  onCategoryChange,
+  onUnusedChange,
+  onToggleAsset,
+  onUpload,
+  onRefresh
+}: {
+  assets: GalleryMediaAsset[];
+  categories: MediaCategory[];
+  selectedIds: string[];
+  activeCategoryId: string | null;
+  unusedOnly: boolean;
+  search: string;
+  loading: boolean;
+  uploadProgress: { done: number; total: number } | null;
+  onSearchChange: (value: string) => void;
+  onCategoryChange: (value: string | null) => void;
+  onUnusedChange: (value: boolean) => void;
+  onToggleAsset: (assetId: string) => void;
+  onUpload: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <View style={styles.galleryShell}>
+      <View style={styles.galleryToolbar}>
+        <View style={styles.gallerySearchBox}>
+          <Ionicons name="search-outline" size={16} color={palette.muted} />
+          <TextInput
+            value={search}
+            onChangeText={onSearchChange}
+            placeholder="Buscar fotos"
+            placeholderTextColor={palette.muted}
+            style={styles.gallerySearchInput}
+          />
+        </View>
+        <IconButton icon="refresh-outline" label="Actualizar galeria" disabled={loading} onPress={onRefresh} />
+      </View>
+      <View style={styles.galleryFilterRow}>
+        <SelectableChip label="Todas" selected={!activeCategoryId} onPress={() => onCategoryChange(null)} />
+        {categories.slice(0, 5).map((category) => (
+          <SelectableChip
+            key={category.id}
+            label={category.name}
+            selected={activeCategoryId === category.id}
+            onPress={() => onCategoryChange(category.id)}
+          />
+        ))}
+        <SelectableChip label="No usadas" selected={unusedOnly} onPress={() => onUnusedChange(!unusedOnly)} />
+      </View>
+      <View style={styles.galleryStatusRow}>
+        <Text style={styles.muted}>{assets.length} fotos - {selectedIds.length} seleccionadas</Text>
+        <Button label={loading ? "Trabajando..." : "Subir a galeria"} icon="cloud-upload-outline" variant="secondary" disabled={loading} onPress={onUpload} />
+      </View>
+      {uploadProgress ? (
+        <View style={styles.galleryProgress}>
+          <Text style={styles.muted}>Subiendo {uploadProgress.done} de {uploadProgress.total}</Text>
+          <ProgressBar progress={pct(uploadProgress.done, uploadProgress.total)} />
+        </View>
+      ) : null}
+      {loading && assets.length === 0 ? <View style={styles.centeredBlock}><ActivityIndicator color={palette.blue} /></View> : null}
+      {!loading && assets.length === 0 ? <EmptyState title="Galeria vacia" body="Sube fotos una vez y reutilizalas despues." /> : null}
+      <View style={styles.galleryListFrame}>
+        <FlashList
+          data={assets}
+          numColumns={3}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => (
+            <GalleryAssetTile
+              asset={item}
+              selected={selectedIds.includes(item.id)}
+              onPress={() => onToggleAsset(item.id)}
+            />
+          )}
+        />
+      </View>
+    </View>
+  );
+}
+
+function GalleryAssetTile({ asset, selected, onPress }: { asset: GalleryMediaAsset; selected: boolean; onPress: () => void }) {
+  const urls = asset as GalleryMediaAsset & { thumbnailUrl?: string | null; previewUrl?: string | null };
+  const imageUri = urls.thumbnailUrl ?? urls.previewUrl ?? null;
+  return (
+    <Pressable style={[styles.galleryTile, selected ? styles.galleryTileSelected : null]} onPress={onPress}>
+      <View style={styles.galleryImageFrame}>
+        {imageUri ? (
+          <ExpoImage source={{ uri: imageUri }} style={styles.galleryImage} contentFit="cover" cachePolicy="memory-disk" recyclingKey={asset.id} />
+        ) : (
+          <View style={styles.galleryImageFallback}>
+            <Ionicons name={asset.status === "error" ? "warning-outline" : "image-outline"} size={22} color={asset.status === "error" ? palette.warning : palette.muted} />
+          </View>
+        )}
+        {selected ? (
+          <View style={styles.gallerySelectedBadge}>
+            <Ionicons name="checkmark" size={13} color={palette.ink} />
+          </View>
+        ) : null}
+      </View>
+      <Text style={styles.galleryTileTitle} numberOfLines={1}>{asset.displayName ?? asset.originalName ?? "Foto"}</Text>
+      <Text style={styles.galleryTileMeta} numberOfLines={1}>{asset.status === "ready" ? `${asset.usageCount} usos` : batchStatusText(asset.status)}</Text>
+    </Pressable>
+  );
+}
+
 function PageDashboardCalendar({
   posts,
   selectedDay,
@@ -3274,6 +3638,11 @@ function ScheduledPostRow({
         ) : (
           <Text style={styles.muted}>Pendiente de envio.</Text>
         )}
+        {post.facebookPhotoId ? (
+          <Text style={styles.muted}>
+            Foto Meta: {post.facebookPhotoId}{post.facebookPhotoReused ? " · reutilizada" : " · nueva"}
+          </Text>
+        ) : null}
         <Text style={styles.captionPreview} numberOfLines={3}>{post.caption ?? "Sin caption"}</Text>
         <View style={styles.compactActions}>
           <MiniButton label="+1h" onPress={() => onShift(0, 1)} disabled={busy} />
@@ -3577,6 +3946,7 @@ const styles = StyleSheet.create({
   settingsFieldHeader: { gap: 2 },
   settingsLabel: { color: palette.text, fontSize: 14, fontWeight: "900" },
   settingsBody: { color: palette.muted, fontSize: 12, lineHeight: 17, fontWeight: "600" },
+  menuItemRow: { gap: 3, padding: 10, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.surface },
   settingInput: {
     minHeight: 44,
     color: palette.text,
@@ -3700,6 +4070,43 @@ const styles = StyleSheet.create({
   periodNumber: { color: palette.text, fontSize: 24, fontWeight: "900" },
   periodNumberActive: { color: palette.ink },
   previewBox: { gap: 5, padding: 12, borderRadius: 8, backgroundColor: palette.surface },
+  galleryShell: { flex: 1, gap: 10 },
+  galleryToolbar: { flexDirection: "row", alignItems: "center", gap: 8 },
+  gallerySearchBox: {
+    flex: 1,
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 12,
+    backgroundColor: palette.surface
+  },
+  gallerySearchInput: { flex: 1, color: palette.text, fontSize: 14, fontWeight: "800" },
+  galleryFilterRow: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  galleryStatusRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  galleryProgress: { gap: 6, padding: 10, borderRadius: 8, backgroundColor: palette.surface },
+  galleryListFrame: { minHeight: 380, flex: 1 },
+  galleryTile: { flex: 1, margin: 4, gap: 5, padding: 6, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
+  galleryTileSelected: { borderColor: palette.green, backgroundColor: "#19251f" },
+  galleryImageFrame: { aspectRatio: 1, overflow: "hidden", borderRadius: 8, backgroundColor: palette.mediaBg },
+  galleryImage: { width: "100%", height: "100%" },
+  galleryImageFallback: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: palette.mediaBg },
+  gallerySelectedBadge: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    width: 22,
+    height: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+    backgroundColor: palette.green
+  },
+  galleryTileTitle: { color: palette.text, fontSize: 11, fontWeight: "900" },
+  galleryTileMeta: { color: palette.muted, fontSize: 10, fontWeight: "800" },
   pageCalendar: { flex: 1, justifyContent: "space-between", gap: 6, padding: 9, borderRadius: 8, borderWidth: 1, borderColor: palette.border, backgroundColor: palette.panel },
   pageCalendarHeader: { minHeight: 34, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
   pageCalendarTitle: { color: palette.text, fontSize: 17, fontWeight: "900", textTransform: "capitalize" },

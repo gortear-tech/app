@@ -17,6 +17,7 @@
     "dev:api": "node scripts/run-pnpm.mjs --filter @fbmaniaco/api dev",
     "dev:worker": "node scripts/run-pnpm.mjs --filter @fbmaniaco/worker dev",
     "dev:mobile": "node scripts/run-pnpm.mjs --filter @fbmaniaco/mobile start",
+    "dev:web": "node scripts/run-pnpm.mjs --filter @fbmaniaco/web dev",
     "smoke": "node scripts/run-pnpm.mjs --filter @fbmaniaco/api smoke && node scripts/run-pnpm.mjs --filter @fbmaniaco/worker smoke"
   },
   "devDependencies": {
@@ -24,5 +25,14 @@
     "prettier": "^3.4.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "overrides": {
+      "@xmldom/xmldom": "^0.8.13",
+      "postcss": "^8.5.10",
+      "tar": "^7.5.11",
+      "uuid": "^11.1.1",
+      "ws": "^8.20.1"
+    }
   }
 }

@@ -1,15 +1,19 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { DataStore, StoredJob } from "@fbmaniaco/api/dist/db/index.js";
 import {
   CaptionGenerationProvider,
   createCaptionGenerationProvider,
   createImageEditProvider,
+  createMenuParseProvider,
   createVisionAnalysisProvider,
   ImageEditProvider,
+  MenuParseProvider,
   VisionAnalysisProvider
 } from "@fbmaniaco/providers";
 import { createClient } from "@supabase/supabase-js";
 import { variantEditPromptForStyle, variantStylePresetForIndex, type AssignedStyle, type VisionAnalysis } from "@fbmaniaco/shared";
+import { computeDHash64FromBuffer } from "./phash.js";
 
 export type WorkerResult = {
   processed: boolean;
@@ -23,6 +27,12 @@ const envFlag = (name: string, fallback: boolean) => {
 };
 
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
+const loadSharp = async () => (await import("sharp")).default;
+const mediaAssetPaths = (input: { workspaceId: string; assetId: string }) => ({
+  thumbPath: `${input.workspaceId}/assets/${input.assetId}/thumb.webp`,
+  previewPath: `${input.workspaceId}/assets/${input.assetId}/preview.webp`,
+  fullPath: `${input.workspaceId}/assets/${input.assetId}/full.jpg`
+});
 const backgroundPromptForVariant = (variantIndex: number, style?: AssignedStyle) => {
   const background = style?.styleName.trim() || variantStylePresetForIndex(variantIndex).styleName;
   return variantEditPromptForStyle(background, style?.intensity ?? "media");
@@ -164,12 +174,122 @@ const storeGeneratedVariantImage = async (input: {
   };
 };
 
+const processGalleryMediaAsset = async (input: { store: DataStore; assetId: string }) => {
+  const asset = await input.store.getMediaAsset({ assetId: input.assetId });
+  if (!asset) throw new Error(`Media asset not found: ${input.assetId}`);
+  if (asset.status === "ready" && asset.fullPath) {
+    return {
+      id: asset.id,
+      status: "ready",
+      width: asset.width ?? 0,
+      height: asset.height ?? 0,
+      bytes: asset.bytes ?? asset.fileSize,
+      thumbPath: asset.thumbPath ?? mediaAssetPaths({ workspaceId: asset.workspaceId, assetId: asset.id }).thumbPath,
+      previewPath: asset.previewPath ?? mediaAssetPaths({ workspaceId: asset.workspaceId, assetId: asset.id }).previewPath,
+      fullPath: asset.fullPath
+    };
+  }
+  const hasSupabaseStorage = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE);
+  const supabase = hasSupabaseStorage
+    ? createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE!, {
+        auth: { persistSession: false, autoRefreshToken: false }
+      })
+    : null;
+  const raw = supabase
+    ? await (async () => {
+        const { data, error } = await supabase.storage.from(asset.bucket).download(asset.storageKey);
+        if (error || !data) {
+          throw new Error(`Could not download raw media asset: ${error?.message ?? "unknown storage error"}`);
+        }
+        return Buffer.from(await data.arrayBuffer());
+      })()
+    : asset.storageKey.startsWith("file://")
+      ? await readFile(new URL(asset.storageKey))
+      : null;
+  const paths = mediaAssetPaths({ workspaceId: asset.workspaceId, assetId: asset.id });
+  if (!raw) {
+    return input.store.completeMediaAssetProcessing({
+      assetId: asset.id,
+      width: asset.width ?? 1,
+      height: asset.height ?? 1,
+      bytes: asset.bytes ?? asset.fileSize,
+      thumbPath: paths.thumbPath,
+      previewPath: paths.previewPath,
+      fullPath: paths.fullPath
+    });
+  }
+  if (asset.sha256) {
+    const actualHash = createHash("sha256").update(raw).digest("hex");
+    if (actualHash !== asset.sha256) {
+      await input.store.failMediaAssetProcessing({ assetId: asset.id, errorReason: "HASH_MISMATCH" });
+      throw new Error("HASH_MISMATCH");
+    }
+  }
+  const sharp = await loadSharp();
+  const image = sharp(raw, { failOn: "none" }).rotate();
+  const metadata = await image.metadata();
+  const width = metadata.width ?? asset.width ?? 0;
+  const height = metadata.height ?? asset.height ?? 0;
+  const phash = await computeDHash64FromBuffer(raw);
+  const thumb = await sharp(raw, { failOn: "none" })
+    .rotate()
+    .resize({ width: 256, withoutEnlargement: true })
+    .webp({ quality: 75 })
+    .toBuffer();
+  const preview = await sharp(raw, { failOn: "none" })
+    .rotate()
+    .resize({ width: 1024, withoutEnlargement: true })
+    .webp({ quality: 82 })
+    .toBuffer();
+  const full = await sharp(raw, { failOn: "none" })
+    .rotate()
+    .resize({ width: 1800, withoutEnlargement: true })
+    .jpeg({ quality: 90, mozjpeg: true })
+    .toBuffer();
+  const uploads = [
+    { path: paths.thumbPath, bytes: thumb, contentType: "image/webp" },
+    { path: paths.previewPath, bytes: preview, contentType: "image/webp" },
+    { path: paths.fullPath, bytes: full, contentType: "image/jpeg" }
+  ];
+  if (!supabase) {
+    return input.store.completeMediaAssetProcessing({
+      assetId: asset.id,
+      width,
+      height,
+      bytes: full.byteLength,
+      thumbPath: paths.thumbPath,
+      previewPath: paths.previewPath,
+      fullPath: paths.fullPath,
+      phash
+    });
+  }
+  for (const upload of uploads) {
+    const uploaded = await supabase.storage.from(asset.bucket).upload(upload.path, upload.bytes, {
+      contentType: upload.contentType,
+      upsert: true
+    });
+    if (uploaded.error) throw new Error(`Could not upload processed media asset: ${uploaded.error.message}`);
+  }
+  await supabase.storage.from(asset.bucket).remove([asset.storageKey]).catch(() => undefined);
+  return input.store.completeMediaAssetProcessing({
+    assetId: asset.id,
+    width,
+    height,
+    bytes: full.byteLength,
+    thumbPath: paths.thumbPath,
+    previewPath: paths.previewPath,
+    fullPath: paths.fullPath,
+    phash
+  });
+};
+
 export const processOneJob = async (input: {
   store: DataStore;
   workerId: string;
   visionProvider?: VisionAnalysisProvider;
   captionProvider?: CaptionGenerationProvider;
   imageEditProvider?: ImageEditProvider;
+  menuParseProvider?: MenuParseProvider;
 }): Promise<WorkerResult> => {
   const providerConfig: Parameters<typeof createVisionAnalysisProvider>[0] = {
     timeoutMs: Number(process.env.OPENAI_IMAGE_TIMEOUT_MS ?? process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000")
@@ -181,10 +301,103 @@ export const processOneJob = async (input: {
   if (process.env.OPENAI_IMAGE_MODEL) providerConfig.imageEditModel = process.env.OPENAI_IMAGE_MODEL;
   const visionProvider = input.visionProvider ?? createVisionAnalysisProvider(providerConfig);
   const captionProvider = input.captionProvider ?? createCaptionGenerationProvider(providerConfig);
+  const menuParseProvider = input.menuParseProvider ?? createMenuParseProvider(providerConfig);
   const job = await input.store.claimDueJob(input.workerId);
   if (!job) return { processed: false };
 
   try {
+    if (job.type === "media:process") {
+      const assetId = typeof job.payload.assetId === "string" ? job.payload.assetId : undefined;
+      if (!assetId) throw new Error("media:process job is missing assetId");
+      try {
+        const asset = await processGalleryMediaAsset({ store: input.store, assetId });
+        const completed = await input.store.completeJob({
+          jobId: job.id,
+          result: {
+            ok: true,
+            assetId: asset.id,
+            status: asset.status,
+            thumbPath: asset.thumbPath,
+            previewPath: asset.previewPath,
+            fullPath: asset.fullPath,
+            processedBy: input.workerId,
+            processedAt: new Date().toISOString()
+          }
+        });
+        return { processed: true, job: completed };
+      } catch (error) {
+        await input.store.failMediaAssetProcessing({
+          assetId,
+          errorReason: error instanceof Error ? error.message : "media_process_failed"
+        });
+        throw error;
+      }
+    }
+
+    if (job.type === "menu:parse") {
+      const sourceType = job.payload.sourceType === "text" || job.payload.sourceType === "pdf" || job.payload.sourceType === "image"
+        ? job.payload.sourceType
+        : null;
+      if (!sourceType) throw new Error("menu:parse job is missing sourceType");
+      const operationKey = job.operationKey ?? `menu_parse:${job.id}`;
+      await input.store.upsertExternalOperation({
+        operationKey,
+        workspaceId: job.workspaceId,
+        jobId: job.id,
+        provider: menuParseProvider.mode === "responses" ? "openai" : "mock",
+        operation: "menu_parse",
+        status: "started"
+      });
+      try {
+        const parseInput: Parameters<MenuParseProvider["parse"]>[0] = {
+          sourceType,
+          requestId: typeof job.payload.requestId === "string" ? job.payload.requestId : job.id,
+          operationKey
+        };
+        if (typeof job.payload.text === "string") parseInput.text = job.payload.text;
+        if (typeof job.payload.fileName === "string") parseInput.fileName = job.payload.fileName;
+        if (typeof job.payload.mime === "string") parseInput.mime = job.payload.mime;
+        if (typeof job.payload.dataBase64 === "string") parseInput.dataBase64 = job.payload.dataBase64;
+        const parsed = await menuParseProvider.parse(parseInput);
+        const saved = await input.store.completeMenuIngest({
+          jobId: job.id,
+          workspaceId: job.workspaceId,
+          result: parsed.result
+        });
+        const completed = await input.store.completeJob({
+          jobId: job.id,
+          result: {
+            ok: true,
+            itemsCount: saved.items.length,
+            categoriesCount: saved.categories.length,
+            categorizedAssetsCount: saved.categorizedAssets.length,
+            model: parsed.model,
+            processedBy: input.workerId,
+            processedAt: new Date().toISOString()
+          }
+        });
+        await input.store.upsertExternalOperation({
+          operationKey,
+          workspaceId: job.workspaceId,
+          jobId: job.id,
+          provider: menuParseProvider.mode === "responses" ? "openai" : "mock",
+          operation: "menu_parse",
+          status: "succeeded"
+        });
+        return { processed: true, job: completed };
+      } catch (error) {
+        await input.store.upsertExternalOperation({
+          operationKey,
+          workspaceId: job.workspaceId,
+          jobId: job.id,
+          provider: menuParseProvider.mode === "responses" ? "openai" : "mock",
+          operation: "menu_parse",
+          status: "failed"
+        });
+        throw error;
+      }
+    }
+
     if (job.type === "analyze_photo") {
       if (!envFlag("FEATURE_OPENAI_VISION", true)) {
         throw new Error("OpenAI vision is disabled by feature flag");

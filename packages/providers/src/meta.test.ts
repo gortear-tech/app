@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMetaProvider, loadMetaPagesFromUserAccessToken, publishFacebookPagePost } from "./meta.js";
+import {
+  createMetaProvider,
+  loadMetaPagesFromUserAccessToken,
+  publishFacebookPagePost,
+  uploadUnpublishedFacebookPagePhoto
+} from "./meta.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -105,5 +110,66 @@ describe("GraphMetaProvider authorization URL", () => {
     expect(body).toContain("published=false");
     expect(body).toContain("scheduled_publish_time=1779500000");
     expect(body).toContain("url=https%3A%2F%2Fcdn.example.com%2Fphoto.jpg");
+  });
+
+  it("uploads unpublished photos and creates feed posts with attached_media", async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: URL | string, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ""));
+        if (bodies.length === 1) return new Response(JSON.stringify({ id: "photo-1" }), { status: 200 });
+        return new Response(JSON.stringify({ id: "page_123" }), { status: 200 });
+      })
+    );
+
+    const upload = await uploadUnpublishedFacebookPagePhoto({
+      graphApiVersion: "v23.0",
+      pageId: "page-1",
+      pageAccessToken: "page-token",
+      imageUrl: "https://cdn.example.com/photo.jpg"
+    });
+    const post = await publishFacebookPagePost({
+      graphApiVersion: "v23.0",
+      pageId: "page-1",
+      pageAccessToken: "page-token",
+      caption: "Texto",
+      attachedMediaFbid: upload.fbPhotoId,
+      scheduledForUnix: 1779500000
+    });
+
+    expect(upload.fbPhotoId).toBe("photo-1");
+    expect(post.facebookPostId).toBe("page_123");
+    expect(decodeURIComponent(bodies[0] ?? "")).toContain("published=false");
+    expect(decodeURIComponent(bodies[0] ?? "")).toContain("url=https://cdn.example.com/photo.jpg");
+    expect(decodeURIComponent(bodies[1] ?? "")).toContain('attached_media[0]={"media_fbid":"photo-1"}');
+    expect(decodeURIComponent(bodies[1] ?? "")).toContain("scheduled_publish_time=1779500000");
+  });
+
+  it("retries transient Graph rate-limit responses", async () => {
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return new Response(JSON.stringify({ error: { code: 613, message: "Calls to this api have exceeded rate limit" } }), {
+            status: 429
+          });
+        }
+        return new Response(JSON.stringify({ id: "page_456" }), { status: 200 });
+      })
+    );
+
+    const result = await publishFacebookPagePost({
+      graphApiVersion: "v23.0",
+      pageId: "page-1",
+      pageAccessToken: "page-token",
+      caption: "Texto",
+      attachedMediaFbid: "photo-1"
+    });
+
+    expect(attempts).toBe(2);
+    expect(result.facebookPostId).toBe("page_456");
   });
 });

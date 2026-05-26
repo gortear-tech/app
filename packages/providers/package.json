@@ -12,7 +12,8 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@fbmaniaco/shared": "workspace:*"
+    "@fbmaniaco/shared": "workspace:*",
+    "p-retry": "^8.0.0"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

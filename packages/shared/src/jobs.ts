@@ -5,6 +5,8 @@ export const JobType = Type.Union([
   Type.Literal("analyze_photo"),
   Type.Literal("generate_batch"),
   Type.Literal("generate_variant"),
+  Type.Literal("media:process"),
+  Type.Literal("menu:parse"),
   Type.Literal("schedule_posts"),
   Type.Literal("publish_post")
 ]);

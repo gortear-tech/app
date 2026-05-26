@@ -25,6 +25,8 @@ export const ScheduledPostSchema = Type.Object({
   pageId: Type.String(),
   scheduledFor: Type.String(),
   facebookPostId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  facebookPhotoId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  facebookPhotoReused: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
   remotePostType: Type.Optional(Type.Union([
     Type.Literal("photo"),
     Type.Literal("feed"),
@@ -97,22 +99,13 @@ export type SchedulePeriodDays = 7 | 14 | 30;
 
 export const DEFAULT_SCHEDULE_TIME_ZONE = "America/Mexico_City";
 
-const preferredScheduleSlots: Array<readonly [number, number]> = [
-  [9, 0],
-  [13, 0],
-  [18, 0],
+const anchorCommercialSlots: Array<readonly [number, number]> = [[13, 0]];
+
+const spacedCommercialSlots: Array<readonly [number, number]> = [
   [10, 30],
-  [20, 0],
-  [8, 30],
-  [12, 0],
-  [15, 30],
-  [17, 0],
-  [19, 30],
-  [7, 30],
-  [11, 0],
-  [14, 0],
   [16, 30],
-  [21, 0]
+  [19, 30],
+  [8, 30]
 ];
 
 const scheduleSlotKeyOfParts = (hour: number, minute: number) => `${hour}:${minute}`;
@@ -126,8 +119,17 @@ const buildScheduleTimeSlots = () => {
     seen.add(key);
     slots.push([hour, minute]);
   };
-  preferredScheduleSlots.forEach(([hour, minute]) => add(hour, minute));
-  for (let hour = 6; hour <= 22; hour += 1) {
+
+  anchorCommercialSlots.forEach(([hour, minute]) => add(hour, minute));
+  spacedCommercialSlots.forEach(([hour, minute]) => add(hour, minute));
+
+  for (let hour = 9; hour <= 20; hour += 1) {
+    for (const minute of [0, 30]) add(hour, minute);
+  }
+  for (let hour = 8; hour <= 20; hour += 1) {
+    for (const minute of [0, 15, 30, 45]) add(hour, minute);
+  }
+  for (const hour of [6, 7, 21, 22]) {
     for (const minute of [0, 15, 30, 45]) add(hour, minute);
   }
   return slots;
@@ -210,19 +212,16 @@ export const allocateScheduleSlots = (input: {
       .filter(Boolean)
   );
   const selected: string[] = [];
-  const maxAttempts = input.periodDays * SCHEDULE_TIME_SLOTS.length * 2;
-
-  for (let sequence = 0; selected.length < count && sequence < maxAttempts; sequence += 1) {
-    const dayOffset = (sequence % input.periodDays) + 1;
-    const wave = Math.floor(sequence / input.periodDays);
-    const timeIndex = (wave * input.periodDays + (dayOffset - 1)) % SCHEDULE_TIME_SLOTS.length;
-    const [hour, minute] = SCHEDULE_TIME_SLOTS[timeIndex]!;
-    const targetDate = calendarDateAfter(base, dayOffset, timeZone);
-    const scheduledFor = zonedTimeToUtcIso({ ...targetDate, hour, minute, timeZone });
-    const key = scheduledPostSlotKey(scheduledFor);
-    if (used.has(key)) continue;
-    used.add(key);
-    selected.push(scheduledFor);
+  for (const [hour, minute] of SCHEDULE_TIME_SLOTS) {
+    for (let dayOffset = 1; dayOffset <= input.periodDays && selected.length < count; dayOffset += 1) {
+      const targetDate = calendarDateAfter(base, dayOffset, timeZone);
+      const scheduledFor = zonedTimeToUtcIso({ ...targetDate, hour, minute, timeZone });
+      const key = scheduledPostSlotKey(scheduledFor);
+      if (used.has(key)) continue;
+      used.add(key);
+      selected.push(scheduledFor);
+    }
+    if (selected.length >= count) break;
   }
 
   return selected;

@@ -1,5 +1,25 @@
 services:
   - type: web
+    name: fbmaniaco-web
+    runtime: static
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @fbmaniaco/web build
+    staticPublishPath: apps/web/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: VITE_POWERSYNC_URL
+        sync: false
+      - key: VITE_SENTRY_DSN_WEB
+        sync: false
+  - type: web
     name: fbmaniaco-api
     runtime: node
     plan: starter
@@ -32,6 +52,8 @@ services:
       - key: META_APP_ID
         sync: false
       - key: META_APP_SECRET
+        sync: false
+      - key: FB_TOKEN_KEK
         sync: false
       - key: META_REDIRECT_URI
         sync: false
@@ -84,6 +106,8 @@ services:
         sync: false
       - key: META_GRAPH_API_VERSION
         value: v23.0
+      - key: FB_TOKEN_KEK
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_VISION_MODEL

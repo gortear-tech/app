@@ -14,7 +14,16 @@ import {
   User,
   Variant,
   GenerateBatchStyleOverride,
+  GalleryMediaAsset,
   AssignedStyle,
+  FacebookPhotoReuseStats,
+  MediaAssetFbUpload,
+  MediaAssetUsage,
+  MediaCategory,
+  MenuItem,
+  MenuParseResult,
+  MediaSelection,
+  SimilarMediaAsset,
   VisionAnalysis,
   Workspace,
   WorkspaceMember,
@@ -147,7 +156,7 @@ export type AiRun = {
 export type MediaAsset = {
   id: string;
   workspaceId: string;
-  businessId: string;
+  businessId?: string;
   batchId?: string;
   photoId?: string;
   variantId?: string;
@@ -157,7 +166,25 @@ export type MediaAsset = {
   mimeType: string;
   fileSize: number;
   isPublic: boolean;
+  sha256?: string | null;
+  phash?: string | null;
+  displayName?: string | null;
+  originalName?: string | null;
+  categoryId?: string | null;
+  width?: number | null;
+  height?: number | null;
+  bytes?: number | null;
+  thumbPath?: string | null;
+  previewPath?: string | null;
+  fullPath?: string | null;
+  usageCount?: number;
+  lastUsedAt?: string | null;
+  archivedAt?: string | null;
+  status?: "pending" | "processing" | "ready" | "error";
+  errorReason?: string | null;
+  processedAt?: string | null;
   createdAt: string;
+  updatedAt?: string;
 };
 
 export type GeneratedVariantAssetInput = {
@@ -166,6 +193,9 @@ export type GeneratedVariantAssetInput = {
   mimeType: string;
   fileSize: number;
 };
+
+export type StoredMediaAssetFbUpload = MediaAssetFbUpload;
+export type StoredMediaAssetUsage = MediaAssetUsage;
 
 export type VariantCaptionContext = {
   variant: Variant;
@@ -278,6 +308,117 @@ export type DataStore = {
     aiRunId?: string;
   }): Promise<Photo>;
   getMediaAsset(input: { assetId: string }): Promise<MediaAsset | null>;
+  createMediaUploadIntent(input: {
+    workspaceId: string;
+    businessId: string;
+    actorId: string;
+    sha256: string;
+    bytes: number;
+    mime: string;
+    originalName: string;
+    width?: number;
+    height?: number;
+    categoryId?: string | null;
+    requestId: string;
+  }): Promise<{ exists: boolean; asset: GalleryMediaAsset; storagePath?: string; expiresAt?: string }>;
+  completeMediaUpload(input: {
+    workspaceId: string;
+    assetId: string;
+    storagePath: string;
+    actorId: string;
+    requestId: string;
+  }): Promise<{ asset: GalleryMediaAsset; job: StoredJob }>;
+  listMediaAssets(input: {
+    workspaceId: string;
+    categoryId?: string;
+    tag?: string;
+    search?: string;
+    unused?: boolean;
+    archived?: boolean;
+    cursor?: string;
+    limit?: number;
+    sort?: "recent" | "most_used" | "name";
+  }): Promise<{ items: GalleryMediaAsset[]; nextCursor: string | null; total?: number }>;
+  updateMediaAsset(input: {
+    workspaceId: string;
+    assetId: string;
+    actorId: string;
+    requestId: string;
+    displayName?: string;
+    categoryId?: string | null;
+    tags?: string[];
+  }): Promise<GalleryMediaAsset>;
+  archiveMediaAsset(input: { workspaceId: string; assetId: string; actorId: string; requestId: string }): Promise<GalleryMediaAsset>;
+  restoreMediaAsset(input: { workspaceId: string; assetId: string; actorId: string; requestId: string }): Promise<GalleryMediaAsset>;
+  createMediaCategory(input: {
+    workspaceId: string;
+    actorId: string;
+    requestId: string;
+    name: string;
+    slug?: string;
+    color?: string | null;
+    sortOrder?: number;
+  }): Promise<MediaCategory>;
+  listMediaCategories(input: { workspaceId: string }): Promise<MediaCategory[]>;
+  createMediaSelection(input: {
+    workspaceId: string;
+    userId: string;
+    name?: string | null;
+    assetIds?: string[];
+    metadata?: Record<string, unknown>;
+  }): Promise<MediaSelection>;
+  listActiveMediaSelections(input: { workspaceId: string; userId: string }): Promise<MediaSelection[]>;
+  updateMediaSelection(input: {
+    workspaceId: string;
+    userId: string;
+    selectionId: string;
+    name?: string | null;
+    assetIds?: string[];
+    metadata?: Record<string, unknown>;
+  }): Promise<MediaSelection>;
+  consumeMediaSelection(input: {
+    workspaceId: string;
+    userId: string;
+    selectionId: string;
+    businessId?: string;
+    actorId: string;
+    requestId: string;
+  }): Promise<{ selection: MediaSelection; batch?: BatchSummary }>;
+  deleteMediaSelection(input: { workspaceId: string; userId: string; selectionId: string }): Promise<MediaSelection>;
+  completeMediaAssetProcessing(input: {
+    assetId: string;
+    width: number;
+    height: number;
+    bytes: number;
+    thumbPath: string;
+    previewPath: string;
+    fullPath: string;
+    phash?: string | null;
+  }): Promise<GalleryMediaAsset>;
+  failMediaAssetProcessing(input: { assetId: string; errorReason: string }): Promise<GalleryMediaAsset>;
+  createMenuIngestJob(input: {
+    workspaceId: string;
+    businessId?: string;
+    actorId: string;
+    requestId: string;
+    sourceType: "text" | "pdf" | "image";
+    text?: string;
+    fileName?: string;
+    mime?: string;
+    dataBase64?: string;
+  }): Promise<StoredJob>;
+  completeMenuIngest(input: {
+    jobId: string;
+    workspaceId: string;
+    result: MenuParseResult;
+  }): Promise<{ items: MenuItem[]; categories: MediaCategory[]; categorizedAssets: GalleryMediaAsset[] }>;
+  listMenuItems(input: { workspaceId: string; categoryId?: string }): Promise<MenuItem[]>;
+  listSimilarMediaAssets(input: {
+    workspaceId: string;
+    assetId: string;
+    threshold?: number;
+    limit?: number;
+  }): Promise<SimilarMediaAsset[]>;
   listVariants(input: { workspaceId: string; businessId: string; batchId: string }): Promise<Variant[]>;
   requestGenerateBatch(input: {
     workspaceId: string;
@@ -317,6 +458,7 @@ export type DataStore = {
     from?: string;
     to?: string;
   }): Promise<ScheduledPost[]>;
+  getFacebookPhotoReuseStats(input: { workspaceId: string; businessId: string }): Promise<Omit<FacebookPhotoReuseStats, "schemaVersion" | "requestId">>;
   getScheduledPost(input: { workspaceId: string; businessId: string; scheduledPostId: string }): Promise<ScheduledPost | null>;
   completeSchedulePosts(input: { jobId: string; batchId: string }): Promise<{ scheduledPosts: ScheduledPost[] }>;
   publishScheduledPost(input: { jobId: string; scheduledPostId: string; publishNow?: boolean }): Promise<ScheduledPost>;

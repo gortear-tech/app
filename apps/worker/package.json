@@ -17,7 +17,9 @@
     "@fbmaniaco/api": "workspace:*",
     "@fbmaniaco/providers": "workspace:*",
     "@fbmaniaco/shared": "workspace:*",
-    "@supabase/supabase-js": "^2.47.10"
+    "@sentry/node": "^10.53.1",
+    "@supabase/supabase-js": "^2.47.10",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

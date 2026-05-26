@@ -1,5 +1,5 @@
 import { Blob } from "node:buffer";
-import { CaptionResult, VisionAnalysis, VisionAnalysisSchema } from "@fbmaniaco/shared";
+import { CaptionResult, MenuParseResult, ParsedMenuItem, VisionAnalysis, VisionAnalysisSchema } from "@fbmaniaco/shared";
 
 export type OpenAiMode = "mock" | "responses";
 export type ImageEditMode = "mock" | "images";
@@ -53,6 +53,29 @@ export type CaptionProviderResult = {
 export type CaptionGenerationProvider = {
   mode: OpenAiMode;
   generate(input: CaptionInput): Promise<CaptionProviderResult>;
+};
+
+export type MenuParseInput = {
+  sourceType: "text" | "pdf" | "image";
+  text?: string;
+  fileName?: string;
+  mime?: string;
+  dataBase64?: string;
+  requestId: string;
+  operationKey: string;
+};
+
+export type MenuParseProviderResult = {
+  result: MenuParseResult;
+  responseId: string | null;
+  model: string;
+  usage: Record<string, unknown> | null;
+  latencyMs: number;
+};
+
+export type MenuParseProvider = {
+  mode: OpenAiMode;
+  parse(input: MenuParseInput): Promise<MenuParseProviderResult>;
 };
 
 export type ImageEditInput = {
@@ -199,6 +222,32 @@ const fallbackCaption = (input: CaptionInput): CaptionResult => {
   };
 };
 
+const menuParseResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "items", "categories", "warnings"],
+  properties: {
+    schemaVersion: { type: "string", enum: ["menu_parse_result.v1"] },
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "description", "priceCents", "categoryName", "keywords"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 120 },
+          description: { type: ["string", "null"], maxLength: 500 },
+          priceCents: { type: ["number", "null"] },
+          categoryName: { type: ["string", "null"], maxLength: 80 },
+          keywords: { type: "array", items: { type: "string", minLength: 1, maxLength: 60 } }
+        }
+      }
+    },
+    categories: { type: "array", items: { type: "string", minLength: 1, maxLength: 80 } },
+    warnings: { type: "array", items: { type: "string" } }
+  }
+};
+
 const isVisionAnalysis = (value: unknown): value is VisionAnalysis => {
   const item = value as Partial<VisionAnalysis> | null;
   return Boolean(
@@ -227,6 +276,97 @@ const isCaptionResult = (value: unknown): value is CaptionResult => {
       Array.isArray(item.seoTermsUsed) &&
       Array.isArray(item.warnings)
   );
+};
+
+const isParsedMenuItem = (value: unknown): value is ParsedMenuItem => {
+  const item = value as Partial<ParsedMenuItem> | null;
+  return Boolean(
+    item &&
+      typeof item.name === "string" &&
+      item.name.trim().length > 0 &&
+      (typeof item.description === "string" || item.description === null) &&
+      (typeof item.priceCents === "number" || item.priceCents === null) &&
+      (typeof item.categoryName === "string" || item.categoryName === null) &&
+      Array.isArray(item.keywords) &&
+      item.keywords.every((keyword) => typeof keyword === "string")
+  );
+};
+
+const isMenuParseResult = (value: unknown): value is MenuParseResult => {
+  const item = value as Partial<MenuParseResult> | null;
+  return Boolean(
+    item &&
+      item.schemaVersion === "menu_parse_result.v1" &&
+      Array.isArray(item.items) &&
+      item.items.every(isParsedMenuItem) &&
+      Array.isArray(item.categories) &&
+      item.categories.every((category) => typeof category === "string") &&
+      Array.isArray(item.warnings)
+  );
+};
+
+const normalizeKeyword = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, " ")
+    .trim();
+
+const keywordsFromName = (name: string) =>
+  Array.from(
+    new Set(
+      normalizeKeyword(name)
+        .split(/\s+/)
+        .filter((word) => word.length >= 3)
+        .slice(0, 8)
+    )
+  );
+
+const parsePriceCents = (line: string) => {
+  const match = line.match(/(?:\$|mxn\s*)?(\d{1,5})(?:[.,](\d{1,2}))?/i);
+  if (!match) return null;
+  const pesos = Number.parseInt(match[1] ?? "0", 10);
+  const cents = match[2] ? Number.parseInt(match[2].padEnd(2, "0").slice(0, 2), 10) : 0;
+  return pesos * 100 + cents;
+};
+
+const fallbackMenuParse = (input: MenuParseInput): MenuParseResult => {
+  const text = input.text?.trim() ?? "";
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
+    .filter(Boolean);
+  let currentCategory: string | null = null;
+  const items: ParsedMenuItem[] = [];
+  const categories = new Set<string>();
+  for (const line of lines) {
+    const hasPrice = /(?:\$|mxn\s*)?\d{1,5}(?:[.,]\d{1,2})?/i.test(line);
+    if (!hasPrice && line.length <= 80 && !/[.:]/.test(line)) {
+      currentCategory = line;
+      categories.add(line);
+      continue;
+    }
+    const priceCents = parsePriceCents(line);
+    const name = line
+      .replace(/(?:\$|mxn\s*)?\d{1,5}(?:[.,]\d{1,2})?/gi, "")
+      .replace(/\s[-:|]\s.*$/, "")
+      .trim();
+    if (!name) continue;
+    items.push({
+      name: name.slice(0, 120),
+      description: null,
+      priceCents,
+      categoryName: currentCategory,
+      keywords: keywordsFromName(name)
+    });
+  }
+  return {
+    schemaVersion: "menu_parse_result.v1",
+    items,
+    categories: Array.from(categories),
+    warnings: input.sourceType === "text" ? ["menu_parse_mock_text_rules"] : ["menu_parse_mock_requires_openai_for_files"]
+  };
 };
 
 const jsonFromResponse = async (response: Response): Promise<unknown> => {
@@ -462,6 +602,130 @@ export const createCaptionGenerationProvider = (config: OpenAiProviderConfig): C
         const parsed = JSON.parse(extractOutputText(json)) as unknown;
         if (!isCaptionResult(parsed)) {
           throw new Error("OpenAI caption output did not match schema");
+        }
+        return {
+          result: parsed,
+          responseId: (json as { id?: string }).id ?? null,
+          model,
+          usage: (json as { usage?: Record<string, unknown> }).usage ?? null,
+          latencyMs: Date.now() - started
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  };
+};
+
+export const createMenuParseProvider = (config: OpenAiProviderConfig): MenuParseProvider => {
+  if (!config.apiKey) {
+    return {
+      mode: "mock",
+      parse: async (input) => ({
+        result: fallbackMenuParse(input),
+        responseId: null,
+        model: "mock-menu-parser",
+        usage: null,
+        latencyMs: 0
+      })
+    };
+  }
+
+  const baseUrl = config.baseUrl ?? "https://api.openai.com/v1";
+  const model = config.captionModel ?? config.visionModel ?? defaultVisionModel;
+  const timeoutMs = config.timeoutMs ?? 30_000;
+
+  return {
+    mode: "responses",
+    parse: async (input) => {
+      const started = Date.now();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const userContent: Array<
+          | { type: "input_text"; text: string }
+          | { type: "input_image"; image_url: string }
+          | { type: "input_file"; filename: string; file_data: string }
+        > = [
+          {
+            type: "input_text",
+            text: JSON.stringify({
+              operationKey: input.operationKey,
+              sourceType: input.sourceType,
+              fileName: input.fileName ?? null,
+              rules: [
+                "extrae platillos o productos reales del menu",
+                "normaliza precios a centavos MXN cuando sean visibles",
+                "usa categoryName solo si la categoria esta en el menu o es evidente por encabezado",
+                "keywords deben servir para categorizar fotos por nombre de archivo o texto visible",
+                "si algo no esta visible, devuelve null y agrega warning"
+              ]
+            })
+          }
+        ];
+        if (input.sourceType === "text" && input.text) {
+          userContent.push({ type: "input_text", text: input.text });
+        }
+        if (input.sourceType === "image" && input.dataBase64 && input.mime) {
+          userContent.push({ type: "input_image", image_url: `data:${input.mime};base64,${input.dataBase64}` });
+        }
+        if (input.sourceType === "pdf" && input.dataBase64) {
+          userContent.push({
+            type: "input_file",
+            filename: input.fileName ?? "menu.pdf",
+            file_data: `data:${input.mime ?? "application/pdf"};base64,${input.dataBase64}`
+          });
+        }
+        const payload = {
+          model,
+          prompt_cache_key: "fbmaniaco:menu-parse-v1",
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text:
+                    "Eres extractor de menus para negocios locales en Mexico. " +
+                    "Devuelve JSON estricto. No inventes productos, precios ni categorias. " +
+                    "El resultado se usara para categorizar una galeria de fotos."
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: userContent
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "menu_parse_result",
+              strict: true,
+              schema: menuParseResultSchema
+            }
+          },
+          ...(supportsReasoningEffort(model) ? { reasoning: { effort: "low" } } : {})
+        };
+
+        const response = await fetch(`${baseUrl}/responses`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            authorization: `Bearer ${config.apiKey}`,
+            "content-type": "application/json",
+            "x-request-id": input.requestId
+          },
+          body: JSON.stringify(payload)
+        });
+        const json = (await response.json()) as unknown;
+        if (!response.ok) {
+          const message = (json as { error?: { message?: string } }).error?.message ?? "OpenAI menu parse request failed";
+          throw new Error(message);
+        }
+        const parsed = JSON.parse(extractOutputText(json)) as unknown;
+        if (!isMenuParseResult(parsed)) {
+          throw new Error("OpenAI menu parse output did not match schema");
         }
         return {
           result: parsed,

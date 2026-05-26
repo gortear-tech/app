@@ -19,20 +19,39 @@ import {
   ConfirmCalendarBodySchema,
   ConfirmCalendarResponseSchema,
   CreateBatchResponseSchema,
+  FacebookPhotoReuseStatsSchema,
   HealthSchema,
   JobSummarySchema,
   GenerateBatchBodySchema,
   GenerateBatchResponseSchema,
+  CreateMediaCategoryBodySchema,
+  CreateMediaSelectionBodySchema,
+  MediaAssetMutationResponseSchema,
+  MediaAssetsResponseSchema,
+  MediaCategoriesResponseSchema,
+  MediaCategoryMutationResponseSchema,
+  MenuIngestBodySchema,
+  MenuIngestResponseSchema,
+  MenuItemsResponseSchema,
+  MediaSelectionMutationResponseSchema,
+  MediaSelectionsResponseSchema,
+  MediaUploadCompleteBodySchema,
+  MediaUploadCompleteResponseSchema,
+  MediaUploadIntentBodySchema,
+  MediaUploadIntentResponseSchema,
   MetaConnectResponseSchema,
   MetaPagesResponseSchema,
   MobileAuthSessionResponseSchema,
   ReadySchema,
   SelectPageBodySchema,
   SelectPageResponseSchema,
+  SimilarMediaAssetsResponseSchema,
   ScheduledPostMutationResponseSchema,
   ScheduledPostsResponseSchema,
   UpdateCaptionBodySchema,
   UpdateBusinessBodySchema,
+  UpdateMediaAssetBodySchema,
+  UpdateMediaSelectionBodySchema,
   UpdateScheduledPostBodySchema,
   UploadIntentBodySchema,
   UploadIntentResponseSchema,
@@ -45,6 +64,7 @@ import { ApiConfig, readinessFromConfig } from "./config.js";
 import { authenticateBearer } from "./auth.js";
 import { DataStore } from "./db/index.js";
 import { getRequestId } from "./request-id.js";
+import { captureException } from "./sentry.js";
 
 const allowedImageEditorProviders = new Set(["openai", "openai_compatible"]);
 const allowedImageEditorSizes = new Set(["1024x1024", "1536x1024", "1024x1536"]);
@@ -206,6 +226,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       });
     }
     request.log.error({ err: error, requestId }, "Unhandled API error");
+    captureException(error, { requestId, route: request.routeOptions.url ?? request.url });
     return reply.status(500).send({
       code: "internal_error",
       message: "Internal server error",
@@ -376,6 +397,12 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       mediaUrl: previewUrl(request, photo.originalAssetId ?? null),
       thumbnailUrl: previewUrl(request, photo.thumbnailAssetId ?? photo.originalAssetId ?? null)
     }));
+  const withGalleryAssetUrls = (request: FastifyRequest, assets: Awaited<ReturnType<DataStore["listMediaAssets"]>>["items"]) =>
+    assets.map((asset) => ({
+      ...asset,
+      previewUrl: asset.status === "ready" ? previewUrl(request, asset.id) : null,
+      thumbnailUrl: asset.status === "ready" ? previewUrl(request, asset.id) : null
+    }));
   const withVariantUrls = (
     request: FastifyRequest,
     variants: NonNullable<Awaited<ReturnType<DataStore["getBatchDetail"]>>>["variants"]
@@ -462,6 +489,72 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       action: "refresh"
     });
   };
+  const mobileRefreshFailure = (error: { message?: string | undefined; code?: string | undefined } | null | undefined) => {
+    const message = `${error?.code ?? ""} ${error?.message ?? ""}`.toLowerCase();
+    if (message.includes("refresh") || message.includes("invalid") || message.includes("jwt")) {
+      throw new AppError({
+        code: "session_refresh_invalid",
+        statusCode: 401,
+        message: error?.message ?? "Mobile refresh token is invalid",
+        userMessage: "Tu sesion segura expiro. Conecta Facebook una vez mas.",
+        retryable: false,
+        action: "none"
+      });
+    }
+    mobileAuthFailure(error);
+  };
+
+  const requireWorkspaceAccess = async (params: { actorId: string; workspaceId?: string | undefined; allowedRoles: WorkspaceRole[] }) => {
+    const memberships = await input.store.listMemberships(params.actorId);
+    const target = params.workspaceId
+      ? memberships.find((item) => item.workspace.id === params.workspaceId)
+      : memberships[0] ?? null;
+    if (!target) {
+      throw new AppError({
+        code: "workspace_not_found",
+        statusCode: 404,
+        message: "Workspace not found in actor memberships",
+        userMessage: "No encontramos tu workspace.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
+    await input.store.assertWorkspaceRole({
+      userId: params.actorId,
+      workspaceId: target.workspace.id,
+      allowedRoles: params.allowedRoles
+    });
+    return target;
+  };
+
+  const resolveBusinessForMedia = async (params: { actorId: string; businessId?: string | undefined; workspaceId?: string | undefined }) => {
+    if (params.businessId) {
+      return requireBusinessAccess({
+        actorId: params.actorId,
+        businessId: params.businessId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+    }
+    const { workspace } = await requireWorkspaceAccess({
+      actorId: params.actorId,
+      workspaceId: params.workspaceId,
+      allowedRoles: ["owner", "admin", "operator"]
+    });
+    const context = await input.store.getBootstrapContext(params.actorId);
+    const businesses = await input.store.listBusinesses(workspace.id);
+    const business = businesses.find((item) => item.id === context.selectedBusinessId) ?? businesses[0];
+    if (!business) {
+      throw new AppError({
+        code: "business_not_found",
+        statusCode: 404,
+        message: "No business is available for media upload",
+        userMessage: "Primero conecta o selecciona una pagina.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
+    return { workspace, business };
+  };
 
   const syncMetaTestPages = async (workspaceId: string, actorId: string) => {
     if (input.config.appEnv === "production" || !input.config.metaTestUserAccessToken) return;
@@ -501,10 +594,14 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           ? job.status === "succeeded"
             ? "Generacion coordinada."
             : "Preparando variantes."
-          : job.type === "generate_variant"
+        : job.type === "generate_variant"
+          ? job.status === "succeeded"
+            ? "Variante generada."
+            : "Generando variante."
+          : job.type === "media:process"
             ? job.status === "succeeded"
-              ? "Variante generada."
-              : "Generando variante."
+              ? "Foto procesada."
+              : "Procesando foto."
             : job.type === "schedule_posts"
               ? job.status === "succeeded"
                 ? "Calendario listo."
@@ -667,6 +764,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         response: {
           200: MobileAuthSessionResponseSchema,
           400: AppErrorResponseSchema,
+          401: AppErrorResponseSchema,
           502: AppErrorResponseSchema
         }
       }
@@ -675,7 +773,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       const requestId = String(request.headers["x-request-id"]);
       const body = request.body as { refreshToken: string };
       const { data, error } = await requireSupabaseClient().auth.refreshSession({ refresh_token: body.refreshToken });
-      if (error) mobileAuthFailure(error);
+      if (error) mobileRefreshFailure(error);
       return mobileSessionResponse(data.session, data.user, requestId);
     }
   );
@@ -769,6 +867,728 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       reply.header("cache-control", "private, max-age=300");
       if (contentLength) reply.header("content-length", contentLength);
       return reply.send(Buffer.from(await mediaResponse.arrayBuffer()));
+    }
+  );
+
+  app.post(
+    "/media/upload-intent",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        body: MediaUploadIntentBodySchema,
+        response: {
+          200: MediaUploadIntentResponseSchema,
+          400: AppErrorResponseSchema,
+          401: AppErrorResponseSchema,
+          403: AppErrorResponseSchema,
+          404: AppErrorResponseSchema,
+          409: AppErrorResponseSchema,
+          413: AppErrorResponseSchema,
+          415: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = request.body as {
+        businessId?: string;
+        sha256: string;
+        bytes: number;
+        mime: string;
+        originalName: string;
+        width?: number;
+        height?: number;
+        categoryId?: string | null;
+      };
+      const { actor } = await authenticateRequest(request);
+      const { workspace, business } = await resolveBusinessForMedia({ actorId: actor.userId, businessId: body.businessId });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/upload-intent",
+        handler: async () => {
+          const result = await input.store.createMediaUploadIntent({
+            workspaceId: workspace.id,
+            businessId: business.id,
+            actorId: actor.userId,
+            sha256: body.sha256,
+            bytes: body.bytes,
+            mime: body.mime,
+            originalName: body.originalName,
+            ...(body.width !== undefined ? { width: body.width } : {}),
+            ...(body.height !== undefined ? { height: body.height } : {}),
+            ...(body.categoryId !== undefined ? { categoryId: body.categoryId } : {}),
+            requestId
+          });
+          if (result.exists) {
+            return {
+              schemaVersion: "media_upload_intent.v1" as const,
+              exists: true,
+              assetId: result.asset.id,
+              asset: result.asset,
+              requestId
+            };
+          }
+          let uploadUrl = `local://upload/${result.storagePath}`;
+          if (input.config.dataStoreMode === "supabase") {
+            const signed = await requireStorageClient()
+              .storage
+              .from(result.asset.bucket)
+              .createSignedUploadUrl(result.storagePath!, { upsert: false });
+            if (signed.error || !signed.data?.signedUrl) {
+              throw new AppError({
+                code: "storage_upload_url_failed",
+                statusCode: 502,
+                message: signed.error?.message ?? "Could not create Supabase signed upload URL",
+                userMessage: "No pudimos preparar la subida real. Intenta de nuevo.",
+                retryable: true,
+                action: "retry"
+              });
+            }
+            uploadUrl = signed.data.signedUrl;
+          }
+          return {
+            schemaVersion: "media_upload_intent.v1" as const,
+            exists: false,
+            assetId: result.asset.id,
+            asset: result.asset,
+            uploadUrl,
+            storagePath: result.storagePath,
+            expiresAt: result.expiresAt,
+            requestId
+          };
+        }
+      });
+    }
+  );
+
+  app.post(
+    "/media/upload-complete",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        body: MediaUploadCompleteBodySchema,
+        response: {
+          202: MediaUploadCompleteResponseSchema,
+          400: AppErrorResponseSchema,
+          401: AppErrorResponseSchema,
+          403: AppErrorResponseSchema,
+          404: AppErrorResponseSchema,
+          409: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request, reply) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = request.body as { assetId: string; storagePath: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      const response = await runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/upload-complete",
+        handler: async () => {
+          const result = await input.store.completeMediaUpload({
+            workspaceId: workspace.id,
+            assetId: body.assetId,
+            storagePath: body.storagePath,
+            actorId: actor.userId,
+            requestId
+          });
+          return {
+            schemaVersion: "media_upload_complete.v1" as const,
+            assetId: result.asset.id,
+            status: "processing" as const,
+            jobId: result.job.id,
+            requestId
+          };
+        }
+      });
+      return reply.status(202).send(response);
+    }
+  );
+
+  app.get(
+    "/media/assets",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            workspaceId: { type: "string" },
+            categoryId: { type: "string" },
+            tag: { type: "string" },
+            search: { type: "string" },
+            unused: { type: "boolean" },
+            archived: { type: "boolean" },
+            cursor: { type: "string" },
+            limit: { type: "number" },
+            sort: { type: "string", enum: ["recent", "most_used", "name"] }
+          },
+          additionalProperties: false
+        },
+        response: { 200: MediaAssetsResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const query = request.query as {
+        workspaceId?: string;
+        categoryId?: string;
+        tag?: string;
+        search?: string;
+        unused?: boolean;
+        archived?: boolean;
+        cursor?: string;
+        limit?: number;
+        sort?: "recent" | "most_used" | "name";
+      };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: query.workspaceId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      const result = await input.store.listMediaAssets({
+        workspaceId: workspace.id,
+        ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+        ...(query.tag ? { tag: query.tag } : {}),
+        ...(query.search ? { search: query.search } : {}),
+        ...(query.unused !== undefined ? { unused: query.unused } : {}),
+        ...(query.archived !== undefined ? { archived: query.archived } : {}),
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+        ...(query.limit !== undefined ? { limit: query.limit } : {}),
+        ...(query.sort ? { sort: query.sort } : {})
+      });
+      return { schemaVersion: "media_assets.v1" as const, ...result, items: withGalleryAssetUrls(request, result.items), requestId };
+    }
+  );
+
+  app.get(
+    "/media/assets/:assetId/similar",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["assetId"],
+          properties: { assetId: { type: "string" } }
+        },
+        querystring: {
+          type: "object",
+          properties: {
+            workspaceId: { type: "string" },
+            threshold: { type: "number" },
+            limit: { type: "number" }
+          },
+          additionalProperties: false
+        },
+        response: { 200: SimilarMediaAssetsResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { assetId: string };
+      const query = request.query as { workspaceId?: string; threshold?: number; limit?: number };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: query.workspaceId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      const threshold = query.threshold ?? 10;
+      const items = await input.store.listSimilarMediaAssets({
+        workspaceId: workspace.id,
+        assetId: params.assetId,
+        threshold,
+        ...(query.limit !== undefined ? { limit: query.limit } : {})
+      });
+      return {
+        schemaVersion: "media_asset_similar.v1" as const,
+        assetId: params.assetId,
+        threshold,
+        items: items.map((item) => ({ ...item, asset: withGalleryAssetUrls(request, [item.asset])[0] ?? item.asset })),
+        requestId
+      };
+    }
+  );
+
+  app.patch(
+    "/media/assets/:assetId",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["assetId"],
+          properties: { assetId: { type: "string" } }
+        },
+        body: UpdateMediaAssetBodySchema,
+        response: { 200: MediaAssetMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { assetId: string };
+      const body = request.body as { displayName?: string; categoryId?: string | null; tags?: string[] };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/assets/:assetId",
+        handler: async () => ({
+          schemaVersion: "media_asset_mutation.v1" as const,
+          asset: await input.store.updateMediaAsset({
+            workspaceId: workspace.id,
+            assetId: params.assetId,
+            actorId: actor.userId,
+            requestId,
+            ...(body.displayName !== undefined ? { displayName: body.displayName } : {}),
+            ...(body.categoryId !== undefined ? { categoryId: body.categoryId } : {}),
+            ...(body.tags !== undefined ? { tags: body.tags } : {})
+          }),
+          requestId
+        })
+      });
+    }
+  );
+
+  for (const action of ["archive", "restore"] as const) {
+    app.post(
+      `/media/assets/:assetId/${action}`,
+      {
+        schema: {
+          security: [{ bearerAuth: [] }],
+          params: {
+            type: "object",
+            required: ["assetId"],
+            properties: { assetId: { type: "string" } }
+          },
+          response: { 200: MediaAssetMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+        }
+      },
+      async (request) => {
+        const requestId = String(request.headers["x-request-id"]);
+        const params = request.params as { assetId: string };
+        const { actor } = await authenticateRequest(request);
+        const { workspace } = await requireWorkspaceAccess({
+          actorId: actor.userId,
+          allowedRoles: ["owner", "admin", "operator"]
+        });
+        return runIdempotent({
+          request,
+          workspaceId: workspace.id,
+          actorId: actor.userId,
+          routeKey: `/media/assets/:assetId/${action}`,
+          handler: async () => ({
+            schemaVersion: "media_asset_mutation.v1" as const,
+            asset:
+              action === "archive"
+                ? await input.store.archiveMediaAsset({ workspaceId: workspace.id, assetId: params.assetId, actorId: actor.userId, requestId })
+                : await input.store.restoreMediaAsset({ workspaceId: workspace.id, assetId: params.assetId, actorId: actor.userId, requestId }),
+            requestId
+          })
+        });
+      }
+    );
+  }
+
+  app.get(
+    "/media/categories",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: { workspaceId: { type: "string" } },
+          additionalProperties: false
+        },
+        response: { 200: MediaCategoriesResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const query = request.query as { workspaceId?: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: query.workspaceId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      return {
+        schemaVersion: "media_categories.v1" as const,
+        categories: await input.store.listMediaCategories({ workspaceId: workspace.id }),
+        requestId
+      };
+    }
+  );
+
+  app.post(
+    "/media/categories",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        body: CreateMediaCategoryBodySchema,
+        response: { 200: MediaCategoryMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 409: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = request.body as { workspaceId?: string; name: string; slug?: string; color?: string | null; sortOrder?: number };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: body.workspaceId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/categories",
+        handler: async () => ({
+          schemaVersion: "media_category_mutation.v1" as const,
+          category: await input.store.createMediaCategory({
+            workspaceId: workspace.id,
+            actorId: actor.userId,
+            requestId,
+            name: body.name,
+            ...(body.slug !== undefined ? { slug: body.slug } : {}),
+            ...(body.color !== undefined ? { color: body.color } : {}),
+            ...(body.sortOrder !== undefined ? { sortOrder: body.sortOrder } : {})
+          }),
+          requestId
+        })
+      });
+    }
+  );
+
+  app.post(
+    "/menu/ingest",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        body: MenuIngestBodySchema,
+        response: {
+          202: MenuIngestResponseSchema,
+          400: AppErrorResponseSchema,
+          401: AppErrorResponseSchema,
+          403: AppErrorResponseSchema,
+          409: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request, reply) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = request.body as {
+        workspaceId?: string;
+        businessId?: string;
+        sourceType: "text" | "pdf" | "image";
+        text?: string;
+        fileName?: string;
+        mime?: string;
+        dataBase64?: string;
+      };
+      if (body.sourceType === "text" && !body.text?.trim()) {
+        throw new AppError({
+          code: "menu_text_required",
+          statusCode: 400,
+          message: "Menu text is required for text ingestion",
+          userMessage: "Pega el texto del menu para poder importarlo.",
+          retryable: false,
+          action: "none"
+        });
+      }
+      if ((body.sourceType === "pdf" || body.sourceType === "image") && !body.dataBase64) {
+        throw new AppError({
+          code: "menu_file_required",
+          statusCode: 400,
+          message: "Menu file data is required for file ingestion",
+          userMessage: "Sube el archivo del menu antes de importarlo.",
+          retryable: false,
+          action: "none"
+        });
+      }
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: body.workspaceId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      const response = await runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/menu/ingest",
+        handler: async () => {
+          const job = await input.store.createMenuIngestJob({
+            workspaceId: workspace.id,
+            ...(body.businessId ? { businessId: body.businessId } : {}),
+            actorId: actor.userId,
+            requestId,
+            sourceType: body.sourceType,
+            ...(body.text !== undefined ? { text: body.text } : {}),
+            ...(body.fileName !== undefined ? { fileName: body.fileName } : {}),
+            ...(body.mime !== undefined ? { mime: body.mime } : {}),
+            ...(body.dataBase64 !== undefined ? { dataBase64: body.dataBase64 } : {})
+          });
+          return {
+            schemaVersion: "menu_ingest.v1" as const,
+            jobId: job.id,
+            status: "queued" as const,
+            requestId
+          };
+        }
+      });
+      return reply.status(202).send(response);
+    }
+  );
+
+  app.get(
+    "/menu/items",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: {
+            workspaceId: { type: "string" },
+            categoryId: { type: "string" }
+          },
+          additionalProperties: false
+        },
+        response: { 200: MenuItemsResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const query = request.query as { workspaceId?: string; categoryId?: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: query.workspaceId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      return {
+        schemaVersion: "menu_items.v1" as const,
+        items: await input.store.listMenuItems({
+          workspaceId: workspace.id,
+          ...(query.categoryId ? { categoryId: query.categoryId } : {})
+        }),
+        requestId
+      };
+    }
+  );
+
+  app.get(
+    "/media/selections/active",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        querystring: {
+          type: "object",
+          properties: { workspaceId: { type: "string" } },
+          additionalProperties: false
+        },
+        response: { 200: MediaSelectionsResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const query = request.query as { workspaceId?: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: query.workspaceId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      return {
+        schemaVersion: "media_selections.v1" as const,
+        selections: await input.store.listActiveMediaSelections({ workspaceId: workspace.id, userId: actor.userId }),
+        requestId
+      };
+    }
+  );
+
+  app.post(
+    "/media/selections",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        body: CreateMediaSelectionBodySchema,
+        response: { 200: MediaSelectionMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = request.body as { workspaceId?: string; name?: string | null; assetIds?: string[]; metadata?: Record<string, unknown> };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        workspaceId: body.workspaceId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/selections",
+        handler: async () => ({
+          schemaVersion: "media_selection_mutation.v1" as const,
+          selection: await input.store.createMediaSelection({
+            workspaceId: workspace.id,
+            userId: actor.userId,
+            ...(body.name !== undefined ? { name: body.name } : {}),
+            ...(body.assetIds !== undefined ? { assetIds: body.assetIds } : {}),
+            ...(body.metadata !== undefined ? { metadata: body.metadata } : {})
+          }),
+          requestId
+        })
+      });
+    }
+  );
+
+  app.patch(
+    "/media/selections/:selectionId",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["selectionId"],
+          properties: { selectionId: { type: "string" } }
+        },
+        body: UpdateMediaSelectionBodySchema,
+        response: { 200: MediaSelectionMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { selectionId: string };
+      const body = request.body as { name?: string | null; assetIds?: string[]; metadata?: Record<string, unknown> };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/selections/:selectionId",
+        handler: async () => ({
+          schemaVersion: "media_selection_mutation.v1" as const,
+          selection: await input.store.updateMediaSelection({
+            workspaceId: workspace.id,
+            userId: actor.userId,
+            selectionId: params.selectionId,
+            ...(body.name !== undefined ? { name: body.name } : {}),
+            ...(body.assetIds !== undefined ? { assetIds: body.assetIds } : {}),
+            ...(body.metadata !== undefined ? { metadata: body.metadata } : {})
+          }),
+          requestId
+        })
+      });
+    }
+  );
+
+  app.post(
+    "/media/selections/:selectionId/consume",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["selectionId"],
+          properties: { selectionId: { type: "string" } }
+        },
+        body: {
+          type: "object",
+          properties: { businessId: { type: "string" } },
+          additionalProperties: false
+        },
+        response: { 200: MediaSelectionMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { selectionId: string };
+      const body = request.body as { businessId?: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/selections/:selectionId/consume",
+        handler: async () => ({
+          schemaVersion: "media_selection_mutation.v1" as const,
+          selection: (
+            await input.store.consumeMediaSelection({
+              workspaceId: workspace.id,
+              userId: actor.userId,
+              selectionId: params.selectionId,
+              ...(body.businessId !== undefined ? { businessId: body.businessId } : {}),
+              actorId: actor.userId,
+              requestId
+            })
+          ).selection,
+          requestId
+        })
+      });
+    }
+  );
+
+  app.delete(
+    "/media/selections/:selectionId",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["selectionId"],
+          properties: { selectionId: { type: "string" } }
+        },
+        response: { 200: MediaSelectionMutationResponseSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { selectionId: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace } = await requireWorkspaceAccess({
+        actorId: actor.userId,
+        allowedRoles: ["owner", "admin", "operator"]
+      });
+      return runIdempotent({
+        request,
+        workspaceId: workspace.id,
+        actorId: actor.userId,
+        routeKey: "/media/selections/:selectionId",
+        handler: async () => ({
+          schemaVersion: "media_selection_mutation.v1" as const,
+          selection: await input.store.deleteMediaSelection({
+            workspaceId: workspace.id,
+            userId: actor.userId,
+            selectionId: params.selectionId
+          }),
+          requestId
+        })
+      });
     }
   );
 
@@ -1868,6 +2688,29 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       }
     },
     listScheduledPostsHandler
+  );
+
+  app.get(
+    "/businesses/:businessId/facebook-photo-reuse",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: { type: "object", required: ["businessId"], properties: { businessId: { type: "string" } } },
+        response: { 200: FacebookPhotoReuseStatsSchema, 401: AppErrorResponseSchema, 403: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { businessId: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace, business } = await requireBusinessAccess({
+        actorId: actor.userId,
+        businessId: params.businessId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      const stats = await input.store.getFacebookPhotoReuseStats({ workspaceId: workspace.id, businessId: business.id });
+      return { schemaVersion: "facebook_photo_reuse_stats.v1" as const, ...stats, requestId };
+    }
   );
 
   app.get(

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { loadConfig } from "@fbmaniaco/api/dist/config.js";
 import { createDataStore } from "@fbmaniaco/api/dist/db/index.js";
+import { captureException, initSentry } from "@fbmaniaco/api/dist/sentry.js";
 import { processOneJob } from "./processor.js";
 
 const config = loadConfig();
+initSentry({ dsn: process.env.SENTRY_DSN, environment: config.appEnv, release: config.release, service: "worker" });
 const store = createDataStore(config);
 const workerId = `worker-${randomUUID()}`;
 const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? "5000");
@@ -41,6 +43,7 @@ const loop = async () => {
       await run();
     } catch (error) {
       console.error(JSON.stringify({ service: "worker", event: "loop_error", message: String(error) }));
+      captureException(error, { workerId, event: "loop_error" });
     }
     if (!stopRequested) await sleep(intervalMs);
   }
@@ -48,6 +51,7 @@ const loop = async () => {
 
 void loop().catch((error) => {
     console.error(JSON.stringify({ service: "worker", event: "loop_error", message: String(error) }));
+    captureException(error, { workerId, event: "loop_crash" });
 });
 
 process.once("SIGTERM", () => {

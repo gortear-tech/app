@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalDataStore } from "@fbmaniaco/api/dist/db/local-store.js";
-import { CaptionGenerationProvider, ImageEditProvider } from "@fbmaniaco/providers";
+import { CaptionGenerationProvider, ImageEditProvider, MenuParseProvider } from "@fbmaniaco/providers";
 import { variantEditPromptForStyle } from "@fbmaniaco/shared";
 import { processOneJob } from "./processor.js";
 
@@ -54,6 +54,144 @@ describe("worker processor", () => {
     await store.completeJob({ jobId: first.id, result: { ok: true } });
     const claimedAfterComplete = await store.claimDueJob("claim-worker-2");
     expect(claimedAfterComplete?.id).toBe(second.id);
+    await rm(path, { force: true });
+  });
+
+  it("processes gallery media upload jobs into ready assets in local mode", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-gallery-media-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "gallery-user", email: "gallery@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("gallery-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "gallery-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "gallery-user",
+      pageId: page.id,
+      requestId: "gallery-select"
+    });
+    const intent = await store.createMediaUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "gallery-user",
+      sha256: "a".repeat(64),
+      bytes: 4096,
+      mime: "image/jpeg",
+      originalName: "charola.jpg",
+      width: 1800,
+      height: 1200,
+      requestId: "gallery-intent"
+    });
+    if (intent.exists) throw new Error("Expected a fresh gallery upload intent");
+    const upload = await store.completeMediaUpload({
+      workspaceId: workspace.id,
+      assetId: intent.asset.id,
+      storagePath: intent.storagePath!,
+      actorId: "gallery-user",
+      requestId: "gallery-complete"
+    });
+    const result = await processOneJob({ store, workerId: "gallery-worker" });
+    const asset = await store.getMediaAsset({ assetId: intent.asset.id });
+    const dedup = await store.createMediaUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "gallery-user",
+      sha256: "a".repeat(64),
+      bytes: 4096,
+      mime: "image/jpeg",
+      originalName: "charola.jpg",
+      requestId: "gallery-dedup"
+    });
+
+    expect(upload.asset.status).toBe("processing");
+    expect(result.job?.type).toBe("media:process");
+    expect(asset?.status).toBe("ready");
+    expect(asset?.thumbPath).toMatch(/thumb\.webp$/);
+    expect(asset?.previewPath).toMatch(/preview\.webp$/);
+    expect(asset?.fullPath).toMatch(/full\.jpg$/);
+    expect(dedup.exists).toBe(true);
+    await rm(path, { force: true });
+  });
+
+  it("parses a menu and categorizes ready gallery assets by keywords", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-menu-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "menu-user", email: "menu@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("menu-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "menu-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "menu-user",
+      pageId: page.id,
+      requestId: "menu-page"
+    });
+    const intent = await store.createMediaUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "menu-user",
+      sha256: "b".repeat(64),
+      bytes: 1024,
+      mime: "image/jpeg",
+      originalName: "tacos-dorados.jpg",
+      requestId: "menu-asset"
+    });
+    await store.completeMediaAssetProcessing({
+      assetId: intent.asset.id,
+      width: 1200,
+      height: 900,
+      bytes: 900,
+      thumbPath: `${workspace.id}/assets/${intent.asset.id}/thumb.webp`,
+      previewPath: `${workspace.id}/assets/${intent.asset.id}/preview.webp`,
+      fullPath: `${workspace.id}/assets/${intent.asset.id}/full.jpg`,
+      phash: "0000000000000000"
+    });
+    await store.createMenuIngestJob({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "menu-user",
+      requestId: "menu-job",
+      sourceType: "text",
+      text: "Tacos\nTacos dorados $85"
+    });
+    const menuParseProvider: MenuParseProvider = {
+      mode: "mock",
+      parse: async () => ({
+        result: {
+          schemaVersion: "menu_parse_result.v1",
+          categories: ["Tacos"],
+          warnings: [],
+          items: [
+            {
+              name: "Tacos dorados",
+              description: null,
+              priceCents: 8500,
+              categoryName: "Tacos",
+              keywords: ["tacos", "dorados"]
+            }
+          ]
+        },
+        responseId: null,
+        model: "mock-menu-parser",
+        usage: null,
+        latencyMs: 1
+      })
+    };
+
+    const result = await processOneJob({ store, workerId: "menu-worker", menuParseProvider });
+    const menuItems = await store.listMenuItems({ workspaceId: workspace.id });
+    const asset = await store.getMediaAsset({ assetId: intent.asset.id });
+    const categories = await store.listMediaCategories({ workspaceId: workspace.id });
+
+    expect(result.job?.type).toBe("menu:parse");
+    expect(result.job?.status).toBe("succeeded");
+    expect(menuItems).toHaveLength(1);
+    expect(menuItems[0]?.name).toBe("Tacos dorados");
+    expect(menuItems[0]?.priceCents).toBe(8500);
+    expect(categories[0]?.name).toBe("Tacos");
+    expect(asset?.categoryId).toBe(categories[0]?.id);
     await rm(path, { force: true });
   });
 
@@ -299,7 +437,7 @@ describe("worker processor", () => {
     await rm(path, { force: true });
   });
 
-  it("schedules 30 approved variants over 7 days without duplicate local times", async () => {
+  it("schedules 30 approved variants over 7 days with unique exact slots and commercial priority", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-large-schedule-${Date.now()}.json`);
     const store = new LocalDataStore(path);
     await store.upsertLocalUser({ userId: "large-user", email: "large@example.com" });
@@ -403,7 +541,11 @@ describe("worker processor", () => {
     expect(variants).toHaveLength(30);
     expect(calendar.scheduledPosts).toHaveLength(30);
     expect(new Set(exactSlots).size).toBe(30);
-    expect(new Set(localTimes).size).toBe(30);
+    expect(localTimes.filter((time) => time === "13:00")).toHaveLength(7);
+    expect(localTimes.filter((time) => time === "10:30")).toHaveLength(7);
+    expect(localTimes.filter((time) => time === "16:30")).toHaveLength(7);
+    expect(localTimes.filter((time) => time === "19:30")).toHaveLength(7);
+    expect(localTimes.filter((time) => time === "08:30")).toHaveLength(2);
     expect(new Set(localDays).size).toBeLessThanOrEqual(7);
     expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
     await rm(path, { force: true });
@@ -414,12 +556,13 @@ describe("worker processor", () => {
     const store = new LocalDataStore(path);
     const previousPublicApiUrl = process.env.PUBLIC_API_URL;
     process.env.PUBLIC_API_URL = "https://api.example.test";
-    let facebookRequestBody = "";
+    const facebookRequestBodies: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input: URL | string, init?: RequestInit) => {
-        facebookRequestBody = String(init?.body ?? "");
-        return new Response(JSON.stringify({ id: "remote-photo-id", post_id: "page_456" }), { status: 200 });
+        facebookRequestBodies.push(String(init?.body ?? ""));
+        if (facebookRequestBodies.length === 1) return new Response(JSON.stringify({ id: "remote-photo-id" }), { status: 200 });
+        return new Response(JSON.stringify({ id: "page_456" }), { status: 200 });
       })
     );
     const imageEditProvider: ImageEditProvider = {
@@ -560,9 +703,13 @@ describe("worker processor", () => {
     expect(scheduled?.remoteStatus).toBe("confirmado_meta");
     expect(scheduled?.deliveryMode).toBe("remote_schedule");
     expect(scheduled?.facebookPostId).toBe("page_456");
+    expect(scheduled?.facebookPhotoId).toBe("remote-photo-id");
+    expect(scheduled?.facebookPhotoReused).toBe(false);
     expect(publishJobs).toHaveLength(0);
-    expect(facebookRequestBody).toContain("published=false");
-    expect(facebookRequestBody).toContain("scheduled_publish_time=");
+    expect(decodeURIComponent(facebookRequestBodies[0] ?? "")).toContain("published=false");
+    expect(decodeURIComponent(facebookRequestBodies[0] ?? "")).toContain("url=https://api.example.test/");
+    expect(decodeURIComponent(facebookRequestBodies[1] ?? "")).toContain('attached_media[0]={"media_fbid":"remote-photo-id"}');
+    expect(decodeURIComponent(facebookRequestBodies[1] ?? "")).toContain("scheduled_publish_time=");
     if (previousPublicApiUrl === undefined) delete process.env.PUBLIC_API_URL;
     else process.env.PUBLIC_API_URL = previousPublicApiUrl;
     await rm(path, { force: true });

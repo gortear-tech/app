@@ -225,6 +225,198 @@ describe("api bootstrap and tenancy", () => {
     await rm(path, { force: true });
   });
 
+  it("supports media gallery upload intent, dedup, metadata and selections", async () => {
+    const path = join(tmpdir(), `fbmaniaco-api-media-${Date.now()}.json`);
+    const config = makeConfig(path);
+    const store = new LocalDataStore(path);
+    const app = await buildServer({ config, store });
+    const authorization = "Bearer dev:user-media:media@example.com";
+
+    const connect = await app.inject({
+      method: "POST",
+      url: "/auth/meta/connect",
+      headers: { authorization, "idempotency-key": "media-connect-1" },
+      payload: { flow: "oauth" }
+    });
+    const page = connect.json().pages.find((item: { canPublish: boolean }) => item.canPublish);
+    const select = await app.inject({
+      method: "POST",
+      url: "/meta/pages/select",
+      headers: { authorization, "idempotency-key": "media-select-1" },
+      payload: { pageId: page.id }
+    });
+    const businessId = select.json().business.id as string;
+
+    const category = await app.inject({
+      method: "POST",
+      url: "/media/categories",
+      headers: { authorization, "idempotency-key": "media-category-1" },
+      payload: { name: "Charolas", color: "#00aa88" }
+    });
+    expect(category.statusCode).toBe(200);
+
+    const sha256 = "a".repeat(64);
+    const intent = await app.inject({
+      method: "POST",
+      url: "/media/upload-intent",
+      headers: { authorization, "idempotency-key": "media-upload-intent-1" },
+      payload: {
+        businessId,
+        sha256,
+        bytes: 1200,
+        mime: "image/jpeg",
+        originalName: "charola.jpg",
+        width: 1200,
+        height: 900,
+        categoryId: category.json().category.id
+      }
+    });
+    expect(intent.statusCode).toBe(200);
+    expect(intent.json().exists).toBe(false);
+    expect(intent.json().uploadUrl).toMatch(/^local:\/\/upload\//);
+
+    const duplicatePending = await app.inject({
+      method: "POST",
+      url: "/media/upload-intent",
+      headers: { authorization, "idempotency-key": "media-upload-intent-duplicate" },
+      payload: {
+        businessId,
+        sha256,
+        bytes: 1200,
+        mime: "image/jpeg",
+        originalName: "charola.jpg"
+      }
+    });
+    expect(duplicatePending.statusCode).toBe(409);
+    expect(duplicatePending.json().code).toBe("ASSET_EXISTS_PENDING");
+
+    const complete = await app.inject({
+      method: "POST",
+      url: "/media/upload-complete",
+      headers: { authorization, "idempotency-key": "media-upload-complete-1" },
+      payload: { assetId: intent.json().assetId, storagePath: intent.json().storagePath }
+    });
+    expect(complete.statusCode).toBe(202);
+    expect(complete.json().status).toBe("processing");
+
+    await store.completeMediaAssetProcessing({
+      assetId: intent.json().assetId,
+      width: 1200,
+      height: 900,
+      bytes: 900,
+      thumbPath: "workspace/assets/thumb.webp",
+      previewPath: "workspace/assets/preview.webp",
+      fullPath: "workspace/assets/full.jpg",
+      phash: "0000000000000000"
+    });
+
+    const similarIntent = await app.inject({
+      method: "POST",
+      url: "/media/upload-intent",
+      headers: { authorization, "idempotency-key": "media-upload-intent-similar" },
+      payload: {
+        businessId,
+        sha256: "b".repeat(64),
+        bytes: 1000,
+        mime: "image/jpeg",
+        originalName: "charola-parecida.jpg"
+      }
+    });
+    expect(similarIntent.statusCode).toBe(200);
+    await store.completeMediaAssetProcessing({
+      assetId: similarIntent.json().assetId,
+      width: 1000,
+      height: 900,
+      bytes: 850,
+      thumbPath: "workspace/assets/similar-thumb.webp",
+      previewPath: "workspace/assets/similar-preview.webp",
+      fullPath: "workspace/assets/similar-full.jpg",
+      phash: "000000000000000f"
+    });
+
+    const dedup = await app.inject({
+      method: "POST",
+      url: "/media/upload-intent",
+      headers: { authorization, "idempotency-key": "media-upload-intent-dedup" },
+      payload: {
+        businessId,
+        sha256,
+        bytes: 1200,
+        mime: "image/jpeg",
+        originalName: "charola-otra.jpg"
+      }
+    });
+    expect(dedup.statusCode).toBe(200);
+    expect(dedup.json().exists).toBe(true);
+    expect(dedup.json().assetId).toBe(intent.json().assetId);
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/media/assets?search=charola",
+      headers: { authorization }
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().items).toHaveLength(2);
+
+    const similar = await app.inject({
+      method: "GET",
+      url: `/media/assets/${intent.json().assetId}/similar?threshold=4`,
+      headers: { authorization }
+    });
+    expect(similar.statusCode).toBe(200);
+    expect(similar.json().items[0].asset.id).toBe(similarIntent.json().assetId);
+    expect(similar.json().items[0].distance).toBe(4);
+
+    const menuIngest = await app.inject({
+      method: "POST",
+      url: "/menu/ingest",
+      headers: { authorization, "idempotency-key": "menu-ingest-1" },
+      payload: {
+        sourceType: "text",
+        text: "Charolas\nCharola botanera $180"
+      }
+    });
+    expect(menuIngest.statusCode).toBe(202);
+    expect(menuIngest.json().status).toBe("queued");
+    await store.completeMenuIngest({
+      jobId: menuIngest.json().jobId,
+      workspaceId: select.json().business.workspaceId,
+      result: {
+        schemaVersion: "menu_parse_result.v1",
+        categories: ["Charolas"],
+        warnings: [],
+        items: [
+          {
+            name: "Charola botanera",
+            description: null,
+            priceCents: 18000,
+            categoryName: "Charolas",
+            keywords: ["charola", "botanera"]
+          }
+        ]
+      }
+    });
+    const menuItems = await app.inject({
+      method: "GET",
+      url: "/menu/items",
+      headers: { authorization }
+    });
+    expect(menuItems.statusCode).toBe(200);
+    expect(menuItems.json().items[0].name).toBe("Charola botanera");
+
+    const selection = await app.inject({
+      method: "POST",
+      url: "/media/selections",
+      headers: { authorization, "idempotency-key": "media-selection-1" },
+      payload: { name: "Lote prueba", assetIds: [intent.json().assetId] }
+    });
+    expect(selection.statusCode).toBe(200);
+    expect(selection.json().selection.assetIds).toEqual([intent.json().assetId]);
+
+    await app.close();
+    await rm(path, { force: true });
+  });
+
   it("keeps real page import server-side and requires a configured test token", async () => {
     const path = join(tmpdir(), `fbmaniaco-api-real-page-${Date.now()}.json`);
     const config = makeConfig(path);
@@ -568,6 +760,20 @@ describe("api bootstrap and tenancy", () => {
     });
     expect(afterPublish.json().scheduledPosts[0].status).toBe("publicada");
     expect(afterPublish.json().scheduledPosts[0].facebookPostId).toBeTruthy();
+    expect(afterPublish.json().scheduledPosts[0].facebookPhotoId).toBeTruthy();
+
+    const reuseStats = await app.inject({
+      method: "GET",
+      url: `/businesses/${businessId}/facebook-photo-reuse`,
+      headers: { authorization }
+    });
+    expect(reuseStats.statusCode).toBe(200);
+    expect(reuseStats.json()).toMatchObject({
+      schemaVersion: "facebook_photo_reuse_stats.v1",
+      uniqueUploads: 1,
+      totalUsages: 1,
+      uploadsSaved: 0
+    });
 
     const replay = await app.inject({
       method: "POST",

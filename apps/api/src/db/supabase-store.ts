@@ -10,6 +10,14 @@ import {
   Business,
   MetaPage,
   BatchSummary,
+  GalleryMediaAsset,
+  hammingDistanceHex64,
+  MediaCategory,
+  MenuItem,
+  MenuParseResult,
+  ParsedMenuItem,
+  SimilarMediaAsset,
+  MediaSelection,
   Photo,
   UploadIntent,
   VisionAnalysis,
@@ -32,7 +40,7 @@ import {
   PersistedMetaAuthorizationInput,
   StoredJob,
 } from "./types.js";
-import { publishFacebookPagePost } from "@fbmaniaco/providers";
+import { publishFacebookPagePost, uploadUnpublishedFacebookPagePhoto } from "@fbmaniaco/providers";
 
 const { Pool } = pg;
 type GenerateStyleOverride = NonNullable<Parameters<DataStore["requestGenerateBatch"]>[0]["styleOverrides"]>[number];
@@ -43,6 +51,7 @@ const decodeServerToken = (value: string | null | undefined) => {
   if (!value?.startsWith("server:")) return null;
   return Buffer.from(value.slice("server:".length), "base64url").toString("utf8");
 };
+const tokenKek = () => process.env.FB_TOKEN_KEK ?? process.env.META_TOKEN_KEK;
 const mediaPreviewToken = (assetId: string, expires: number) =>
   createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
 const MEDIA_PREVIEW_TTL_SECONDS = 24 * 60 * 60;
@@ -256,7 +265,6 @@ const toMediaAsset = (row: Record<string, any>): MediaAsset => {
   const asset: MediaAsset = {
     id: row.id,
     workspaceId: row.workspace_id,
-    businessId: row.business_id,
     kind: row.kind,
     bucket: row.bucket,
     storageKey: row.storage_key,
@@ -265,10 +273,132 @@ const toMediaAsset = (row: Record<string, any>): MediaAsset => {
     isPublic: row.is_public,
     createdAt: new Date(row.created_at).toISOString()
   };
+  if (row.business_id) asset.businessId = row.business_id;
   if (row.batch_id) asset.batchId = row.batch_id;
   if (row.photo_id) asset.photoId = row.photo_id;
   if (row.variant_id) asset.variantId = row.variant_id;
+  if (row.sha256 !== undefined) asset.sha256 = row.sha256;
+  if (row.phash !== undefined) asset.phash = row.phash;
+  if (row.display_name !== undefined) asset.displayName = row.display_name;
+  if (row.original_name !== undefined) asset.originalName = row.original_name;
+  if (row.category_id !== undefined) asset.categoryId = row.category_id;
+  if (row.width !== undefined) asset.width = row.width;
+  if (row.height !== undefined) asset.height = row.height;
+  if (row.bytes !== undefined) asset.bytes = row.bytes === null ? null : Number(row.bytes);
+  if (row.thumb_path !== undefined) asset.thumbPath = row.thumb_path;
+  if (row.preview_path !== undefined) asset.previewPath = row.preview_path;
+  if (row.full_path !== undefined) asset.fullPath = row.full_path;
+  if (row.usage_count !== undefined) asset.usageCount = row.usage_count;
+  if (row.last_used_at !== undefined) asset.lastUsedAt = row.last_used_at ? new Date(row.last_used_at).toISOString() : null;
+  if (row.archived_at !== undefined) asset.archivedAt = row.archived_at ? new Date(row.archived_at).toISOString() : null;
+  if (row.status !== undefined) asset.status = row.status;
+  if (row.error_reason !== undefined) asset.errorReason = row.error_reason;
+  if (row.processed_at !== undefined) asset.processedAt = row.processed_at ? new Date(row.processed_at).toISOString() : null;
+  if (row.updated_at !== undefined) asset.updatedAt = new Date(row.updated_at).toISOString();
   return asset;
+};
+
+const toGalleryAsset = (row: Record<string, any>): GalleryMediaAsset => {
+  const asset = toMediaAsset(row);
+  return {
+    id: asset.id,
+    workspaceId: asset.workspaceId,
+    ...(asset.businessId ? { businessId: asset.businessId } : {}),
+    ...(asset.batchId ? { batchId: asset.batchId } : {}),
+    ...(asset.photoId ? { photoId: asset.photoId } : {}),
+    ...(asset.variantId ? { variantId: asset.variantId } : {}),
+    kind: asset.kind,
+    bucket: asset.bucket,
+    storageKey: asset.storageKey,
+    mimeType: asset.mimeType,
+    fileSize: asset.fileSize,
+    isPublic: asset.isPublic,
+    sha256: asset.sha256 ?? null,
+    phash: asset.phash ?? null,
+    displayName: asset.displayName ?? null,
+    originalName: asset.originalName ?? null,
+    categoryId: asset.categoryId ?? null,
+    width: asset.width ?? null,
+    height: asset.height ?? null,
+    bytes: asset.bytes ?? null,
+    thumbPath: asset.thumbPath ?? null,
+    previewPath: asset.previewPath ?? null,
+    fullPath: asset.fullPath ?? null,
+    usageCount: asset.usageCount ?? 0,
+    lastUsedAt: asset.lastUsedAt ?? null,
+    archivedAt: asset.archivedAt ?? null,
+    status: asset.status ?? "ready",
+    errorReason: asset.errorReason ?? null,
+    processedAt: asset.processedAt ?? null,
+    createdAt: asset.createdAt,
+    updatedAt: asset.updatedAt ?? asset.createdAt
+  };
+};
+
+const toMediaCategory = (row: Record<string, any>): MediaCategory => ({
+  id: row.id,
+  workspaceId: row.workspace_id,
+  name: row.name,
+  slug: row.slug,
+  color: row.color ?? null,
+  sortOrder: row.sort_order,
+  createdAt: new Date(row.created_at).toISOString(),
+  updatedAt: new Date(row.updated_at).toISOString()
+});
+
+const toMenuItem = (row: Record<string, any>): MenuItem => ({
+  id: row.id,
+  workspaceId: row.workspace_id,
+  categoryId: row.category_id ?? null,
+  name: row.name,
+  description: row.description ?? null,
+  priceCents: row.price_cents === null || row.price_cents === undefined ? null : Number(row.price_cents),
+  keywords: json(row.keywords, []),
+  createdAt: new Date(row.created_at).toISOString(),
+  updatedAt: new Date(row.updated_at).toISOString()
+});
+
+const toMediaSelection = (row: Record<string, any>): MediaSelection => ({
+  id: row.id,
+  workspaceId: row.workspace_id,
+  userId: row.user_id,
+  name: row.name ?? null,
+  assetIds: json(row.asset_ids, []),
+  metadata: json(row.metadata, {}),
+  status: row.status,
+  createdAt: new Date(row.created_at).toISOString(),
+  updatedAt: new Date(row.updated_at).toISOString()
+});
+
+const slugify = (value: string) =>
+  value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "categoria";
+
+const normalizeSearchText = (value: string | null | undefined) =>
+  (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]+/g, " ")
+    .trim();
+
+const normalizeKeywords = (keywords: string[]) =>
+  Array.from(new Set(keywords.map(normalizeSearchText).filter((keyword) => keyword.length >= 2))).slice(0, 20);
+
+const menuItemMatchesAsset = (item: ParsedMenuItem, asset: GalleryMediaAsset) => {
+  const haystack = normalizeSearchText([asset.displayName, asset.originalName, asset.storageKey].filter(Boolean).join(" "));
+  return normalizeKeywords([item.name, ...item.keywords]).some((keyword) => haystack.includes(keyword));
+};
+
+const displayNameForAsset = (input: { categorySlug?: string | null; createdAt: string; sequence: number; originalName: string }) => {
+  const month = input.createdAt.slice(0, 7);
+  const extension = input.originalName.includes(".") ? input.originalName.slice(input.originalName.lastIndexOf(".")) : ".jpg";
+  return `${input.categorySlug || "sin_categoria"}_${month}_${String(input.sequence).padStart(3, "0")}${extension.toLowerCase()}`;
 };
 
 const toVariant = (row: Record<string, any>): Variant => {
@@ -320,6 +450,8 @@ const toScheduledPost = (row: Record<string, any>): ScheduledPost => {
     updatedAt: new Date(row.updated_at).toISOString()
   };
   if (row.facebook_post_id !== undefined) post.facebookPostId = row.facebook_post_id;
+  if (row.fb_photo_id !== undefined) post.facebookPhotoId = row.fb_photo_id;
+  if (row.fb_photo_reused !== undefined) post.facebookPhotoReused = row.fb_photo_reused;
   if (row.remote_post_type !== undefined) post.remotePostType = row.remote_post_type;
   if (row.remote_post_url !== undefined) post.remotePostUrl = row.remote_post_url;
   if (row.graph_api_version !== undefined) post.graphApiVersion = row.graph_api_version;
@@ -726,25 +858,39 @@ export class SupabaseDataStoreCore {
       const authorization = authorizationResult.rows[0];
       for (const page of input.pages) {
         const existingPage = await client.query(
-          "select encrypted_page_access_token, page_access_token_key_id from public.facebook_pages where workspace_id = $1 and meta_page_id = $2",
+          `select encrypted_page_access_token, encrypted_page_access_token_ciphertext,
+                  page_access_token_key_id, page_access_token_encryption_version
+           from public.facebook_pages where workspace_id = $1 and meta_page_id = $2`,
           [input.workspaceId, page.metaPageId]
         );
-        const encryptedPageAccessToken = page.pageAccessToken
-          ? encodeServerToken(page.pageAccessToken)
-          : existingPage.rows[0]?.encrypted_page_access_token ?? null;
-        const pageAccessTokenKeyId = encryptedPageAccessToken ? "server" : existingPage.rows[0]?.page_access_token_key_id ?? null;
+        const tokenKekValue = tokenKek();
+        const ciphertext = page.pageAccessToken && tokenKekValue
+          ? (await client.query("select pgp_sym_encrypt($1, $2, 'cipher-algo=aes256') as token", [page.pageAccessToken, tokenKekValue]))
+              .rows[0]?.token
+          : existingPage.rows[0]?.encrypted_page_access_token_ciphertext ?? null;
+        const encryptedPageAccessToken =
+          page.pageAccessToken && !tokenKekValue
+            ? encodeServerToken(page.pageAccessToken)
+            : tokenKekValue
+              ? null
+              : existingPage.rows[0]?.encrypted_page_access_token ?? null;
+        const pageAccessTokenKeyId = ciphertext ? "pgcrypto" : encryptedPageAccessToken ? "server" : existingPage.rows[0]?.page_access_token_key_id ?? null;
+        const encryptionVersion = ciphertext ? "pgcrypto_aes256" : encryptedPageAccessToken ? "legacy_base64" : existingPage.rows[0]?.page_access_token_encryption_version ?? "none";
         await client.query(
           `insert into public.facebook_pages
            (id, workspace_id, meta_authorization_id, meta_page_id, page_name, page_access_token_status,
-            encrypted_page_access_token, page_access_token_key_id, cover_photo_url, profile_photo_url, category, tasks, is_granted,
+            encrypted_page_access_token, encrypted_page_access_token_ciphertext, page_access_token_key_id,
+            page_access_token_encryption_version, cover_photo_url, profile_photo_url, category, tasks, is_granted,
             can_publish, granted_scopes, declined_scopes, created_at, updated_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb, $16::jsonb, now(), now())
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17::jsonb, $18::jsonb, now(), now())
            on conflict (workspace_id, meta_page_id) do update
            set meta_authorization_id = excluded.meta_authorization_id,
                page_name = excluded.page_name,
                page_access_token_status = excluded.page_access_token_status,
                encrypted_page_access_token = excluded.encrypted_page_access_token,
+               encrypted_page_access_token_ciphertext = excluded.encrypted_page_access_token_ciphertext,
                page_access_token_key_id = excluded.page_access_token_key_id,
+               page_access_token_encryption_version = excluded.page_access_token_encryption_version,
                cover_photo_url = excluded.cover_photo_url,
                profile_photo_url = excluded.profile_photo_url,
                category = excluded.category,
@@ -762,7 +908,9 @@ export class SupabaseDataStoreCore {
             page.pageName,
             page.pageAccessTokenStatus,
             encryptedPageAccessToken,
+            ciphertext,
             pageAccessTokenKeyId,
+            encryptionVersion,
             page.coverPhotoUrl ?? null,
             page.profilePhotoUrl ?? null,
             page.category ?? null,
@@ -1156,6 +1304,520 @@ export class SupabaseDataStoreCore {
   async getMediaAsset(input: { assetId: string }): Promise<MediaAsset | null> {
     const result = await this.pool.query("select * from public.media_assets where id = $1", [input.assetId]);
     return result.rows[0] ? toMediaAsset(result.rows[0]) : null;
+  }
+
+  async createMediaUploadIntent(input: Parameters<DataStore["createMediaUploadIntent"]>[0]) {
+    await this.requireBusiness(input.workspaceId, input.businessId);
+    this.assertUploadShape(input.mime, input.bytes, input.originalName);
+    const pending = await this.pool.query(
+      "select * from public.media_assets where workspace_id = $1 and sha256 = $2 and status = 'pending' limit 1",
+      [input.workspaceId, input.sha256]
+    );
+    if (pending.rows[0]) {
+      throw new AppError({
+        code: "ASSET_EXISTS_PENDING",
+        statusCode: 409,
+        message: "Another upload is already pending for this hash",
+        userMessage: "Esa foto ya se esta subiendo.",
+        retryable: true,
+        action: "retry"
+      });
+    }
+    const existing = await this.pool.query(
+      "select * from public.media_assets where workspace_id = $1 and sha256 = $2 and archived_at is null limit 1",
+      [input.workspaceId, input.sha256]
+    );
+    if (existing.rows[0]) return { exists: true, asset: toGalleryAsset(existing.rows[0]) };
+    const assetId = randomUUID();
+    const categoryResult = input.categoryId
+      ? await this.pool.query("select slug from public.media_categories where workspace_id = $1 and id = $2", [
+          input.workspaceId,
+          input.categoryId
+        ])
+      : { rows: [] as Array<{ slug: string }> };
+    if (input.categoryId && !categoryResult.rows[0]) {
+      throw new AppError({
+        code: "media_category_not_found",
+        statusCode: 404,
+        message: "Media category not found",
+        userMessage: "No encontramos esa categoria.",
+        retryable: false,
+        action: "refresh"
+      });
+    }
+    const sequenceResult = await this.pool.query(
+      "select count(*)::int as count from public.media_assets where workspace_id = $1 and category_id is not distinct from $2",
+      [input.workspaceId, input.categoryId ?? null]
+    );
+    const storagePath = `${input.workspaceId}/assets/${assetId}/upload-raw`;
+    const timestamp = now();
+    const result = await this.pool.query(
+      `insert into public.media_assets
+       (id, workspace_id, business_id, kind, bucket, storage_key, mime_type, file_size, is_public,
+        sha256, display_name, original_name, category_id, width, height, bytes, usage_count, status, created_at, updated_at)
+       values ($1, $2, $3, 'original', $4, $5, $6, $7, false,
+               $8, $9, $10, $11, $12, $13, $14, 0, 'pending', $15, $15)
+       returning *`,
+      [
+        assetId,
+        input.workspaceId,
+        input.businessId,
+        MEDIA_BUCKET,
+        storagePath,
+        input.mime,
+        input.bytes,
+        input.sha256,
+        displayNameForAsset({
+          categorySlug: categoryResult.rows[0]?.slug ?? null,
+          createdAt: timestamp,
+          sequence: Number(sequenceResult.rows[0]?.count ?? 0) + 1,
+          originalName: input.originalName
+        }),
+        input.originalName,
+        input.categoryId ?? null,
+        input.width ?? null,
+        input.height ?? null,
+        input.bytes,
+        timestamp
+      ]
+    );
+    return {
+      exists: false,
+      asset: toGalleryAsset(result.rows[0]),
+      storagePath,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+    };
+  }
+
+  async completeMediaUpload(input: Parameters<DataStore["completeMediaUpload"]>[0]) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const assetResult = await client.query(
+        "select * from public.media_assets where workspace_id = $1 and id = $2 for update",
+        [input.workspaceId, input.assetId]
+      );
+      const asset = assetResult.rows[0];
+      if (!asset) throw this.mediaAssetNotFound();
+      if (asset.storage_key !== input.storagePath || asset.status !== "pending") {
+        throw new AppError({
+          code: "media_upload_invalid_state",
+          statusCode: 409,
+          message: "Media upload is not pending for this storage path",
+          userMessage: "La subida de esa foto no esta en un estado valido.",
+          retryable: false,
+          action: "refresh"
+        });
+      }
+      const updated = await client.query(
+        "update public.media_assets set status = 'processing', updated_at = now() where id = $1 returning *",
+        [asset.id]
+      );
+      await client.query("commit");
+      const jobInput: Parameters<DataStore["createJob"]>[0] = {
+        type: "media:process",
+        workspaceId: asset.workspace_id,
+        dedupeKey: `media:process:${asset.id}`,
+        payload: { assetId: asset.id, requestId: input.requestId }
+      };
+      if (asset.business_id) jobInput.businessId = asset.business_id;
+      const job = await this.createJob(jobInput);
+      return { asset: toGalleryAsset(updated.rows[0]), job };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listMediaAssets(input: Parameters<DataStore["listMediaAssets"]>[0]) {
+    const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+    const offset = input.cursor ? Math.max(0, Number(Buffer.from(input.cursor, "base64url").toString("utf8")) || 0) : 0;
+    const sort =
+      input.sort === "name"
+        ? "coalesce(display_name, original_name, storage_key) asc, id asc"
+        : input.sort === "most_used"
+          ? "usage_count desc, created_at desc, id asc"
+          : "updated_at desc, created_at desc, id asc";
+    const values: unknown[] = [input.workspaceId];
+    const clauses = ["workspace_id = $1", "kind = 'original'"];
+    if (input.archived) clauses.push("archived_at is not null");
+    else clauses.push("archived_at is null");
+    if (input.categoryId) {
+      values.push(input.categoryId);
+      clauses.push(`category_id = $${values.length}`);
+    }
+    if (input.unused) clauses.push("last_used_at is null");
+    if (input.search) {
+      values.push(`%${input.search.toLowerCase()}%`);
+      clauses.push(`(lower(coalesce(display_name, '')) like $${values.length} or lower(coalesce(original_name, '')) like $${values.length})`);
+    }
+    if (input.tag) {
+      values.push(input.tag.toLowerCase());
+      clauses.push(`exists (
+        select 1 from public.media_asset_tags mat
+        join public.media_tags mt on mt.id = mat.tag_id
+        where mat.asset_id = media_assets.id and lower(mt.name) = $${values.length}
+      )`);
+    }
+    const count = await this.pool.query(`select count(*)::int as total from public.media_assets where ${clauses.join(" and ")}`, values);
+    const result = await this.pool.query(
+      `select * from public.media_assets
+       where ${clauses.join(" and ")}
+       order by ${sort}
+       limit $${values.length + 1} offset $${values.length + 2}`,
+      [...values, limit, offset]
+    );
+    return {
+      items: result.rows.map(toGalleryAsset),
+      nextCursor: offset + limit < Number(count.rows[0]?.total ?? 0) ? Buffer.from(String(offset + limit)).toString("base64url") : null,
+      total: Number(count.rows[0]?.total ?? 0)
+    };
+  }
+
+  async updateMediaAsset(input: Parameters<DataStore["updateMediaAsset"]>[0]) {
+    if (input.categoryId !== undefined && input.categoryId !== null) {
+      const category = await this.pool.query("select 1 from public.media_categories where workspace_id = $1 and id = $2", [
+        input.workspaceId,
+        input.categoryId
+      ]);
+      if (!category.rows[0]) throw this.mediaCategoryNotFound();
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const updated = await client.query(
+        `update public.media_assets
+         set display_name = coalesce($3, display_name),
+             category_id = case when $4::boolean then $5 else category_id end,
+             updated_at = now()
+         where workspace_id = $1 and id = $2
+         returning *`,
+        [input.workspaceId, input.assetId, input.displayName ?? null, input.categoryId !== undefined, input.categoryId ?? null]
+      );
+      if (!updated.rows[0]) throw this.mediaAssetNotFound();
+      if (input.tags !== undefined) {
+        await client.query("delete from public.media_asset_tags where asset_id = $1", [input.assetId]);
+        for (const tagName of input.tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 30)) {
+          const tag = await client.query(
+            `insert into public.media_tags (id, workspace_id, name, created_at)
+             values ($1, $2, $3, now())
+             on conflict (workspace_id, name) do update set name = excluded.name
+             returning id`,
+            [randomUUID(), input.workspaceId, tagName]
+          );
+          await client.query(
+            "insert into public.media_asset_tags (asset_id, tag_id) values ($1, $2) on conflict do nothing",
+            [input.assetId, tag.rows[0].id]
+          );
+        }
+      }
+      await client.query("commit");
+      return toGalleryAsset(updated.rows[0]);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async archiveMediaAsset(input: Parameters<DataStore["archiveMediaAsset"]>[0]) {
+    const result = await this.pool.query(
+      "update public.media_assets set archived_at = now(), updated_at = now() where workspace_id = $1 and id = $2 returning *",
+      [input.workspaceId, input.assetId]
+    );
+    if (!result.rows[0]) throw this.mediaAssetNotFound();
+    return toGalleryAsset(result.rows[0]);
+  }
+
+  async restoreMediaAsset(input: Parameters<DataStore["restoreMediaAsset"]>[0]) {
+    const result = await this.pool.query(
+      "update public.media_assets set archived_at = null, updated_at = now() where workspace_id = $1 and id = $2 returning *",
+      [input.workspaceId, input.assetId]
+    );
+    if (!result.rows[0]) throw this.mediaAssetNotFound();
+    return toGalleryAsset(result.rows[0]);
+  }
+
+  async createMediaCategory(input: Parameters<DataStore["createMediaCategory"]>[0]) {
+    const slug = slugify(input.slug ?? input.name);
+    const result = await this.pool.query(
+      `insert into public.media_categories (id, workspace_id, name, slug, color, sort_order, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, now(), now())
+       on conflict (workspace_id, slug) do update
+       set name = excluded.name, color = excluded.color, sort_order = excluded.sort_order, updated_at = now()
+       returning *`,
+      [randomUUID(), input.workspaceId, input.name.trim(), slug, input.color ?? null, input.sortOrder ?? 0]
+    );
+    return toMediaCategory(result.rows[0]);
+  }
+
+  async listMediaCategories(input: Parameters<DataStore["listMediaCategories"]>[0]) {
+    const result = await this.pool.query(
+      "select * from public.media_categories where workspace_id = $1 order by sort_order asc, name asc",
+      [input.workspaceId]
+    );
+    return result.rows.map(toMediaCategory);
+  }
+
+  async createMediaSelection(input: Parameters<DataStore["createMediaSelection"]>[0]) {
+    const result = await this.pool.query(
+      `insert into public.media_selections (id, workspace_id, user_id, name, asset_ids, metadata, status, created_at, updated_at)
+       values ($1, $2, $3, $4, $5::text[], $6::jsonb, 'draft', now(), now())
+       returning *`,
+      [randomUUID(), input.workspaceId, input.userId, input.name ?? null, input.assetIds ?? [], JSON.stringify(input.metadata ?? {})]
+    );
+    return toMediaSelection(result.rows[0]);
+  }
+
+  async listActiveMediaSelections(input: Parameters<DataStore["listActiveMediaSelections"]>[0]) {
+    const result = await this.pool.query(
+      "select * from public.media_selections where workspace_id = $1 and user_id = $2 and status = 'draft' order by updated_at desc",
+      [input.workspaceId, input.userId]
+    );
+    return result.rows.map(toMediaSelection);
+  }
+
+  async updateMediaSelection(input: Parameters<DataStore["updateMediaSelection"]>[0]) {
+    const result = await this.pool.query(
+      `update public.media_selections
+       set name = case when $4::boolean then $5 else name end,
+           asset_ids = case when $6::boolean then $7::text[] else asset_ids end,
+           metadata = case when $8::boolean then $9::jsonb else metadata end,
+           updated_at = now()
+       where workspace_id = $1 and user_id = $2 and id = $3
+       returning *`,
+      [
+        input.workspaceId,
+        input.userId,
+        input.selectionId,
+        input.name !== undefined,
+        input.name ?? null,
+        input.assetIds !== undefined,
+        input.assetIds ?? [],
+        input.metadata !== undefined,
+        JSON.stringify(input.metadata ?? {})
+      ]
+    );
+    if (!result.rows[0]) throw this.mediaSelectionNotFound();
+    return toMediaSelection(result.rows[0]);
+  }
+
+  async consumeMediaSelection(input: Parameters<DataStore["consumeMediaSelection"]>[0]) {
+    const result = await this.pool.query(
+      `update public.media_selections
+       set status = 'consumed', updated_at = now()
+       where workspace_id = $1 and user_id = $2 and id = $3
+       returning *`,
+      [input.workspaceId, input.userId, input.selectionId]
+    );
+    if (!result.rows[0]) throw this.mediaSelectionNotFound();
+    const selection = toMediaSelection(result.rows[0]);
+    if (!input.businessId) return { selection };
+    const batch = await this.createBatch({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      actorId: input.actorId,
+      requestId: input.requestId
+    });
+    return { selection, batch };
+  }
+
+  async deleteMediaSelection(input: Parameters<DataStore["deleteMediaSelection"]>[0]) {
+    const result = await this.pool.query(
+      `update public.media_selections
+       set status = 'discarded', updated_at = now()
+       where workspace_id = $1 and user_id = $2 and id = $3
+       returning *`,
+      [input.workspaceId, input.userId, input.selectionId]
+    );
+    if (!result.rows[0]) throw this.mediaSelectionNotFound();
+    return toMediaSelection(result.rows[0]);
+  }
+
+  async completeMediaAssetProcessing(input: Parameters<DataStore["completeMediaAssetProcessing"]>[0]) {
+    const result = await this.pool.query(
+      `update public.media_assets
+       set width = $2, height = $3, bytes = $4, thumb_path = $5, preview_path = $6,
+           full_path = $7, storage_key = $7, mime_type = 'image/jpeg', file_size = $4,
+           phash = coalesce($8, phash),
+           status = 'ready', error_reason = null, processed_at = now(), updated_at = now()
+       where id = $1
+       returning *`,
+      [input.assetId, input.width, input.height, input.bytes, input.thumbPath, input.previewPath, input.fullPath, input.phash ?? null]
+    );
+    if (!result.rows[0]) throw this.mediaAssetNotFound();
+    return toGalleryAsset(result.rows[0]);
+  }
+
+  async failMediaAssetProcessing(input: Parameters<DataStore["failMediaAssetProcessing"]>[0]) {
+    const result = await this.pool.query(
+      "update public.media_assets set status = 'error', error_reason = $2, updated_at = now() where id = $1 returning *",
+      [input.assetId, input.errorReason]
+    );
+    if (!result.rows[0]) throw this.mediaAssetNotFound();
+    return toGalleryAsset(result.rows[0]);
+  }
+
+  async createMenuIngestJob(input: Parameters<DataStore["createMenuIngestJob"]>[0]) {
+    const payloadHash = createHash("sha256")
+      .update(JSON.stringify({ sourceType: input.sourceType, text: input.text ?? "", fileName: input.fileName ?? "", dataBase64: input.dataBase64 ?? "" }))
+      .digest("hex")
+      .slice(0, 24);
+    const jobInput: Parameters<DataStore["createJob"]>[0] = {
+      type: "menu:parse",
+      workspaceId: input.workspaceId,
+      dedupeKey: `menu:parse:${input.workspaceId}:${payloadHash}`,
+      payload: {
+        actorId: input.actorId,
+        requestId: input.requestId,
+        sourceType: input.sourceType,
+        text: input.text,
+        fileName: input.fileName,
+        mime: input.mime,
+        dataBase64: input.dataBase64
+      }
+    };
+    if (input.businessId) jobInput.businessId = input.businessId;
+    return this.createJob(jobInput);
+  }
+
+  async completeMenuIngest(input: Parameters<DataStore["completeMenuIngest"]>[0]) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const items: MenuItem[] = [];
+      const categories = new Map<string, MediaCategory>();
+      const categorizedAssets = new Map<string, GalleryMediaAsset>();
+      for (const parsed of input.result.items) {
+        const categoryName = parsed.categoryName?.trim() || null;
+        let category: MediaCategory | null = null;
+        if (categoryName) {
+          const slug = slugify(categoryName);
+          const existingCategory = await client.query(
+            "select * from public.media_categories where workspace_id = $1 and slug = $2 limit 1",
+            [input.workspaceId, slug]
+          );
+          if (existingCategory.rows[0]) {
+            category = toMediaCategory(existingCategory.rows[0]);
+          } else {
+            const categoryResult = await client.query(
+              `insert into public.media_categories (id, workspace_id, name, slug, color, sort_order, created_at, updated_at)
+               values ($1, $2, $3, $4, null,
+                 (select count(*)::int from public.media_categories where workspace_id = $2), now(), now())
+               returning *`,
+              [randomUUID(), input.workspaceId, categoryName, slug]
+            );
+            category = toMediaCategory(categoryResult.rows[0]);
+          }
+          categories.set(category.id, category);
+        }
+
+        const existingItem = await client.query(
+          "select * from public.menu_items where workspace_id = $1 and lower(name) = lower($2) limit 1",
+          [input.workspaceId, parsed.name.trim()]
+        );
+        const keywords = normalizeKeywords([parsed.name, ...parsed.keywords]);
+        let item: MenuItem;
+        if (existingItem.rows[0]) {
+          const mergedKeywords = normalizeKeywords([...(toMenuItem(existingItem.rows[0]).keywords ?? []), ...keywords]);
+          const updated = await client.query(
+            `update public.menu_items
+             set category_id = coalesce($3, category_id),
+                 description = coalesce($4, description),
+                 price_cents = coalesce($5, price_cents),
+                 keywords = $6,
+                 updated_at = now()
+             where workspace_id = $1 and lower(name) = lower($2)
+             returning *`,
+            [input.workspaceId, parsed.name.trim(), category?.id ?? null, parsed.description?.trim() || null, parsed.priceCents, mergedKeywords]
+          );
+          item = toMenuItem(updated.rows[0]);
+        } else {
+          const inserted = await client.query(
+            `insert into public.menu_items (id, workspace_id, category_id, name, description, price_cents, keywords, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7, now(), now())
+             returning *`,
+            [
+              randomUUID(),
+              input.workspaceId,
+              category?.id ?? null,
+              parsed.name.trim(),
+              parsed.description?.trim() || null,
+              parsed.priceCents,
+              keywords
+            ]
+          );
+          item = toMenuItem(inserted.rows[0]);
+        }
+        items.push(item);
+
+        if (category) {
+          const assets = await client.query(
+            `select * from public.media_assets
+             where workspace_id = $1 and category_id is null and archived_at is null and status = 'ready'`,
+            [input.workspaceId]
+          );
+          for (const row of assets.rows) {
+            const asset = toGalleryAsset(row);
+            if (menuItemMatchesAsset(parsed, asset)) {
+              const updatedAsset = await client.query(
+                "update public.media_assets set category_id = $2, updated_at = now() where id = $1 returning *",
+                [asset.id, category.id]
+              );
+              categorizedAssets.set(asset.id, toGalleryAsset(updatedAsset.rows[0]));
+            }
+          }
+        }
+      }
+      await client.query("commit");
+      return {
+        items,
+        categories: Array.from(categories.values()),
+        categorizedAssets: Array.from(categorizedAssets.values())
+      };
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listMenuItems(input: Parameters<DataStore["listMenuItems"]>[0]) {
+    const result = await this.pool.query(
+      `select * from public.menu_items
+       where workspace_id = $1 and ($2::uuid is null or category_id = $2::uuid)
+       order by name asc`,
+      [input.workspaceId, input.categoryId ?? null]
+    );
+    return result.rows.map(toMenuItem);
+  }
+
+  async listSimilarMediaAssets(input: Parameters<DataStore["listSimilarMediaAssets"]>[0]): Promise<SimilarMediaAsset[]> {
+    const targetResult = await this.pool.query("select * from public.media_assets where id = $1 and workspace_id = $2", [
+      input.assetId,
+      input.workspaceId
+    ]);
+    if (!targetResult.rows[0]) throw this.mediaAssetNotFound();
+    const target = toGalleryAsset(targetResult.rows[0]);
+    const candidates = await this.pool.query(
+      `select * from public.media_assets
+       where workspace_id = $1 and id <> $2 and phash is not null and archived_at is null and status = 'ready'`,
+      [input.workspaceId, input.assetId]
+    );
+    const threshold = input.threshold ?? 10;
+    const limit = input.limit ?? 20;
+    return candidates.rows
+      .map((row) => {
+        const asset = toGalleryAsset(row);
+        return { asset, distance: hammingDistanceHex64(target.phash, asset.phash) };
+      })
+      .filter((item) => item.distance <= threshold)
+      .sort((a, b) => a.distance - b.distance || b.asset.createdAt.localeCompare(a.asset.createdAt))
+      .slice(0, limit);
   }
 
   async recordAiRun(input: Omit<AiRun, "id" | "createdAt">): Promise<AiRun> {
@@ -1767,6 +2429,25 @@ export class SupabaseDataStoreCore {
     return result.rows.map(toScheduledPost);
   }
 
+  async getFacebookPhotoReuseStats(input: Parameters<DataStore["getFacebookPhotoReuseStats"]>[0]) {
+    const business = await this.requireBusiness(input.workspaceId, input.businessId);
+    const result = await this.pool.query(
+      `select
+         (select count(*)::int from public.media_asset_fb_uploads where facebook_page_id = $1) as unique_uploads,
+         (select count(*)::int from public.media_asset_usages where facebook_page_id = $1) as total_usages`,
+      [business.facebookPageId]
+    );
+    const uniqueUploads = Number(result.rows[0]?.unique_uploads ?? 0);
+    const totalUsages = Number(result.rows[0]?.total_usages ?? 0);
+    return {
+      businessId: business.id,
+      facebookPageId: business.facebookPageId,
+      uniqueUploads,
+      totalUsages,
+      uploadsSaved: Math.max(0, totalUsages - uniqueUploads)
+    };
+  }
+
   async getScheduledPost(input: Parameters<DataStore["getScheduledPost"]>[0]): Promise<ScheduledPost | null> {
     const result = await this.pool.query(
       "select * from public.scheduled_posts where workspace_id = $1 and business_id = $2 and id = $3",
@@ -1814,6 +2495,75 @@ export class SupabaseDataStoreCore {
     return { scheduledPosts: posts };
   }
 
+  private async ensureFacebookPhotoUpload(input: {
+    assetId: string;
+    facebookPageId: string;
+    metaPageId: string;
+    pageAccessToken: string;
+    imageUrl: string;
+    graphApiVersion: string;
+  }): Promise<{ fbPhotoId: string; reused: boolean; providerTraceId?: string }> {
+    const existing = await this.pool.query(
+      "select fb_photo_id from public.media_asset_fb_uploads where asset_id = $1 and facebook_page_id = $2 limit 1",
+      [input.assetId, input.facebookPageId]
+    );
+    if (existing.rows[0]?.fb_photo_id) {
+      await this.pool.query(
+        "update public.media_asset_fb_uploads set last_used_at = now() where asset_id = $1 and facebook_page_id = $2",
+        [input.assetId, input.facebookPageId]
+      );
+      return { fbPhotoId: String(existing.rows[0].fb_photo_id), reused: true };
+    }
+    const uploaded = await uploadUnpublishedFacebookPagePhoto({
+      graphApiVersion: input.graphApiVersion,
+      pageId: input.metaPageId,
+      pageAccessToken: input.pageAccessToken,
+      imageUrl: input.imageUrl
+    });
+    const inserted = await this.pool.query(
+      `insert into public.media_asset_fb_uploads (id, asset_id, facebook_page_id, fb_photo_id, uploaded_at, last_used_at)
+       values ($1, $2, $3, $4, now(), now())
+       on conflict (asset_id, facebook_page_id)
+       do update set last_used_at = now()
+       returning fb_photo_id`,
+      [randomUUID(), input.assetId, input.facebookPageId, uploaded.fbPhotoId]
+    );
+    return {
+      fbPhotoId: String(inserted.rows[0]?.fb_photo_id ?? uploaded.fbPhotoId),
+      reused: false,
+      ...(uploaded.providerTraceId ? { providerTraceId: uploaded.providerTraceId } : {})
+    };
+  }
+
+  private async recordMediaAssetUsage(input: {
+    assetId: string;
+    scheduledPostId: string;
+    variantId: string;
+    facebookPageId: string;
+  }) {
+    await this.pool.query(
+      `insert into public.media_asset_usages (id, asset_id, scheduled_post_id, variant_id, facebook_page_id, used_at)
+       select $1, $2, $3, $4, $5, now()
+       where not exists (
+         select 1 from public.media_asset_usages
+         where asset_id = $2 and scheduled_post_id = $3
+       )`,
+      [randomUUID(), input.assetId, input.scheduledPostId, input.variantId, input.facebookPageId]
+    );
+    await this.pool.query(
+      `update public.media_assets
+       set usage_count = (
+         select count(*)::int from public.media_asset_usages where asset_id = $1
+       ), last_used_at = now(), updated_at = now()
+       where id = $1`,
+      [input.assetId]
+    );
+    await this.pool.query(
+      "update public.media_asset_fb_uploads set last_used_at = now() where asset_id = $1 and facebook_page_id = $2",
+      [input.assetId, input.facebookPageId]
+    );
+  }
+
   private async scheduleRemotePostIfPossible(post: ScheduledPost, job: StoredJob): Promise<boolean> {
     if (post.status !== "programada" || post.remoteStatus !== "no_enviado") return post.remoteStatus === "confirmado_meta";
     const variant = await this.requireVariant(post.workspaceId, post.businessId, post.batchId, post.variantId);
@@ -1830,11 +2580,14 @@ export class SupabaseDataStoreCore {
       throw this.scheduledPostStateError("media_not_available");
     }
     const pageResult = await this.pool.query(
-      "select meta_page_id, encrypted_page_access_token from public.facebook_pages where id = $1 and workspace_id = $2",
+      `select meta_page_id, encrypted_page_access_token, encrypted_page_access_token_ciphertext
+       from public.facebook_pages where id = $1 and workspace_id = $2`,
       [post.pageId, post.workspaceId]
     );
-    const page = pageResult.rows[0] as { meta_page_id?: string; encrypted_page_access_token?: string | null } | undefined;
-    const pageAccessToken = decodeServerToken(page?.encrypted_page_access_token);
+    const page = pageResult.rows[0] as
+      | { meta_page_id?: string; encrypted_page_access_token?: string | null; encrypted_page_access_token_ciphertext?: Buffer | null }
+      | undefined;
+    const pageAccessToken = await this.decryptPageAccessToken(page);
     if (!pageAccessToken || !page?.meta_page_id || page.meta_page_id.startsWith("mock-")) return false;
     const publishImageUrl = publicMediaUrl(String(asset.rows[0].id)) ?? (post.imageUrl && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null);
     if (!publishImageUrl) {
@@ -1854,13 +2607,23 @@ export class SupabaseDataStoreCore {
       status: "started"
     });
     let publishResult: Awaited<ReturnType<typeof publishFacebookPagePost>>;
+    let fbUpload: { fbPhotoId: string; reused: boolean; providerTraceId?: string };
     try {
+      const graphApiVersion = post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0";
+      fbUpload = await this.ensureFacebookPhotoUpload({
+        assetId: String(asset.rows[0].id),
+        facebookPageId: post.pageId,
+        metaPageId: page.meta_page_id,
+        pageAccessToken,
+        imageUrl: publishImageUrl,
+        graphApiVersion
+      });
       publishResult = await publishFacebookPagePost({
-        graphApiVersion: post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0",
+        graphApiVersion,
         pageId: page.meta_page_id,
         pageAccessToken,
         caption: post.caption ?? "",
-        imageUrl: publishImageUrl,
+        attachedMediaFbid: fbUpload.fbPhotoId,
         scheduledForUnix: post.scheduledForUnix ?? Math.floor(new Date(post.scheduledFor).getTime() / 1000)
       });
     } catch (error) {
@@ -1884,7 +2647,8 @@ export class SupabaseDataStoreCore {
       `update public.scheduled_posts
        set facebook_post_id = $2, remote_post_type = $3, remote_post_url = $4,
            delivery_mode = 'remote_schedule', remote_status = 'confirmado_meta',
-           last_remote_sync_at = now(), image_url = $5, remote_trace_id = $6, updated_at = now()
+           last_remote_sync_at = now(), image_url = $5, remote_trace_id = $6,
+           fb_photo_id = $7, fb_photo_reused = $8, updated_at = now()
        where id = $1`,
       [
         post.id,
@@ -1892,9 +2656,17 @@ export class SupabaseDataStoreCore {
         publishResult.remotePostType,
         publishResult.remotePostUrl,
         publishImageUrl,
-        publishResult.providerTraceId ?? null
+        publishResult.providerTraceId ?? fbUpload.providerTraceId ?? null,
+        fbUpload.fbPhotoId,
+        fbUpload.reused
       ]
     );
+    await this.recordMediaAssetUsage({
+      assetId: String(asset.rows[0].id),
+      scheduledPostId: post.id,
+      variantId: post.variantId,
+      facebookPageId: post.pageId
+    });
     await this.upsertExternalOperation({
       operationKey,
       workspaceId: post.workspaceId,
@@ -1938,11 +2710,14 @@ export class SupabaseDataStoreCore {
       status: "started"
     });
     const pageResult = await this.pool.query(
-      "select meta_page_id, encrypted_page_access_token from public.facebook_pages where id = $1 and workspace_id = $2",
+      `select meta_page_id, encrypted_page_access_token, encrypted_page_access_token_ciphertext
+       from public.facebook_pages where id = $1 and workspace_id = $2`,
       [post.pageId, post.workspaceId]
     );
-    const page = pageResult.rows[0] as { meta_page_id?: string; encrypted_page_access_token?: string | null } | undefined;
-    const pageAccessToken = decodeServerToken(page?.encrypted_page_access_token);
+    const page = pageResult.rows[0] as
+      | { meta_page_id?: string; encrypted_page_access_token?: string | null; encrypted_page_access_token_ciphertext?: Buffer | null }
+      | undefined;
+    const pageAccessToken = await this.decryptPageAccessToken(page);
     let remoteTraceId: string | null = null;
     if (!pageAccessToken || !page?.meta_page_id || page.meta_page_id.startsWith("mock-")) {
       await this.upsertExternalOperation({
@@ -1968,15 +2743,25 @@ export class SupabaseDataStoreCore {
       return await this.failScheduledPost(post.id, "missing_public_media_url");
     }
     let publishResult: Awaited<ReturnType<typeof publishFacebookPagePost>>;
+    let fbUpload: { fbPhotoId: string; reused: boolean; providerTraceId?: string };
     try {
+      const graphApiVersion = post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0";
+      fbUpload = await this.ensureFacebookPhotoUpload({
+        assetId: String(asset.rows[0].id),
+        facebookPageId: post.pageId,
+        metaPageId: page.meta_page_id,
+        pageAccessToken,
+        imageUrl: publishImageUrl,
+        graphApiVersion
+      });
       publishResult = await publishFacebookPagePost({
-        graphApiVersion: post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0",
+        graphApiVersion,
         pageId: page.meta_page_id,
         pageAccessToken,
         caption: post.caption ?? "",
-        imageUrl: publishImageUrl
+        attachedMediaFbid: fbUpload.fbPhotoId
       });
-      remoteTraceId = publishResult.providerTraceId ?? null;
+      remoteTraceId = publishResult.providerTraceId ?? fbUpload.providerTraceId ?? null;
     } catch (error) {
       await this.pool.query(
         `update public.scheduled_posts
@@ -1999,7 +2784,7 @@ export class SupabaseDataStoreCore {
        set status = 'publicada', facebook_post_id = $2, remote_post_type = $3,
            remote_post_url = $4, delivery_mode = $5, remote_status = 'confirmado_meta',
            last_remote_sync_at = now(), image_url = $6, remote_trace_id = $7, updated_at = now(),
-           retry_count = retry_count + $8
+           retry_count = retry_count + $8, fb_photo_id = $9, fb_photo_reused = $10
        where id = $1 returning *`,
       [
         post.id,
@@ -2009,10 +2794,18 @@ export class SupabaseDataStoreCore {
         input.publishNow ? "publish_now" : post.deliveryMode,
         publishImageUrl,
         remoteTraceId,
-        input.publishNow ? 0 : 1
+        input.publishNow ? 0 : 1,
+        fbUpload.fbPhotoId,
+        fbUpload.reused
       ]
     );
     await this.pool.query("update public.variants set status = 'publicada', updated_at = now() where id = $1", [post.variantId]);
+    await this.recordMediaAssetUsage({
+      assetId: String(asset.rows[0].id),
+      scheduledPostId: post.id,
+      variantId: post.variantId,
+      facebookPageId: post.pageId
+    });
     await this.upsertExternalOperation({
       operationKey,
       workspaceId: post.workspaceId,
@@ -2193,6 +2986,24 @@ export class SupabaseDataStoreCore {
     return business;
   }
 
+  private async decryptPageAccessToken(
+    page:
+      | { encrypted_page_access_token?: string | null; encrypted_page_access_token_ciphertext?: Buffer | null }
+      | null
+      | undefined
+  ): Promise<string | null> {
+    const tokenKekValue = tokenKek();
+    if (page?.encrypted_page_access_token_ciphertext && tokenKekValue) {
+      const result = await this.pool.query("select pgp_sym_decrypt($1::bytea, $2) as token", [
+        page.encrypted_page_access_token_ciphertext,
+        tokenKekValue
+      ]);
+      const token = result.rows[0]?.token;
+      if (typeof token === "string" && token.trim()) return token;
+    }
+    return decodeServerToken(page?.encrypted_page_access_token);
+  }
+
   private async requireWorkspace(workspaceId: string): Promise<Workspace> {
     const result = await this.pool.query("select * from public.workspaces where id = $1", [workspaceId]);
     if (!result.rows[0]) {
@@ -2224,6 +3035,39 @@ export class SupabaseDataStoreCore {
       statusCode: 404,
       message: "Batch not found in business",
       userMessage: "No encontramos ese lote.",
+      retryable: false,
+      action: "refresh"
+    });
+  }
+
+  private mediaAssetNotFound(): never {
+    throw new AppError({
+      code: "media_asset_not_found",
+      statusCode: 404,
+      message: "Media asset not found",
+      userMessage: "No encontramos esa foto.",
+      retryable: false,
+      action: "refresh"
+    });
+  }
+
+  private mediaCategoryNotFound(): never {
+    throw new AppError({
+      code: "media_category_not_found",
+      statusCode: 404,
+      message: "Media category not found",
+      userMessage: "No encontramos esa categoria.",
+      retryable: false,
+      action: "refresh"
+    });
+  }
+
+  private mediaSelectionNotFound(): never {
+    throw new AppError({
+      code: "media_selection_not_found",
+      statusCode: 404,
+      message: "Media selection not found",
+      userMessage: "No encontramos esa seleccion.",
       retryable: false,
       action: "refresh"
     });

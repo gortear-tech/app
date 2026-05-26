@@ -1,0 +1,43 @@
+bucket_definitions:
+  workspace_media:
+    parameters: |
+      SELECT workspace_id
+      FROM workspace_members
+      WHERE user_id = request.user_id()
+        AND status = 'active'
+    data:
+      - SELECT *
+        FROM media_assets
+        WHERE workspace_id = bucket.workspace_id
+          AND archived_at IS NULL
+      - SELECT *
+        FROM media_categories
+        WHERE workspace_id = bucket.workspace_id
+      - SELECT *
+        FROM menu_items
+        WHERE workspace_id = bucket.workspace_id
+      - SELECT *
+        FROM media_tags
+        WHERE workspace_id = bucket.workspace_id
+      - SELECT mat.*
+        FROM media_asset_tags mat
+        JOIN media_assets ma ON ma.id = mat.asset_id
+        WHERE ma.workspace_id = bucket.workspace_id
+      - SELECT *
+        FROM media_asset_usages
+        WHERE asset_id IN (
+          SELECT id FROM media_assets WHERE workspace_id = bucket.workspace_id
+        )
+      - SELECT mfbu.*
+        FROM media_asset_fb_uploads mfbu
+        JOIN media_assets ma ON ma.id = mfbu.asset_id
+        WHERE ma.workspace_id = bucket.workspace_id
+
+  user_media_selections:
+    parameters: |
+      SELECT request.user_id() AS user_id
+    data:
+      - SELECT *
+        FROM media_selections
+        WHERE user_id = bucket.user_id
+          AND status = 'draft'
