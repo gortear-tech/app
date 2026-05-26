@@ -63,6 +63,7 @@ import {
   getStoredSessionToken,
   ingestMenuText,
   isAuthSessionError,
+  isTransientSessionError,
   listBatches,
   listMenuItems,
   listMetaPages,
@@ -645,6 +646,11 @@ function BootScreen() {
       })
       .catch((error) => {
         authRecoveryAttempted.current = false;
+        if (isTransientSessionError(error)) {
+          setSessionRecoveryState(null);
+          captureMobileException(error, { flow: "session_recovery_transient" });
+          return;
+        }
         setSessionRecoveryState("blocked");
         captureMobileException(error, { flow: "session_recovery" });
       });
@@ -2445,7 +2451,7 @@ function BootScreen() {
         </CenteredScreen>
       );
     }
-    if (token && bootstrap.isError && (sessionRecoveryState || !isAuthSessionError(bootstrap.error))) {
+    if (token && bootstrap.isError && sessionRecoveryState) {
       return (
         <CenteredScreen>
           <Panel title={sessionRecoveryState === "recovering" ? "Recuperando tu sesion" : "No pudimos actualizar la sesion"}>

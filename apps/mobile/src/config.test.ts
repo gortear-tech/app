@@ -28,6 +28,18 @@ describe("mobile config", () => {
     });
   });
 
+  it("forces release builds to production even when local env says development", () => {
+    process.env.EXPO_PUBLIC_APP_ENV = "development";
+    process.env.EXPO_PUBLIC_API_URL = "https://knit-routine-meters-partition.trycloudflare.com";
+    (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false;
+
+    expect(getMobileConfig()).toEqual({
+      appEnv: "production",
+      apiUrl: "https://fbmaniaco-api.onrender.com",
+      updateManifestUrl: productionUpdateManifestUrl
+    });
+  });
+
   it("defaults development bundles to localhost", () => {
     delete process.env.EXPO_PUBLIC_APP_ENV;
     delete process.env.EXPO_PUBLIC_API_URL;
@@ -44,19 +56,20 @@ describe("mobile config", () => {
     process.env.EXPO_PUBLIC_APP_ENV = "production";
     process.env.EXPO_PUBLIC_API_URL = "http://localhost:4000";
 
-    expect(() => getMobileConfig()).toThrow(/public HTTPS API URL/);
+    expect(getMobileConfig().apiUrl).toBe("https://fbmaniaco-api.onrender.com");
   });
 
   it("blocks non-HTTPS staging builds", () => {
     process.env.EXPO_PUBLIC_APP_ENV = "staging";
     process.env.EXPO_PUBLIC_API_URL = "http://api.example.com";
 
-    expect(() => getMobileConfig()).toThrow(/public HTTPS API URL/);
+    expect(getMobileConfig().apiUrl).toBe("https://fbmaniaco-api.onrender.com");
   });
 
   it("allows localhost in development", () => {
     process.env.EXPO_PUBLIC_APP_ENV = "development";
     process.env.EXPO_PUBLIC_API_URL = "http://localhost:4000";
+    (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = true;
 
     expect(getMobileConfig().apiUrl).toBe("http://localhost:4000");
   });
