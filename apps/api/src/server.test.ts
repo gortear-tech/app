@@ -287,8 +287,10 @@ describe("api bootstrap and tenancy", () => {
         originalName: "charola.jpg"
       }
     });
-    expect(duplicatePending.statusCode).toBe(409);
-    expect(duplicatePending.json().code).toBe("ASSET_EXISTS_PENDING");
+    expect(duplicatePending.statusCode).toBe(200);
+    expect(duplicatePending.json().resumable).toBe(true);
+    expect(duplicatePending.json().assetId).toBe(intent.json().assetId);
+    expect(duplicatePending.json().storagePath).toBe(intent.json().storagePath);
 
     const complete = await app.inject({
       method: "POST",
@@ -357,6 +359,8 @@ describe("api bootstrap and tenancy", () => {
     });
     expect(list.statusCode).toBe(200);
     expect(list.json().items).toHaveLength(2);
+    expect(list.json().items[0].thumbnailUrl).toContain("variant=thumb");
+    expect(list.json().items[0].previewUrl).toContain("variant=preview");
 
     const similar = await app.inject({
       method: "GET",

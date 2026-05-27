@@ -15,7 +15,6 @@ import {
   MediaCategory,
   MenuItem,
   MenuParseResult,
-  ParsedMenuItem,
   SimilarMediaAsset,
   MediaSelection,
   Photo,
@@ -40,7 +39,9 @@ import {
   MetaAuthorization,
   PersistedMetaAuthorizationInput,
   StoredJob,
+  WorkerHeartbeat,
 } from "./types.js";
+import { classifyMediaAssetCategory } from "./media-classifier.js";
 import { publishFacebookPagePost, uploadUnpublishedFacebookPagePhoto } from "@fbmaniaco/providers";
 
 const { Pool } = pg;
@@ -53,14 +54,14 @@ const decodeServerToken = (value: string | null | undefined) => {
   return Buffer.from(value.slice("server:".length), "base64url").toString("utf8");
 };
 const tokenKek = () => process.env.FB_TOKEN_KEK ?? process.env.META_TOKEN_KEK;
-const mediaPreviewToken = (assetId: string, expires: number) =>
-  createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
+const mediaPreviewToken = (assetId: string, expires: number, variant = "full") =>
+  createHash("sha256").update(`${assetId}:${expires}:${variant}:fbmaniaco-local-media-preview`).digest("hex");
 const MEDIA_PREVIEW_TTL_SECONDS = 24 * 60 * 60;
 const publicMediaUrl = (assetId: string) => {
   const baseUrl = process.env.PUBLIC_API_URL ?? process.env.API_PUBLIC_URL;
   if (!baseUrl?.startsWith("https://")) return null;
   const expires = Math.floor(Date.now() / 1000) + MEDIA_PREVIEW_TTL_SECONDS;
-  return `${baseUrl.replace(/\/$/, "")}/media/assets/${assetId}/preview?expires=${expires}&token=${mediaPreviewToken(assetId, expires)}`;
+  return `${baseUrl.replace(/\/$/, "")}/media/assets/${assetId}/preview?expires=${expires}&variant=full&token=${mediaPreviewToken(assetId, expires)}`;
 };
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -392,11 +393,6 @@ const normalizeSearchText = (value: string | null | undefined) =>
 const normalizeKeywords = (keywords: string[]) =>
   Array.from(new Set(keywords.map(normalizeSearchText).filter((keyword) => keyword.length >= 2))).slice(0, 20);
 
-const menuItemMatchesAsset = (item: ParsedMenuItem, asset: GalleryMediaAsset) => {
-  const haystack = normalizeSearchText([asset.displayName, asset.originalName, asset.storageKey].filter(Boolean).join(" "));
-  return normalizeKeywords([item.name, ...item.keywords]).some((keyword) => haystack.includes(keyword));
-};
-
 const displayNameForAsset = (input: { categorySlug?: string | null; createdAt: string; sequence: number; originalName: string }) => {
   const month = input.createdAt.slice(0, 7);
   const extension = input.originalName.includes(".") ? input.originalName.slice(input.originalName.lastIndexOf(".")) : ".jpg";
@@ -637,11 +633,80 @@ export class SupabaseDataStoreCore {
     try {
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock(hashtext('fbmaniaco:claim-due-job'))");
+      await client.query(
+        `update public.job_attempts ja
+         set status = 'failed', finished_at = now(), error = 'batch_terminal'
+         where ja.status = 'running'
+           and exists (
+             select 1
+             from public.jobs j
+             join public.batches b on b.id = j.batch_id
+             where j.id = ja.job_id
+               and b.status in ('abandonado', 'abandoned', 'cancelado', 'cancelled')
+               and j.status in ('queued', 'running', 'blocked', 'needs_user_action')
+           )`
+      );
+      await client.query(
+        `update public.jobs j
+         set status = 'cancelled', last_error = 'batch_terminal', updated_at = now()
+         from public.batches b
+         where b.id = j.batch_id
+           and b.status in ('abandonado', 'abandoned', 'cancelado', 'cancelled')
+           and j.status in ('queued', 'running', 'blocked', 'needs_user_action')`
+      );
+      await client.query(
+        `update public.job_attempts
+         set status = 'failed', finished_at = now(), error = 'publish_job_lease_expired'
+         where status = 'running'
+           and job_id in (
+             select id from public.jobs
+             where type = 'publish_post'
+               and status = 'running'
+               and coalesce(lease_expires_at, locked_at + interval '60 seconds') < now()
+           )`
+      );
+      await client.query(
+        `update public.scheduled_posts sp
+         set status = 'estado_incierto',
+             remote_status = 'incierto',
+             remote_error_code = 'publish_job_lease_expired',
+             updated_at = now()
+         from public.jobs j
+         where j.type = 'publish_post'
+           and j.status = 'running'
+           and coalesce(j.lease_expires_at, j.locked_at + interval '60 seconds') < now()
+           and j.payload->>'scheduledPostId' = sp.id
+           and sp.status not in ('publicada', 'published', 'cancelada', 'cancelled')`
+      );
+      await client.query(
+        `update public.jobs
+         set status = 'needs_user_action',
+             last_error = 'publish_job_lease_expired',
+             updated_at = now()
+         where type = 'publish_post'
+           and status = 'running'
+           and coalesce(lease_expires_at, locked_at + interval '60 seconds') < now()`
+      );
       const claimed = await client.query(
         `select * from public.jobs
-         where status = 'queued' and run_after <= now()
+         where run_after <= now()
+           and (
+             status = 'queued'
+             or (
+               status = 'running'
+               and type <> 'publish_post'
+               and attempts < max_attempts
+               and coalesce(lease_expires_at, locked_at + interval '15 minutes') < now()
+             )
+           )
            and (
              type <> 'generate_variant'
+             or (
+               status = 'running'
+               and type <> 'publish_post'
+               and attempts < max_attempts
+               and coalesce(lease_expires_at, locked_at + interval '15 minutes') < now()
+             )
              or not exists (
                select 1 from public.jobs running
                where running.type = 'generate_variant'
@@ -658,6 +723,14 @@ export class SupabaseDataStoreCore {
         return null;
       }
       const job = claimed.rows[0];
+      if (job.status === "running") {
+        await client.query(
+          `update public.job_attempts
+           set status = 'failed', finished_at = now(), error = 'Lease expired before worker completed the job'
+           where job_id = $1 and attempt_number = $2 and status = 'running'`,
+          [job.id, job.attempts]
+        );
+      }
       const updated = await client.query(
         `update public.jobs
          set status = 'running', locked_at = now(), locked_by = $2,
@@ -687,7 +760,71 @@ export class SupabaseDataStoreCore {
     }
   }
 
+  async recordWorkerHeartbeat(input: Parameters<DataStore["recordWorkerHeartbeat"]>[0]): Promise<WorkerHeartbeat | null> {
+    try {
+      const result = await this.pool.query(
+        `insert into public.worker_heartbeats (worker_id, service, environment, release, status, last_beat_at, metadata)
+         values ($1, $2, $3, $4, $5, now(), $6::jsonb)
+         on conflict (worker_id) do update
+         set service = excluded.service,
+             environment = excluded.environment,
+             release = excluded.release,
+             status = excluded.status,
+             last_beat_at = now(),
+             metadata = excluded.metadata
+         returning *`,
+        [
+          input.workerId,
+          input.service,
+          input.environment,
+          input.release,
+          input.status,
+          JSON.stringify(input.metadata ?? {})
+        ]
+      );
+      const row = result.rows[0];
+      return {
+        workerId: row.worker_id,
+        service: row.service,
+        environment: row.environment,
+        release: row.release,
+        status: row.status,
+        lastBeatAt: new Date(row.last_beat_at).toISOString(),
+        metadata: row.metadata ?? {}
+      };
+    } catch (error) {
+      if ((error as { code?: string }).code === "42P01") return null;
+      throw error;
+    }
+  }
+
+  async getWorkerStatus(input: { maxAgeMs: number }) {
+    try {
+      const result = await this.pool.query(
+        `select *, now() as db_now
+         from public.worker_heartbeats
+         order by last_beat_at desc
+         limit 1`
+      );
+      const row = result.rows[0];
+      if (!row) return { ok: false };
+      const dbNow = new Date(row.db_now).getTime();
+      const lastBeat = new Date(row.last_beat_at).getTime();
+      return {
+        ok: dbNow - lastBeat <= input.maxAgeMs && row.status !== "stopping" && row.status !== "error",
+        lastBeatAt: new Date(row.last_beat_at).toISOString(),
+        workerId: row.worker_id,
+        status: row.status
+      };
+    } catch (error) {
+      if ((error as { code?: string }).code === "42P01") return { ok: false };
+      throw error;
+    }
+  }
+
   async completeJob(input: { jobId: string; result: Record<string, unknown> }): Promise<StoredJob> {
+    const current = await this.pool.query("select * from public.jobs where id = $1", [input.jobId]);
+    if (current.rows[0]?.status !== "running") return toJob(current.rows[0]);
     const result = await this.pool.query(
       `update public.jobs set status = 'succeeded', result = $2::jsonb, updated_at = now()
        where id = $1 returning *`,
@@ -705,6 +842,13 @@ export class SupabaseDataStoreCore {
   async failJob(input: { jobId: string; error: string }): Promise<StoredJob> {
     const current = await this.pool.query("select * from public.jobs where id = $1", [input.jobId]);
     const row = current.rows[0];
+    if (row.status !== "running") {
+      const unchanged = await this.pool.query(
+        "update public.jobs set last_error = $2, updated_at = now() where id = $1 returning *",
+        [input.jobId, input.error || row.last_error]
+      );
+      return toJob(unchanged.rows[0]);
+    }
     const nextStatus = row.attempts >= row.max_attempts ? "failed" : "queued";
     const result = await this.pool.query(
       `update public.jobs set status = $2, last_error = $3, updated_at = now()
@@ -1091,8 +1235,18 @@ export class SupabaseDataStoreCore {
         `update public.jobs
          set status = 'cancelled', last_error = 'batch_deleted', updated_at = now()
          where workspace_id = $1 and business_id = $2 and batch_id = $3
-           and status in ('queued', 'blocked', 'needs_user_action')
-         returning id`,
+           and status in ('queued', 'running', 'blocked', 'needs_user_action')
+          returning id`,
+        [input.workspaceId, input.businessId, input.batchId]
+      );
+      await client.query(
+        `update public.job_attempts
+         set status = 'failed', finished_at = now(), error = 'batch_deleted'
+         where job_id in (
+           select id from public.jobs
+           where workspace_id = $1 and business_id = $2 and batch_id = $3 and status = 'cancelled'
+         )
+           and status = 'running'`,
         [input.workspaceId, input.businessId, input.batchId]
       );
       const cancelledPosts = await client.query(
@@ -1230,10 +1384,39 @@ export class SupabaseDataStoreCore {
       }
       const originalAssetId = randomUUID();
       const photoId = randomUUID();
+      const [menuItemsResult, categoriesResult] = await Promise.all([
+        client.query("select * from public.menu_items where workspace_id = $1", [input.workspaceId]),
+        client.query("select * from public.media_categories where workspace_id = $1", [input.workspaceId])
+      ]);
+      const menuItems = menuItemsResult.rows.map(toMenuItem);
+      const categories = categoriesResult.rows.map(toMediaCategory);
+      const categoryMatch = classifyMediaAssetCategory({
+        asset: {
+          displayName: null,
+          originalName: input.originalFileName,
+          storageKey: input.storageKey,
+          categoryId: null
+        },
+        menuItems,
+        categories
+      });
+      const matchedCategory = categoryMatch ? categories.find((category) => category.id === categoryMatch.categoryId) ?? null : null;
+      const sequenceResult = await client.query(
+        "select count(*)::int as count from public.media_assets where workspace_id = $1 and category_id is not distinct from $2",
+        [input.workspaceId, matchedCategory?.id ?? null]
+      );
+      const displayName = displayNameForAsset({
+        categorySlug: matchedCategory?.slug ?? null,
+        createdAt: new Date().toISOString(),
+        sequence: Number(sequenceResult.rows[0]?.count ?? 0) + 1,
+        originalName: input.originalFileName
+      });
       await client.query(
         `insert into public.media_assets
-         (id, workspace_id, business_id, batch_id, photo_id, kind, bucket, storage_key, mime_type, file_size, is_public, created_at)
-         values ($1, $2, $3, $4, null, 'original', $5, $6, $7, $8, false, now())`,
+         (id, workspace_id, business_id, batch_id, photo_id, kind, bucket, storage_key, mime_type, file_size,
+          is_public, display_name, original_name, category_id, width, height, bytes, status, created_at, updated_at)
+         values ($1, $2, $3, $4, null, 'original', $5, $6, $7, $8,
+          false, $9, $10, $11, $12, $13, $14, 'ready', now(), now())`,
         [
           originalAssetId,
           input.workspaceId,
@@ -1242,6 +1425,12 @@ export class SupabaseDataStoreCore {
           MEDIA_BUCKET,
           input.storageKey,
           input.contentType,
+          input.fileSize,
+          displayName,
+          input.originalFileName,
+          matchedCategory?.id ?? null,
+          input.width ?? null,
+          input.height ?? null,
           input.fileSize
         ]
       );
@@ -1302,6 +1491,16 @@ export class SupabaseDataStoreCore {
       const photoResult = await client.query("select * from public.photos where id = $1 for update", [input.photoId]);
       const photo = photoResult.rows[0];
       if (!photo) throw new Error(`Photo not found: ${input.photoId}`);
+      const job = await client.query("select status from public.jobs where id = $1", [input.jobId]);
+      const batch = await client.query("select status from public.batches where id = $1", [photo.batch_id]);
+      if (
+        job.rows[0]?.status === "cancelled" ||
+        photo.status === "eliminada" ||
+        terminalBatchStatuses.has(String(batch.rows[0]?.status ?? ""))
+      ) {
+        await client.query("commit");
+        return toPhoto(photo);
+      }
       const updated = await client.query(
         `update public.photos
          set status = 'validada', thumbnail_asset_id = $2, vision_input_asset_id = $3,
@@ -1338,14 +1537,13 @@ export class SupabaseDataStoreCore {
       [input.workspaceId, input.sha256]
     );
     if (pending.rows[0]) {
-      throw new AppError({
-        code: "ASSET_EXISTS_PENDING",
-        statusCode: 409,
-        message: "Another upload is already pending for this hash",
-        userMessage: "Esa foto ya se esta subiendo.",
-        retryable: true,
-        action: "retry"
-      });
+      return {
+        exists: false,
+        asset: toGalleryAsset(pending.rows[0]),
+        storagePath: pending.rows[0].storage_key,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        resumable: true
+      };
     }
     const existing = await this.pool.query(
       "select * from public.media_assets where workspace_id = $1 and sha256 = $2 and archived_at is null limit 1",
@@ -1673,7 +1871,26 @@ export class SupabaseDataStoreCore {
       [input.assetId, input.width, input.height, input.bytes, input.thumbPath, input.previewPath, input.fullPath, input.phash ?? null]
     );
     if (!result.rows[0]) throw this.mediaAssetNotFound();
-    return toGalleryAsset(result.rows[0]);
+    let asset = toGalleryAsset(result.rows[0]);
+    if (!asset.categoryId) {
+      const [menuItemsResult, categoriesResult] = await Promise.all([
+        this.pool.query("select * from public.menu_items where workspace_id = $1", [asset.workspaceId]),
+        this.pool.query("select * from public.media_categories where workspace_id = $1", [asset.workspaceId])
+      ]);
+      const match = classifyMediaAssetCategory({
+        asset,
+        menuItems: menuItemsResult.rows.map(toMenuItem),
+        categories: categoriesResult.rows.map(toMediaCategory)
+      });
+      if (match) {
+        const updated = await this.pool.query(
+          "update public.media_assets set category_id = $2, updated_at = now() where id = $1 returning *",
+          [asset.id, match.categoryId]
+        );
+        asset = toGalleryAsset(updated.rows[0]);
+      }
+    }
+    return asset;
   }
 
   async failMediaAssetProcessing(input: Parameters<DataStore["failMediaAssetProcessing"]>[0]) {
@@ -1778,22 +1995,31 @@ export class SupabaseDataStoreCore {
         }
         items.push(item);
 
-        if (category) {
-          const assets = await client.query(
-            `select * from public.media_assets
-             where workspace_id = $1 and category_id is null and archived_at is null and status = 'ready'`,
-            [input.workspaceId]
+      }
+      const [menuItemsResult, categoriesResult, assetsResult] = await Promise.all([
+        client.query("select * from public.menu_items where workspace_id = $1", [input.workspaceId]),
+        client.query("select * from public.media_categories where workspace_id = $1", [input.workspaceId]),
+        client.query(
+          `select * from public.media_assets
+           where workspace_id = $1 and category_id is null and archived_at is null and status = 'ready'`,
+          [input.workspaceId]
+        )
+      ]);
+      const workspaceMenuItems = menuItemsResult.rows.map(toMenuItem);
+      const workspaceCategories = categoriesResult.rows.map(toMediaCategory);
+      for (const row of assetsResult.rows) {
+        const asset = toGalleryAsset(row);
+        const match = classifyMediaAssetCategory({
+          asset,
+          menuItems: workspaceMenuItems,
+          categories: workspaceCategories
+        });
+        if (match) {
+          const updatedAsset = await client.query(
+            "update public.media_assets set category_id = $2, updated_at = now() where id = $1 returning *",
+            [asset.id, match.categoryId]
           );
-          for (const row of assets.rows) {
-            const asset = toGalleryAsset(row);
-            if (menuItemMatchesAsset(parsed, asset)) {
-              const updatedAsset = await client.query(
-                "update public.media_assets set category_id = $2, updated_at = now() where id = $1 returning *",
-                [asset.id, category.id]
-              );
-              categorizedAssets.set(asset.id, toGalleryAsset(updatedAsset.rows[0]));
-            }
-          }
+          categorizedAssets.set(asset.id, toGalleryAsset(updatedAsset.rows[0]));
         }
       }
       await client.query("commit");
@@ -2038,6 +2264,10 @@ export class SupabaseDataStoreCore {
       job.workspaceId,
       input.batchId
     ]);
+    if (job.status === "cancelled") {
+      const batch = await this.pool.query("select * from public.batches where id = $1 and workspace_id = $2", [input.batchId, job.workspaceId]);
+      return { batch: toBatch(batch.rows[0]), variants: variants.rows.map(toVariant) };
+    }
     const hasGenerated = variants.rows.some((variant) => variant.status === "generada" || variant.status === "aprobada");
     const batchResult = await this.pool.query(
       `update public.batches
@@ -2065,6 +2295,9 @@ export class SupabaseDataStoreCore {
     input: Parameters<DataStore["getVariantCaptionContext"]>[0]
   ): ReturnType<DataStore["getVariantCaptionContext"]> {
     const variant = await this.requireVariant(input.workspaceId, input.businessId, input.batchId, input.variantId);
+    if (variant.status === "eliminada") return null;
+    const batch = await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
+    if (terminalBatchStatuses.has(batch.status)) return null;
     const photoResult = await this.pool.query(
       "select * from public.photos where id = $1 and workspace_id = $2 and business_id = $3 and batch_id = $4",
       [variant.photoId, input.workspaceId, input.businessId, input.batchId]
@@ -2101,6 +2334,10 @@ export class SupabaseDataStoreCore {
       ]);
       if (!variantResult.rows[0]) this.variantNotFound();
       const current = toVariant(variantResult.rows[0]);
+      if (job.status === "cancelled" || current.status === "eliminada") {
+        await client.query("commit");
+        return current;
+      }
       if (
         job.type !== "generate_variant" ||
         job.variantId !== current.id ||
@@ -2482,6 +2719,7 @@ export class SupabaseDataStoreCore {
 
   async completeSchedulePosts(input: { jobId: string; batchId: string }): ReturnType<DataStore["completeSchedulePosts"]> {
     const job = await this.requireJob(input.jobId);
+    if (job.status === "cancelled") return { scheduledPosts: [] };
     if (!job.businessId) throw new Error("schedule_posts job is missing businessId");
     const batch = await this.requireBatch(job.workspaceId, job.businessId, input.batchId);
     if (terminalBatchStatuses.has(batch.status)) return { scheduledPosts: [] };
@@ -2705,6 +2943,7 @@ export class SupabaseDataStoreCore {
   async publishScheduledPost(input: Parameters<DataStore["publishScheduledPost"]>[0]): Promise<ScheduledPost> {
     const job = await this.requireJob(input.jobId);
     const post = await this.requireScheduledPost(job.workspaceId, job.businessId, job.batchId, input.scheduledPostId);
+    if (job.status === "cancelled" || ["cancelada", "cancelled", "fallida", "failed"].includes(post.status)) return post;
     if (post.facebookPostId) return post;
     if (post.status === "estado_incierto") {
       throw new AppError({
@@ -2851,6 +3090,7 @@ export class SupabaseDataStoreCore {
       );
       return { scheduledPost: toScheduledPost(uncertain.rows[0]) };
     }
+    await this.cancelActivePublishJobsForPost(post.id, "scheduled_post_rescheduled");
     const result = await this.pool.query(
       `update public.scheduled_posts
        set scheduled_for = $2, scheduled_for_unix = $3, status = 'programada', updated_at = now()
@@ -2880,6 +3120,7 @@ export class SupabaseDataStoreCore {
       );
       return { scheduledPost: toScheduledPost(updated.rows[0]) };
     }
+    await this.cancelActivePublishJobsForPost(post.id, "scheduled_post_cancelled");
     const updated = await this.pool.query("update public.scheduled_posts set status = 'cancelada', updated_at = now() where id = $1 returning *", [
       post.id
     ]);
@@ -2894,6 +3135,7 @@ export class SupabaseDataStoreCore {
     if (post.facebookPostId || post.status === "publicada" || post.status === "estado_incierto") {
       throw this.scheduledPostStateError("scheduled_post_not_publishable");
     }
+    await this.cancelActivePublishJobsForPost(post.id, "scheduled_post_publish_now");
     const scheduledFor = now();
     const updated = await this.pool.query(
       `update public.scheduled_posts
@@ -3324,6 +3566,29 @@ export class SupabaseDataStoreCore {
       });
     }
     return toScheduledPost(result.rows[0]);
+  }
+
+  private async cancelActivePublishJobsForPost(scheduledPostId: string, reason: string): Promise<void> {
+    await this.pool.query(
+      `update public.job_attempts
+       set status = 'failed', finished_at = now(), error = $2
+       where status = 'running'
+         and job_id in (
+           select id from public.jobs
+           where type = 'publish_post'
+             and payload->>'scheduledPostId' = $1
+             and status in ('queued', 'running', 'blocked', 'needs_user_action')
+         )`,
+      [scheduledPostId, reason]
+    );
+    await this.pool.query(
+      `update public.jobs
+       set status = 'cancelled', last_error = $2, updated_at = now()
+       where type = 'publish_post'
+         and payload->>'scheduledPostId' = $1
+         and status in ('queued', 'running', 'blocked', 'needs_user_action')`,
+      [scheduledPostId, reason]
+    );
   }
 
   private scheduledPostStateError(code: string) {

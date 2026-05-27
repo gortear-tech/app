@@ -44,6 +44,11 @@ const persistUploadFile = async (workspaceId: string, file: OfflineUploadFile, i
   return { ...file, uri: target };
 };
 
+const removePersistedUploadFile = async (uri: string) => {
+  if (!uri.startsWith(queueRoot)) return;
+  await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
+};
+
 export const enqueueGalleryUploads = async (input: {
   token: string;
   workspaceId: string;
@@ -64,6 +69,7 @@ export const enqueueGalleryUploads = async (input: {
     hash: (file) => sha256OfFile(file.uri),
     upload: async (file, sha256) => {
       await uploadGalleryAsset(input.token, input.businessId, file, sha256, input.workspaceId);
+      await removePersistedUploadFile(file.uri);
       const queued = await storage.list();
       const done = queued.filter((job) => job.status === "done").length + 1;
       input.onProgress?.(done, Math.max(queued.length, input.files.length));
@@ -88,6 +94,7 @@ export const drainGalleryUploadQueue = async (input: {
     hash: (file) => sha256OfFile(file.uri),
     upload: async (file, sha256) => {
       await uploadGalleryAsset(input.token, input.businessId, file, sha256, input.workspaceId);
+      await removePersistedUploadFile(file.uri);
     }
   });
   return queue.drain();

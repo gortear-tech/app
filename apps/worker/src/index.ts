@@ -9,12 +9,47 @@ initSentry({ dsn: process.env.SENTRY_DSN, environment: config.appEnv, release: c
 const store = createDataStore(config);
 const workerId = `worker-${randomUUID()}`;
 const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? "5000");
+const heartbeatIntervalMs = Number(process.env.WORKER_HEARTBEAT_INTERVAL_MS ?? "30000");
 let stopRequested = false;
 let sleepTimer: NodeJS.Timeout | null = null;
+let heartbeatTimer: NodeJS.Timeout | null = null;
+type WorkerHeartbeatStatus = "starting" | "idle" | "processing" | "stopping" | "error";
+let currentHeartbeatStatus: WorkerHeartbeatStatus = "starting";
+let currentHeartbeatMetadata: Record<string, unknown> = {};
 
 console.log(JSON.stringify({ service: "worker", event: "started", workerId, environment: config.appEnv }));
 
+const heartbeat = async (status: WorkerHeartbeatStatus, metadata: Record<string, unknown> = {}) => {
+  try {
+    await store.recordWorkerHeartbeat({
+      workerId,
+      service: "worker",
+      environment: config.appEnv,
+      release: config.release,
+      status,
+      metadata
+    });
+  } catch (error) {
+    console.error(JSON.stringify({ service: "worker", event: "heartbeat_error", message: String(error) }));
+    captureException(error, { workerId, event: "heartbeat_error" });
+  }
+};
+
+const setHeartbeat = async (status: WorkerHeartbeatStatus, metadata: Record<string, unknown> = {}) => {
+  currentHeartbeatStatus = status;
+  currentHeartbeatMetadata = metadata;
+  await heartbeat(status, metadata);
+};
+
+const startHeartbeatTimer = () => {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(() => {
+    void heartbeat(currentHeartbeatStatus, currentHeartbeatMetadata);
+  }, heartbeatIntervalMs);
+};
+
 const run = async () => {
+  await setHeartbeat("processing");
   const result = await processOneJob({ store, workerId });
   if (result.processed) {
     console.log(
@@ -27,6 +62,7 @@ const run = async () => {
       })
     );
   }
+  await setHeartbeat("idle", { lastProcessedJobId: result.job?.id ?? null, processed: result.processed });
 };
 
 const sleep = (ms: number) =>
@@ -38,12 +74,15 @@ const sleep = (ms: number) =>
   });
 
 const loop = async () => {
+  startHeartbeatTimer();
+  await setHeartbeat("starting");
   while (!stopRequested) {
     try {
       await run();
     } catch (error) {
       console.error(JSON.stringify({ service: "worker", event: "loop_error", message: String(error) }));
       captureException(error, { workerId, event: "loop_error" });
+      await setHeartbeat("error", { message: String(error) });
     }
     if (!stopRequested) await sleep(intervalMs);
   }
@@ -56,6 +95,13 @@ void loop().catch((error) => {
 
 process.once("SIGTERM", () => {
   stopRequested = true;
+  currentHeartbeatStatus = "stopping";
+  currentHeartbeatMetadata = {};
+  void heartbeat("stopping");
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
   if (sleepTimer) {
     clearTimeout(sleepTimer);
     sleepTimer = null;

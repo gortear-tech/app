@@ -281,7 +281,9 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
   const requestHash = (body: unknown) => createHash("sha256").update(JSON.stringify(body ?? {})).digest("hex");
   const mobileMetaConnectedUrl = "fbmaniaco://meta-connected";
   const mediaPreviewTtlSeconds = 24 * 60 * 60;
-  const mediaToken = (assetId: string, expires: number) =>
+  const mediaToken = (assetId: string, expires: number, variant = "full") =>
+    createHash("sha256").update(`${assetId}:${expires}:${variant}:fbmaniaco-local-media-preview`).digest("hex");
+  const legacyMediaToken = (assetId: string, expires: number) =>
     createHash("sha256").update(`${assetId}:${expires}:fbmaniaco-local-media-preview`).digest("hex");
   const publicRequestBaseUrl = (request: FastifyRequest) => {
     if (input.config.publicApiUrl?.startsWith("https://")) return input.config.publicApiUrl.replace(/\/$/, "");
@@ -386,22 +388,22 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     }
     return mobileSessionResponse(session.data.session, session.data.user, requestId);
   };
-  const previewUrl = (request: FastifyRequest, assetId: string | null | undefined) => {
+  const previewUrl = (request: FastifyRequest, assetId: string | null | undefined, variant: "thumb" | "preview" | "full" = "full") => {
     if (!assetId) return null;
     const expires = Math.floor(Date.now() / 1000) + mediaPreviewTtlSeconds;
-    return `${publicRequestBaseUrl(request)}/media/assets/${assetId}/preview?expires=${expires}&token=${mediaToken(assetId, expires)}`;
+    return `${publicRequestBaseUrl(request)}/media/assets/${assetId}/preview?expires=${expires}&variant=${variant}&token=${mediaToken(assetId, expires, variant)}`;
   };
   const withPhotoUrls = (request: FastifyRequest, photos: NonNullable<Awaited<ReturnType<DataStore["getBatchDetail"]>>>["photos"]) =>
     photos.map((photo) => ({
       ...photo,
-      mediaUrl: previewUrl(request, photo.originalAssetId ?? null),
-      thumbnailUrl: previewUrl(request, photo.thumbnailAssetId ?? photo.originalAssetId ?? null)
+      mediaUrl: previewUrl(request, photo.originalAssetId ?? null, "full"),
+      thumbnailUrl: previewUrl(request, photo.thumbnailAssetId ?? photo.originalAssetId ?? null, "thumb")
     }));
   const withGalleryAssetUrls = (request: FastifyRequest, assets: Awaited<ReturnType<DataStore["listMediaAssets"]>>["items"]) =>
     assets.map((asset) => ({
       ...asset,
-      previewUrl: asset.status === "ready" ? previewUrl(request, asset.id) : null,
-      thumbnailUrl: asset.status === "ready" ? previewUrl(request, asset.id) : null
+      previewUrl: asset.status === "ready" ? previewUrl(request, asset.id, "preview") : null,
+      thumbnailUrl: asset.status === "ready" ? previewUrl(request, asset.id, "thumb") : null
     }));
   const withVariantUrls = (
     request: FastifyRequest,
@@ -710,7 +712,8 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     async (_request, reply) => {
       const configChecks = readinessFromConfig(input.config);
       const db = await input.store.ready();
-      const checks = { ...configChecks, db: configChecks.db && db.ok, queue: configChecks.queue };
+      const worker = input.config.dataStoreMode === "local" ? { ok: true } : await input.store.getWorkerStatus({ maxAgeMs: 90_000 });
+      const checks = { ...configChecks, db: configChecks.db && db.ok, queue: configChecks.queue, worker: worker.ok };
       const ok = Object.values(checks).every(Boolean);
       return reply.status(ok ? 200 : 503).send({ ok, checks });
     }
@@ -792,6 +795,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           required: ["expires", "token"],
           properties: {
             expires: { type: "string" },
+            variant: { type: "string", enum: ["thumb", "preview", "full"] },
             token: { type: "string" }
           }
         }
@@ -799,12 +803,14 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     },
     async (request, reply) => {
       const params = request.params as { assetId: string };
-      const query = request.query as { expires: string; token: string };
+      const query = request.query as { expires: string; token: string; variant?: "thumb" | "preview" | "full" };
+      const variant = query.variant ?? "full";
       const expires = Number(query.expires);
       if (
         !Number.isFinite(expires) ||
         expires < Math.floor(Date.now() / 1000) ||
-        query.token !== mediaToken(params.assetId, expires)
+        (query.token !== mediaToken(params.assetId, expires, variant) &&
+          !(query.variant === undefined && query.token === legacyMediaToken(params.assetId, expires)))
       ) {
         throw new AppError({
           code: "media_url_expired",
@@ -836,10 +842,16 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           action: "contact_support"
         });
       }
+      const storageKey =
+        variant === "thumb"
+          ? asset.thumbPath ?? asset.previewPath ?? asset.storageKey
+          : variant === "preview"
+            ? asset.previewPath ?? asset.fullPath ?? asset.storageKey
+            : asset.fullPath ?? asset.storageKey;
       const { data, error } = await requireStorageClient()
         .storage
         .from(asset.bucket)
-        .createSignedUrl(asset.storageKey, 60 * 15);
+        .createSignedUrl(storageKey, 60 * 15);
       if (error || !data?.signedUrl) {
         throw new AppError({
           code: "media_signed_url_failed",
@@ -956,6 +968,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
             uploadUrl,
             storagePath: result.storagePath,
             expiresAt: result.expiresAt,
+            ...(result.resumable ? { resumable: true } : {}),
             requestId
           };
         }

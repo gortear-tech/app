@@ -57,6 +57,223 @@ describe("worker processor", () => {
     await rm(path, { force: true });
   });
 
+  it("reclaims expired running variant jobs before moving on", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-expired-claim-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "expired-claim-user", email: "expired@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("expired-claim-user");
+    const first = await store.createJob({
+      type: "generate_variant",
+      workspaceId: workspace.id,
+      dedupeKey: "generate_variant:expired:first",
+      payload: {}
+    });
+    const second = await store.createJob({
+      type: "generate_variant",
+      workspaceId: workspace.id,
+      dedupeKey: "generate_variant:expired:second",
+      payload: {}
+    });
+
+    const claimedFirst = await store.claimDueJob("claim-worker-1");
+    expect(claimedFirst?.id).toBe(first.id);
+    await store.forceUpdateJobForTest(first.id, {
+      leaseExpiresAt: new Date(Date.now() - 1000).toISOString()
+    });
+
+    const reclaimed = await store.claimDueJob("claim-worker-2");
+    expect(reclaimed?.id).toBe(first.id);
+    expect(reclaimed?.attempts).toBe(2);
+
+    await store.completeJob({ jobId: first.id, result: { ok: true } });
+    const claimedSecond = await store.claimDueJob("claim-worker-2");
+    expect(claimedSecond?.id).toBe(second.id);
+    await rm(path, { force: true });
+  });
+
+  it("does not reclaim jobs from a deleted batch", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-deleted-batch-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "deleted-batch-user", email: "deleted@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("deleted-batch-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "deleted-batch-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "deleted-batch-user",
+      pageId: page.id,
+      requestId: "deleted-batch-page"
+    });
+    const batch = await store.createBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "deleted-batch-user",
+      requestId: "deleted-batch-create"
+    });
+    const intent = await store.createUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      originalFileName: "foto.jpg",
+      contentType: "image/jpeg",
+      fileSize: 2048
+    });
+    await store.completeUpload({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      storageKey: intent.storageKey,
+      originalFileName: "foto.jpg",
+      contentType: "image/jpeg",
+      fileSize: 2048,
+      actorId: "deleted-batch-user",
+      requestId: "deleted-batch-upload"
+    });
+    await store.requestGenerateBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      variantsPerPhoto: 2,
+      actorId: "deleted-batch-user",
+      requestId: "deleted-batch-generate"
+    });
+    await processOneJob({ store, workerId: "deleted-batch-worker" });
+    const variantJob = (await store.listJobs(workspace.id)).find((job) => job.type === "generate_variant");
+    expect(variantJob).toBeTruthy();
+    const claimed = await store.claimDueJob("deleted-batch-worker");
+    expect(claimed?.id).toBe(variantJob!.id);
+    await store.deleteBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      actorId: "deleted-batch-user",
+      requestId: "deleted-batch-delete"
+    });
+    await store.forceUpdateJobForTest(variantJob!.id, { leaseExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    const preserved = await store.failJob({ jobId: variantJob!.id, error: "late worker failure" });
+    const next = await store.claimDueJob("deleted-batch-worker-2");
+
+    expect(preserved.status).toBe("cancelled");
+    expect(next).toBeNull();
+    await rm(path, { force: true });
+  });
+
+  it("does not blindly retry expired publish jobs", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-expired-publish-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "expired-publish-user", email: "expired-publish@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("expired-publish-user");
+    const job = await store.createJob({
+      type: "publish_post",
+      workspaceId: workspace.id,
+      dedupeKey: "publish_post:expired-risky",
+      payload: { scheduledPostId: "missing-post" }
+    });
+
+    const claimed = await store.claimDueJob("expired-publish-worker");
+    expect(claimed?.id).toBe(job.id);
+    await store.forceUpdateJobForTest(job.id, {
+      leaseExpiresAt: new Date(Date.now() - 1000).toISOString()
+    });
+    const next = await store.claimDueJob("expired-publish-worker-2");
+    const jobs = await store.listJobs(workspace.id);
+    const updated = jobs.find((item) => item.id === job.id);
+
+    expect(next).toBeNull();
+    expect(updated?.status).toBe("needs_user_action");
+    expect(updated?.lastError).toBe("publish_job_lease_expired");
+    await rm(path, { force: true });
+  });
+
+  it("ignores late photo analysis after a batch is deleted", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-late-analysis-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "late-analysis-user", email: "late-analysis@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("late-analysis-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "late-analysis-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "late-analysis-user",
+      pageId: page.id,
+      requestId: "late-analysis-page"
+    });
+    const batch = await store.createBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "late-analysis-user",
+      requestId: "late-analysis-batch"
+    });
+    const intent = await store.createUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      originalFileName: "foto.jpg",
+      contentType: "image/jpeg",
+      fileSize: 2048
+    });
+    await store.completeUpload({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      storageKey: intent.storageKey,
+      originalFileName: "foto.jpg",
+      contentType: "image/jpeg",
+      fileSize: 2048,
+      actorId: "late-analysis-user",
+      requestId: "late-analysis-upload"
+    });
+    const detail = await store.getBatchDetail({ workspaceId: workspace.id, businessId: business.id, batchId: batch.id });
+    const photo = detail?.photos[0];
+    if (!photo) throw new Error("Missing uploaded photo");
+    const job = await store.createJob({
+      type: "analyze_photo",
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      photoId: photo.id,
+      dedupeKey: `analyze_photo:late:${photo.id}`,
+      payload: {}
+    });
+    await store.claimDueJob("late-analysis-worker");
+    await store.deleteBatch({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      batchId: batch.id,
+      actorId: "late-analysis-user",
+      requestId: "late-analysis-delete"
+    });
+    const completed = await store.completeAnalyzePhoto({
+      photoId: photo.id,
+      jobId: job.id,
+      analysis: {
+        schemaVersion: "vision_analysis.v1",
+        promptVersion: "late-analysis-test",
+        subject: { type: "product", description: "late test" },
+        composition: { framing: "centered", angle: "front", background: "plain", lighting: "soft" },
+        palette: { dominantColors: ["white"], temperature: "neutral", saturation: "medium", contrast: "medium" },
+        sensitiveElements: {
+          personVisible: false,
+          priceVisible: false,
+          logoVisible: false,
+          promotionVisible: false,
+          textVisible: false,
+          notes: []
+        },
+        quality: { sharpness: "ok", exposure: "ok", noise: "low" },
+        mood: { temperature: "neutral", keywords: ["test"], description: "late test" },
+        summary: "late analysis should be ignored"
+      }
+    });
+    const lateJob = await store.completeJob({ jobId: job.id, result: { ok: true } });
+
+    expect(completed.status).toBe("eliminada");
+    expect(lateJob.status).toBe("cancelled");
+    await rm(path, { force: true });
+  });
+
   it("processes gallery media upload jobs into ready assets in local mode", async () => {
     const path = join(tmpdir(), `fbmaniaco-worker-gallery-media-${Date.now()}.json`);
     const store = new LocalDataStore(path);
@@ -192,6 +409,99 @@ describe("worker processor", () => {
     expect(menuItems[0]?.priceCents).toBe(8500);
     expect(categories[0]?.name).toBe("Tacos");
     expect(asset?.categoryId).toBe(categories[0]?.id);
+    await rm(path, { force: true });
+  });
+
+  it("classifies gallery assets by menu taxonomy without guessing ambiguous photos", async () => {
+    const path = join(tmpdir(), `fbmaniaco-worker-menu-classifier-${Date.now()}.json`);
+    const store = new LocalDataStore(path);
+    await store.upsertLocalUser({ userId: "classifier-user", email: "classifier@example.com" });
+    const { workspace } = await store.ensureDefaultWorkspace("classifier-user");
+    await store.upsertMockMetaAuthorization({ workspaceId: workspace.id, actorId: "classifier-user" });
+    const page = (await store.listMetaPages(workspace.id)).find((item) => item.canPublish);
+    if (!page) throw new Error("Missing selectable mock page");
+    const business = await store.selectMetaPage({
+      workspaceId: workspace.id,
+      actorId: "classifier-user",
+      pageId: page.id,
+      requestId: "classifier-page"
+    });
+
+    await store.completeMenuIngest({
+      jobId: "classifier-menu",
+      workspaceId: workspace.id,
+      result: {
+        schemaVersion: "menu_parse_result.v1",
+        categories: ["Sushi", "Platillos"],
+        warnings: [],
+        items: [
+          {
+            name: "Sushi California de camaron",
+            description: null,
+            priceCents: 9000,
+            categoryName: "Sushi",
+            keywords: ["sushi", "california", "camaron"]
+          },
+          {
+            name: "Yakimeshi de camaron",
+            description: null,
+            priceCents: 10000,
+            categoryName: "Platillos",
+            keywords: ["yakimeshi", "camaron"]
+          }
+        ]
+      }
+    });
+
+    const categorizedIntent = await store.createMediaUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "classifier-user",
+      sha256: "c".repeat(64),
+      bytes: 1024,
+      mime: "image/jpeg",
+      originalName: "yakimeshi-camaron.jpg",
+      requestId: "classifier-categorized"
+    });
+    const ambiguousIntent = await store.createMediaUploadIntent({
+      workspaceId: workspace.id,
+      businessId: business.id,
+      actorId: "classifier-user",
+      sha256: "d".repeat(64),
+      bytes: 1024,
+      mime: "image/jpeg",
+      originalName: "camaron.jpg",
+      requestId: "classifier-ambiguous"
+    });
+
+    await store.completeMediaAssetProcessing({
+      assetId: categorizedIntent.asset.id,
+      width: 1200,
+      height: 900,
+      bytes: 900,
+      thumbPath: `${workspace.id}/assets/${categorizedIntent.asset.id}/thumb.webp`,
+      previewPath: `${workspace.id}/assets/${categorizedIntent.asset.id}/preview.webp`,
+      fullPath: `${workspace.id}/assets/${categorizedIntent.asset.id}/full.jpg`,
+      phash: "1111111111111111"
+    });
+    await store.completeMediaAssetProcessing({
+      assetId: ambiguousIntent.asset.id,
+      width: 1200,
+      height: 900,
+      bytes: 900,
+      thumbPath: `${workspace.id}/assets/${ambiguousIntent.asset.id}/thumb.webp`,
+      previewPath: `${workspace.id}/assets/${ambiguousIntent.asset.id}/preview.webp`,
+      fullPath: `${workspace.id}/assets/${ambiguousIntent.asset.id}/full.jpg`,
+      phash: "2222222222222222"
+    });
+
+    const categories = await store.listMediaCategories({ workspaceId: workspace.id });
+    const platillos = categories.find((category) => category.name === "Platillos");
+    const categorized = await store.getMediaAsset({ assetId: categorizedIntent.asset.id });
+    const ambiguous = await store.getMediaAsset({ assetId: ambiguousIntent.asset.id });
+
+    expect(categorized?.categoryId).toBe(platillos?.id);
+    expect(ambiguous?.categoryId).toBeNull();
     await rm(path, { force: true });
   });
 
@@ -358,7 +668,16 @@ describe("worker processor", () => {
       actorId: "u2",
       requestId: "test-publish-now"
     });
+    const publishJobsAfterRequest = (await store.listJobs(workspace.id)).filter(
+      (job) => job.type === "publish_post" && job.payload.scheduledPostId === publishRequest.scheduledPost.id
+    );
     expect(publishRequest.scheduledPost.status).toBe("publicacion_en_proceso");
+    expect(publishJobsAfterRequest.some((job) => job.dedupeKey === `publish_post:${publishRequest.scheduledPost.id}` && job.status === "cancelled")).toBe(
+      true
+    );
+    expect(publishJobsAfterRequest.some((job) => job.dedupeKey === `publish_post_now:${publishRequest.scheduledPost.id}` && job.status === "queued")).toBe(
+      true
+    );
     const publishResult = await processOneJob({ store, workerId: "calendar-worker" });
     const published = await store.getScheduledPost({
       workspaceId: workspace.id,

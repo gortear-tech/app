@@ -3310,8 +3310,13 @@ function GalleryScreen({
 }
 
 function GalleryAssetTile({ asset, selected, onPress }: { asset: GalleryMediaAsset; selected: boolean; onPress: () => void }) {
-  const urls = asset as GalleryMediaAsset & { thumbnailUrl?: string | null; previewUrl?: string | null };
-  const imageUri = urls.thumbnailUrl ?? urls.previewUrl ?? null;
+  const urls = asset as GalleryMediaAsset & {
+    localThumbnailUrl?: string | null;
+    localPreviewUrl?: string | null;
+    thumbnailUrl?: string | null;
+    previewUrl?: string | null;
+  };
+  const imageUri = urls.localThumbnailUrl ?? urls.localPreviewUrl ?? urls.thumbnailUrl ?? urls.previewUrl ?? null;
   return (
     <Pressable style={[styles.galleryTile, selected ? styles.galleryTileSelected : null]} onPress={onPress}>
       <View style={styles.galleryImageFrame}>

@@ -81,13 +81,14 @@ export const loadConfig = (): ApiConfig => {
   const appEnv = (process.env.APP_ENV ?? "development") as AppEnvironment;
   const port = Number(process.env.PORT ?? "4000");
   const localAuthEnabled = toBool(process.env.LOCAL_AUTH_ENABLED, appEnv === "development");
-  const dataStoreMode = (process.env.DATA_STORE_MODE ?? (appEnv === "development" ? "local" : "supabase")) as
-    | "local"
-    | "supabase";
-  const allowLocalDataStore = toBool(process.env.ALLOW_LOCAL_DATASTORE, appEnv === "development");
   const databaseUrl = process.env.DATABASE_URL || undefined;
   const supabaseUrl = process.env.SUPABASE_URL || undefined;
   const supabaseServiceRole = process.env.SUPABASE_SERVICE_ROLE || undefined;
+  const hasSupabaseDatastoreConfig = Boolean(databaseUrl && supabaseUrl && supabaseServiceRole);
+  const dataStoreMode = (process.env.DATA_STORE_MODE ?? (appEnv === "development" && !hasSupabaseDatastoreConfig ? "local" : "supabase")) as
+    | "local"
+    | "supabase";
+  const allowLocalDataStore = toBool(process.env.ALLOW_LOCAL_DATASTORE, appEnv === "development");
   const publicApiUrl = process.env.PUBLIC_API_URL || process.env.API_PUBLIC_URL || undefined;
   const metaAppId = process.env.META_APP_ID || undefined;
   const metaAppSecret = process.env.META_APP_SECRET || undefined;

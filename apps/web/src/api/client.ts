@@ -40,6 +40,7 @@ export class WebApiError extends Error {
 const requestId = (scope: string) => `web-${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const duplicateUploadResponse = (status: number, body: string) => status === 409 || /already exists|resource already exists|duplicate/i.test(body);
 
 const readJson = async (response: Response): Promise<Record<string, unknown>> => {
   try {
@@ -254,6 +255,18 @@ export const uploadMediaAsset = async (token: string, input: {
     });
     if (!uploadResponse.ok) {
       const text = await uploadResponse.text().catch(() => "");
+      if (duplicateUploadResponse(uploadResponse.status, text)) {
+        await apiFetch<MediaUploadCompleteResponse>("/media/upload-complete", token, {
+          method: "POST",
+          headers: { "idempotency-key": idempotencyKey("web-upload-complete") },
+          body: JSON.stringify({ assetId: intent.assetId, storagePath: intent.storagePath })
+        }, "No pudimos confirmar la subida.");
+        return {
+          ...(intent.asset as GalleryMediaAsset),
+          id: intent.assetId,
+          status: "processing"
+        };
+      }
       throw new Error(`No pudimos subir el archivo al almacenamiento (${uploadResponse.status}${text ? `: ${text.slice(0, 120)}` : ""}).`);
     }
   }

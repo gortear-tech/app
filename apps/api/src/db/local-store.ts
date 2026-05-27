@@ -13,7 +13,6 @@ import {
   MediaCategory,
   MenuItem,
   MenuParseResult,
-  ParsedMenuItem,
   SimilarMediaAsset,
   MediaSelection,
   forbiddenError,
@@ -44,8 +43,10 @@ import {
   PersistedMetaAuthorizationInput,
   StoredMediaAssetFbUpload,
   StoredMediaAssetUsage,
-  StoredJob
+  StoredJob,
+  WorkerHeartbeat
 } from "./types.js";
+import { classifyMediaAssetCategory } from "./media-classifier.js";
 import { publishFacebookPagePost, uploadUnpublishedFacebookPagePhoto } from "@fbmaniaco/providers";
 
 type GenerateStyleOverride = NonNullable<Parameters<DataStore["requestGenerateBatch"]>[0]["styleOverrides"]>[number];
@@ -79,6 +80,7 @@ type LocalState = {
   selectedByWorkspace: Record<string, { pageId?: string; businessId?: string }>;
   jobs: StoredJob[];
   jobAttempts: JobAttempt[];
+  workerHeartbeats: WorkerHeartbeat[];
   idempotencyRecords: IdempotencyRecord[];
   externalOperations: ExternalOperation[];
 };
@@ -171,6 +173,7 @@ const emptyState = (): LocalState => ({
   selectedByWorkspace: {},
   jobs: [],
   jobAttempts: [],
+  workerHeartbeats: [],
   idempotencyRecords: [],
   externalOperations: []
 });
@@ -262,13 +265,6 @@ const normalizeSearchText = (value: string | null | undefined) =>
 const normalizeKeywords = (keywords: string[]) =>
   Array.from(new Set(keywords.map(normalizeSearchText).filter((keyword) => keyword.length >= 2))).slice(0, 20);
 
-const menuItemMatchesAsset = (item: ParsedMenuItem, asset: MediaAsset) => {
-  const haystack = normalizeSearchText(
-    [asset.displayName, asset.originalName, asset.storageKey].filter((value): value is string => typeof value === "string").join(" ")
-  );
-  return normalizeKeywords([item.name, ...(item.keywords ?? [])]).some((keyword) => haystack.includes(keyword));
-};
-
 const toGalleryAsset = (asset: MediaAsset): GalleryMediaAsset => ({
   id: asset.id,
   workspaceId: asset.workspaceId,
@@ -327,6 +323,7 @@ const mergeLocalState = (latest: LocalState, current: LocalState): LocalState =>
   scheduledPosts: mergeById(latest.scheduledPosts, current.scheduledPosts),
   jobs: mergeById(latest.jobs, current.jobs),
   jobAttempts: mergeById(latest.jobAttempts, current.jobAttempts),
+  workerHeartbeats: mergeByKey(latest.workerHeartbeats ?? [], current.workerHeartbeats ?? [], (item) => item.workerId),
   idempotencyRecords: mergeById(latest.idempotencyRecords, current.idempotencyRecords),
   externalOperations: mergeByKey(latest.externalOperations, current.externalOperations, (item) => item.operationKey),
   selectedByWorkspace: { ...latest.selectedByWorkspace, ...current.selectedByWorkspace }
@@ -478,17 +475,35 @@ export class LocalDataStore implements DataStore {
   async claimDueJob(workerId: string): Promise<StoredJob | null> {
     const state = await this.load();
     const timestamp = now();
+    const isLeaseActive = (job: StoredJob) => job.leaseExpiresAt === undefined || job.leaseExpiresAt > timestamp;
+    let changed = this.cancelTerminalBatchJobs(state, timestamp);
+    changed = this.markExpiredPublishJobsForReview(state, timestamp) || changed;
     const hasRunningVariant = state.jobs.some(
       (item) =>
         item.type === "generate_variant" &&
         item.status === "running" &&
-        (item.leaseExpiresAt === undefined || item.leaseExpiresAt > timestamp)
+        isLeaseActive(item)
     );
     const job = state.jobs
-      .filter((item) => item.status === "queued" && item.runAfter <= timestamp && (item.type !== "generate_variant" || !hasRunningVariant))
+      .filter((item) => {
+        const staleRunning = item.type !== "publish_post" && item.status === "running" && !isLeaseActive(item) && item.attempts < item.maxAttempts;
+        const due = (item.status === "queued" || staleRunning) && item.runAfter <= timestamp;
+        return due && (item.type !== "generate_variant" || staleRunning || !hasRunningVariant);
+      })
       .sort((a, b) => a.runAfter.localeCompare(b.runAfter) || a.createdAt.localeCompare(b.createdAt))[0];
-    if (!job) return null;
+    if (!job) {
+      if (changed) await this.persist();
+      return null;
+    }
 
+    if (job.status === "running") {
+      const staleAttempt = state.jobAttempts.find((item) => item.jobId === job.id && item.attemptNumber === job.attempts);
+      if (staleAttempt && staleAttempt.status === "running") {
+        staleAttempt.status = "failed";
+        staleAttempt.finishedAt = timestamp;
+        staleAttempt.error = "Lease expired before worker completed the job";
+      }
+    }
     job.status = "running";
     job.lockedAt = timestamp;
     job.lockedBy = workerId;
@@ -503,14 +518,56 @@ export class LocalDataStore implements DataStore {
       status: "running",
       startedAt: timestamp
     });
+    changed = true;
+    if (changed) await this.persist();
+    return job;
+  }
+
+  async forceUpdateJobForTest(jobId: string, patch: Partial<StoredJob>): Promise<StoredJob> {
+    const state = await this.load();
+    const job = this.requireJob(state, jobId);
+    Object.assign(job, patch);
     await this.persist();
     return job;
+  }
+
+  async recordWorkerHeartbeat(input: Parameters<DataStore["recordWorkerHeartbeat"]>[0]): Promise<WorkerHeartbeat> {
+    const state = await this.load();
+    const timestamp = now();
+    const existing = state.workerHeartbeats.find((item) => item.workerId === input.workerId);
+    const heartbeat: WorkerHeartbeat = {
+      workerId: input.workerId,
+      service: input.service,
+      environment: input.environment,
+      release: input.release,
+      status: input.status,
+      lastBeatAt: timestamp,
+      metadata: input.metadata ?? {}
+    };
+    if (existing) Object.assign(existing, heartbeat);
+    else state.workerHeartbeats.push(heartbeat);
+    await this.persist();
+    return heartbeat;
+  }
+
+  async getWorkerStatus(input: { maxAgeMs: number }) {
+    const state = await this.load();
+    const latest = [...state.workerHeartbeats].sort((a, b) => b.lastBeatAt.localeCompare(a.lastBeatAt))[0];
+    if (!latest) return { ok: false };
+    const ageMs = Date.now() - Date.parse(latest.lastBeatAt);
+    return {
+      ok: ageMs <= input.maxAgeMs && latest.status !== "stopping" && latest.status !== "error",
+      lastBeatAt: latest.lastBeatAt,
+      workerId: latest.workerId,
+      status: latest.status
+    };
   }
 
   async completeJob(input: { jobId: string; result: Record<string, unknown> }): Promise<StoredJob> {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const timestamp = now();
+    if (job.status !== "running") return job;
     job.status = "succeeded";
     job.result = input.result;
     job.updatedAt = timestamp;
@@ -527,6 +584,12 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const timestamp = now();
+    if (job.status !== "running") {
+      job.lastError = input.error || job.lastError || "cancelled";
+      job.updatedAt = timestamp;
+      await this.persist();
+      return job;
+    }
     job.status = job.attempts >= job.maxAttempts ? "failed" : "queued";
     job.lastError = input.error;
     job.updatedAt = timestamp;
@@ -852,8 +915,14 @@ export class LocalDataStore implements DataStore {
         job.workspaceId === input.workspaceId &&
         job.businessId === input.businessId &&
         job.batchId === input.batchId &&
-        ["queued", "blocked", "needs_user_action"].includes(job.status)
+        ["queued", "running", "blocked", "needs_user_action"].includes(job.status)
       ) {
+        const attempt = state.jobAttempts.find((item) => item.jobId === job.id && item.attemptNumber === job.attempts);
+        if (attempt && attempt.status === "running") {
+          attempt.status = "failed";
+          attempt.finishedAt = timestamp;
+          attempt.error = "batch_deleted";
+        }
         job.status = "cancelled";
         job.lastError = "batch_deleted";
         job.updatedAt = timestamp;
@@ -984,6 +1053,22 @@ export class LocalDataStore implements DataStore {
       });
     }
     const timestamp = now();
+    const menuItems = state.menuItems.filter((item) => item.workspaceId === input.workspaceId);
+    const categories = state.mediaCategories.filter((item) => item.workspaceId === input.workspaceId);
+    const categoryMatch = classifyMediaAssetCategory({
+      asset: {
+        displayName: null,
+        originalName: input.originalFileName,
+        storageKey: input.storageKey,
+        categoryId: null
+      },
+      menuItems,
+      categories
+    });
+    const matchedCategory = categoryMatch ? categories.find((item) => item.id === categoryMatch.categoryId) ?? null : null;
+    const categoryId = matchedCategory?.id ?? null;
+    const sequence =
+      state.mediaAssets.filter((asset) => asset.workspaceId === input.workspaceId && (asset.categoryId ?? null) === categoryId).length + 1;
     const originalAsset: MediaAsset = {
       id: randomUUID(),
       workspaceId: input.workspaceId,
@@ -995,7 +1080,20 @@ export class LocalDataStore implements DataStore {
       mimeType: input.contentType,
       fileSize: input.fileSize,
       isPublic: false,
-      createdAt: timestamp
+      displayName: displayNameForAsset({
+        categorySlug: matchedCategory?.slug ?? null,
+        createdAt: timestamp,
+        sequence,
+        originalName: input.originalFileName
+      }),
+      originalName: input.originalFileName,
+      categoryId,
+      width: input.width ?? null,
+      height: input.height ?? null,
+      bytes: input.fileSize,
+      status: "ready",
+      createdAt: timestamp,
+      updatedAt: timestamp
     };
     const photo: Photo = {
       id: randomUUID(),
@@ -1048,6 +1146,8 @@ export class LocalDataStore implements DataStore {
     const batch = state.batches.find(
       (item) => item.id === photo.batchId && item.workspaceId === photo.workspaceId && item.businessId === photo.businessId
     );
+    const job = this.requireJob(state, input.jobId);
+    if (job.status === "cancelled" || photo.status === "eliminada" || (batch && terminalBatchStatuses.has(batch.status))) return photo;
     const timestamp = now();
     let thumbnailAsset = state.mediaAssets.find((item) => item.photoId === photo.id && item.kind === "thumbnail");
     let visionInputAsset = state.mediaAssets.find((item) => item.photoId === photo.id && item.kind === "vision_input");
@@ -1112,14 +1212,13 @@ export class LocalDataStore implements DataStore {
       (asset) => asset.workspaceId === input.workspaceId && asset.sha256 === input.sha256 && asset.status === "pending"
     );
     if (pending) {
-      throw new AppError({
-        code: "ASSET_EXISTS_PENDING",
-        statusCode: 409,
-        message: "Another upload is already pending for this hash",
-        userMessage: "Esa foto ya se esta subiendo.",
-        retryable: true,
-        action: "retry"
-      });
+      return {
+        exists: false,
+        asset: toGalleryAsset(pending),
+        storagePath: pending.storageKey,
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        resumable: true
+      };
     }
     const existing = state.mediaAssets.find(
       (asset) => asset.workspaceId === input.workspaceId && asset.sha256 === input.sha256 && !asset.archivedAt
@@ -1393,6 +1492,17 @@ export class LocalDataStore implements DataStore {
     asset.errorReason = null;
     asset.processedAt = timestamp;
     asset.updatedAt = timestamp;
+    if (!asset.categoryId) {
+      const match = classifyMediaAssetCategory({
+        asset: toGalleryAsset(asset),
+        menuItems: state.menuItems.filter((item) => item.workspaceId === asset.workspaceId),
+        categories: state.mediaCategories.filter((category) => category.workspaceId === asset.workspaceId)
+      });
+      if (match) {
+        asset.categoryId = match.categoryId;
+        asset.updatedAt = timestamp;
+      }
+    }
     await this.persist();
     return toGalleryAsset(asset);
   }
@@ -1485,19 +1595,22 @@ export class LocalDataStore implements DataStore {
       }
       items.push(item);
 
-      if (category) {
-        for (const asset of state.mediaAssets) {
-          if (
-            asset.workspaceId === input.workspaceId &&
-            !asset.categoryId &&
-            (asset.archivedAt ?? null) === null &&
-            menuItemMatchesAsset(parsed, asset)
-          ) {
-            asset.categoryId = category.id;
-            asset.updatedAt = timestamp;
-            categorizedAssets.push(toGalleryAsset(asset));
-          }
-        }
+    }
+    const workspaceMenuItems = state.menuItems.filter((item) => item.workspaceId === input.workspaceId);
+    const workspaceCategories = state.mediaCategories.filter((category) => category.workspaceId === input.workspaceId);
+    for (const asset of state.mediaAssets) {
+      if (asset.workspaceId !== input.workspaceId || asset.categoryId || (asset.archivedAt ?? null) !== null || asset.status !== "ready") {
+        continue;
+      }
+      const match = classifyMediaAssetCategory({
+        asset: toGalleryAsset(asset),
+        menuItems: workspaceMenuItems,
+        categories: workspaceCategories
+      });
+      if (match) {
+        asset.categoryId = match.categoryId;
+        asset.updatedAt = timestamp;
+        categorizedAssets.push(toGalleryAsset(asset));
       }
     }
     await this.persist();
@@ -1692,6 +1805,7 @@ export class LocalDataStore implements DataStore {
     const batch = state.batches.find((item) => item.id === input.batchId && item.workspaceId === job.workspaceId);
     if (!batch) throw new Error(`Batch not found: ${input.batchId}`);
     const variants = state.variants.filter((variant) => variant.batchId === batch.id && variant.workspaceId === batch.workspaceId);
+    if (job.status === "cancelled") return { batch, variants };
     const timestamp = now();
     batch.variantsCount = variants.filter((variant) => variant.status !== "eliminada").length;
     if (!terminalBatchStatuses.has(batch.status)) {
@@ -1708,6 +1822,10 @@ export class LocalDataStore implements DataStore {
   async getVariantCaptionContext(input: Parameters<DataStore["getVariantCaptionContext"]>[0]): ReturnType<DataStore["getVariantCaptionContext"]> {
     const state = await this.load();
     const variant = this.requireVariant(state, input.workspaceId, input.businessId, input.batchId, input.variantId);
+    const batch = state.batches.find(
+      (item) => item.id === input.batchId && item.workspaceId === input.workspaceId && item.businessId === input.businessId
+    );
+    if (variant.status === "eliminada" || (batch && terminalBatchStatuses.has(batch.status))) return null;
     const photo = state.photos.find(
       (item) =>
         item.id === variant.photoId &&
@@ -1734,6 +1852,7 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const variant = this.requireVariant(state, job.workspaceId, job.businessId, job.batchId, input.variantId);
+    if (job.status === "cancelled" || variant.status === "eliminada") return variant;
     if (
       job.type !== "generate_variant" ||
       job.variantId !== variant.id ||
@@ -2043,6 +2162,7 @@ export class LocalDataStore implements DataStore {
   async completeSchedulePosts(input: { jobId: string; batchId: string }): Promise<{ scheduledPosts: ScheduledPost[] }> {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
+    if (job.status === "cancelled") return { scheduledPosts: [] };
     if (!job.businessId) throw new Error("schedule_posts job is missing businessId");
     const batch = this.requireBatch(state, job.workspaceId, job.businessId, input.batchId);
     if (terminalBatchStatuses.has(batch.status)) return { scheduledPosts: [] };
@@ -2250,6 +2370,7 @@ export class LocalDataStore implements DataStore {
     const state = await this.load();
     const job = this.requireJob(state, input.jobId);
     const post = this.requireScheduledPost(state, job.workspaceId, job.businessId, job.batchId, input.scheduledPostId);
+    if (job.status === "cancelled" || ["cancelada", "cancelled", "fallida", "failed"].includes(post.status)) return post;
     if (post.facebookPostId) return post;
     if (post.status === "estado_incierto") {
       throw new AppError({
@@ -2416,6 +2537,7 @@ export class LocalDataStore implements DataStore {
       await this.persist();
       return { scheduledPost: post };
     }
+    this.cancelActivePublishJobsForPost(state, post.id, "scheduled_post_rescheduled");
     post.scheduledFor = input.scheduledFor;
     post.scheduledForUnix = Math.floor(new Date(input.scheduledFor).getTime() / 1000);
     post.status = "programada";
@@ -2451,6 +2573,7 @@ export class LocalDataStore implements DataStore {
       await this.persist();
       return { scheduledPost: post };
     }
+    this.cancelActivePublishJobsForPost(state, post.id, "scheduled_post_cancelled");
     post.status = "cancelada";
     post.updatedAt = now();
     const variant = state.variants.find((item) => item.id === post.variantId);
@@ -2475,6 +2598,7 @@ export class LocalDataStore implements DataStore {
     if (post.facebookPostId || post.status === "publicada" || post.status === "estado_incierto") {
       throw this.scheduledPostStateError("scheduled_post_not_publishable");
     }
+    this.cancelActivePublishJobsForPost(state, post.id, "scheduled_post_publish_now");
     post.deliveryMode = "publish_now";
     post.scheduledFor = now();
     post.scheduledForUnix = Math.floor(Date.now() / 1000);
@@ -2797,6 +2921,81 @@ export class LocalDataStore implements DataStore {
       });
     }
     return post;
+  }
+
+  private cancelActivePublishJobsForPost(state: LocalState, scheduledPostId: string, reason: string) {
+    const timestamp = now();
+    for (const job of state.jobs) {
+      if (
+        job.type === "publish_post" &&
+        String(job.payload.scheduledPostId ?? "") === scheduledPostId &&
+        ["queued", "running", "blocked", "needs_user_action"].includes(job.status)
+      ) {
+        const attempt = state.jobAttempts.find((item) => item.jobId === job.id && item.attemptNumber === job.attempts);
+        if (attempt && attempt.status === "running") {
+          attempt.status = "failed";
+          attempt.finishedAt = timestamp;
+          attempt.error = reason;
+        }
+        job.status = "cancelled";
+        job.lastError = reason;
+        job.updatedAt = timestamp;
+      }
+    }
+  }
+
+  private markExpiredPublishJobsForReview(state: LocalState, timestamp: string) {
+    let changed = false;
+    for (const job of state.jobs) {
+      if (
+        job.type === "publish_post" &&
+        job.status === "running" &&
+        (job.leaseExpiresAt ?? job.lockedAt ?? timestamp) < timestamp
+      ) {
+        const reason = "publish_job_lease_expired";
+        const attempt = state.jobAttempts.find((item) => item.jobId === job.id && item.attemptNumber === job.attempts);
+        if (attempt && attempt.status === "running") {
+          attempt.status = "failed";
+          attempt.finishedAt = timestamp;
+          attempt.error = reason;
+        }
+        job.status = "needs_user_action";
+        job.lastError = reason;
+        job.updatedAt = timestamp;
+        const scheduledPostId = typeof job.payload.scheduledPostId === "string" ? job.payload.scheduledPostId : null;
+        const post = scheduledPostId ? state.scheduledPosts.find((item) => item.id === scheduledPostId) : null;
+        if (post && !["publicada", "published", "cancelada", "cancelled"].includes(post.status)) {
+          post.status = "estado_incierto";
+          post.remoteStatus = "incierto";
+          post.remoteErrorCode = reason;
+          post.updatedAt = timestamp;
+        }
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private cancelTerminalBatchJobs(state: LocalState, timestamp: string) {
+    const terminalBatchIds = new Set(
+      state.batches.filter((batch) => terminalBatchStatuses.has(batch.status)).map((batch) => batch.id)
+    );
+    let changed = false;
+    for (const job of state.jobs) {
+      if (job.batchId && terminalBatchIds.has(job.batchId) && ["queued", "running", "blocked", "needs_user_action"].includes(job.status)) {
+        const attempt = state.jobAttempts.find((item) => item.jobId === job.id && item.attemptNumber === job.attempts);
+        if (attempt && attempt.status === "running") {
+          attempt.status = "failed";
+          attempt.finishedAt = timestamp;
+          attempt.error = "batch_terminal";
+        }
+        job.status = "cancelled";
+        job.lastError = "batch_terminal";
+        job.updatedAt = timestamp;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   private scheduledPostStateError(code: string) {

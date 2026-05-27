@@ -586,6 +586,7 @@ export const listMediaAssets = async (
     search?: string;
     unused?: boolean;
     archived?: boolean;
+    cursor?: string;
     limit?: number;
   }
 ): Promise<MediaAssetsResponse> => {
@@ -594,6 +595,7 @@ export const listMediaAssets = async (
   if (input.search) params.set("search", input.search);
   if (input.unused !== undefined) params.set("unused", String(input.unused));
   if (input.archived !== undefined) params.set("archived", String(input.archived));
+  if (input.cursor) params.set("cursor", input.cursor);
   if (input.limit !== undefined) params.set("limit", String(input.limit));
   const json = await authorizedJsonRequest(token, `/media/assets?${params.toString()}`, {
     headers: {

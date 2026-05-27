@@ -6,13 +6,32 @@ import {
   listMediaSelections,
   updateMediaSelection
 } from "../../api/client";
-import { readGalleryCache, writeGalleryCache } from "../gallery/cache";
+import {
+  prefetchGalleryThumbnails,
+  prepareGalleryAssetsForPhone,
+  readGalleryAssetsForPhone,
+  readGalleryCache,
+  writeGalleryCache
+} from "../gallery/cache";
 
 export type GalleryLoadResult = {
   assets: GalleryMediaAsset[];
   categories: MediaCategory[];
   selections: MediaSelection[];
   source: "network" | "cache";
+};
+
+const listAllMediaAssets = async (token: string, filters: Parameters<typeof listMediaAssets>[1]) => {
+  const items: GalleryMediaAsset[] = [];
+  let cursor: string | null | undefined;
+  for (let page = 0; page < 10; page += 1) {
+    const pageFilters = cursor ? { ...filters, cursor } : filters;
+    const response = await listMediaAssets(token, pageFilters);
+    items.push(...response.items);
+    cursor = response.nextCursor;
+    if (!cursor) break;
+  }
+  return items;
 };
 
 export const loadGalleryOfflineFirst = async (input: {
@@ -30,18 +49,20 @@ export const loadGalleryOfflineFirst = async (input: {
     if (input.search) filters.search = input.search;
     if (input.categoryId) filters.categoryId = input.categoryId;
     if (input.unused !== undefined) filters.unused = input.unused;
-    const [assetsResponse, categories, selections] = await Promise.all([
-      listMediaAssets(input.token, filters),
+    const [assets, categories, selections] = await Promise.all([
+      listAllMediaAssets(input.token, filters),
       listMediaCategories(input.token, input.workspaceId),
       listMediaSelections(input.token, input.workspaceId)
     ]);
+    const phoneReadyAssets = await prepareGalleryAssetsForPhone(input.workspaceId, assets);
     await writeGalleryCache(input.workspaceId, {
-      assets: assetsResponse.items,
+      assets: phoneReadyAssets,
       categories,
       selections
     });
+    void prefetchGalleryThumbnails(input.workspaceId, assets).catch(() => undefined);
     return {
-      assets: assetsResponse.items,
+      assets: phoneReadyAssets,
       categories,
       selections,
       source: "network"
@@ -57,8 +78,9 @@ export const loadGalleryOfflineFirst = async (input: {
         .filter((value): value is string => typeof value === "string")
         .some((value) => value.toLocaleLowerCase("es-MX").includes(term));
     });
+    const phoneReadyAssets = await readGalleryAssetsForPhone(input.workspaceId, filtered);
     return {
-      assets: filtered,
+      assets: phoneReadyAssets,
       categories: cache.categories,
       selections: cache.selections,
       source: "cache"

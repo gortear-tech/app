@@ -175,6 +175,7 @@ export const MediaUploadIntentResponseSchema = Type.Object({
   uploadUrl: Type.Optional(Type.String()),
   storagePath: Type.Optional(Type.String()),
   expiresAt: Type.Optional(Type.String()),
+  resumable: Type.Optional(Type.Boolean()),
   requestId: Type.String()
 });
 

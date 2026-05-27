@@ -86,6 +86,23 @@ export type JobAttempt = {
   error?: string;
 };
 
+export type WorkerHeartbeat = {
+  workerId: string;
+  service: string;
+  environment: string;
+  release: string;
+  status: "starting" | "idle" | "processing" | "stopping" | "error";
+  lastBeatAt: string;
+  metadata: Record<string, unknown>;
+};
+
+export type WorkerStatus = {
+  ok: boolean;
+  lastBeatAt?: string;
+  workerId?: string;
+  status?: WorkerHeartbeat["status"];
+};
+
 export type MetaAuthorization = {
   id: string;
   workspaceId: string;
@@ -234,6 +251,15 @@ export type DataStore = {
     runAfter?: string;
   }): Promise<StoredJob>;
   claimDueJob(workerId: string): Promise<StoredJob | null>;
+  recordWorkerHeartbeat(input: {
+    workerId: string;
+    service: string;
+    environment: string;
+    release: string;
+    status: WorkerHeartbeat["status"];
+    metadata?: Record<string, unknown>;
+  }): Promise<WorkerHeartbeat | null>;
+  getWorkerStatus(input: { maxAgeMs: number }): Promise<WorkerStatus>;
   completeJob(input: { jobId: string; result: Record<string, unknown> }): Promise<StoredJob>;
   failJob(input: { jobId: string; error: string }): Promise<StoredJob>;
   listJobs(workspaceId: string): Promise<StoredJob[]>;
@@ -320,7 +346,7 @@ export type DataStore = {
     height?: number;
     categoryId?: string | null;
     requestId: string;
-  }): Promise<{ exists: boolean; asset: GalleryMediaAsset; storagePath?: string; expiresAt?: string }>;
+  }): Promise<{ exists: boolean; asset: GalleryMediaAsset; storagePath?: string; expiresAt?: string; resumable?: boolean }>;
   completeMediaUpload(input: {
     workspaceId: string;
     assetId: string;
