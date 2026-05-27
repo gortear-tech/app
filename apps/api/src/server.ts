@@ -69,6 +69,8 @@ import { captureException } from "./sentry.js";
 const allowedImageEditorProviders = new Set(["openai", "openai_compatible"]);
 const allowedImageEditorSizes = new Set(["1024x1024", "1536x1024", "1024x1536"]);
 const allowedImageEditorQualities = new Set(["auto", "low", "medium", "high"]);
+const IMAGE_EDITOR_DEFAULT_TIMEOUT_MS = 120_000;
+const IMAGE_EDITOR_MAX_TIMEOUT_MS = 180_000;
 
 const encodeServerSecret = (secret: string) => `server:${Buffer.from(secret, "utf8").toString("base64url")}`;
 
@@ -140,7 +142,12 @@ const normalizeImageEditorsForStorage = (
         baseUrl,
         size,
         quality,
-        timeoutMs: numberValue(editor.timeoutMs, 30000, 5000, 120000),
+        timeoutMs: numberValue(
+          editor.timeoutMs,
+          IMAGE_EDITOR_DEFAULT_TIMEOUT_MS,
+          IMAGE_EDITOR_DEFAULT_TIMEOUT_MS,
+          IMAGE_EDITOR_MAX_TIMEOUT_MS
+        ),
         apiKeyConfigured: Boolean(apiKeySecret)
       };
       if (apiKeySecret) stored.apiKeySecret = apiKeySecret;

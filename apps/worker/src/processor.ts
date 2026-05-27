@@ -27,6 +27,8 @@ const envFlag = (name: string, fallback: boolean) => {
 };
 
 const MEDIA_BUCKET = process.env.SUPABASE_MEDIA_BUCKET ?? "business-media";
+const IMAGE_EDIT_DEFAULT_TIMEOUT_MS = 120_000;
+const IMAGE_EDIT_MAX_TIMEOUT_MS = 180_000;
 const loadSharp = async () => (await import("sharp")).default;
 const mediaAssetPaths = (input: { workspaceId: string; assetId: string }) => ({
   thumbPath: `${input.workspaceId}/assets/${input.assetId}/thumb.webp`,
@@ -94,7 +96,10 @@ const imageEditorRuntimeFromBusiness = (
   const quality = qualitySetting === "auto" || qualitySetting === "low" || qualitySetting === "high" ? qualitySetting : "medium";
   const config: Parameters<typeof createImageEditProvider>[0] = {
     ...fallback,
-    timeoutMs: numberSetting(active, "timeoutMs", fallback.timeoutMs ?? 30000, 5000, 120000)
+    timeoutMs: Math.max(
+      IMAGE_EDIT_DEFAULT_TIMEOUT_MS,
+      numberSetting(active, "timeoutMs", fallback.timeoutMs ?? IMAGE_EDIT_DEFAULT_TIMEOUT_MS, 5000, IMAGE_EDIT_MAX_TIMEOUT_MS)
+    )
   };
   if (apiKey) config.apiKey = apiKey;
   if (baseUrl) config.baseUrl = baseUrl;
@@ -292,7 +297,7 @@ export const processOneJob = async (input: {
   menuParseProvider?: MenuParseProvider;
 }): Promise<WorkerResult> => {
   const providerConfig: Parameters<typeof createVisionAnalysisProvider>[0] = {
-    timeoutMs: Number(process.env.OPENAI_IMAGE_TIMEOUT_MS ?? process.env.OPENAI_VISION_TIMEOUT_MS ?? "30000")
+    timeoutMs: Number(process.env.OPENAI_IMAGE_TIMEOUT_MS ?? process.env.OPENAI_VISION_TIMEOUT_MS ?? String(IMAGE_EDIT_DEFAULT_TIMEOUT_MS))
   };
   if (process.env.OPENAI_API_KEY) providerConfig.apiKey = process.env.OPENAI_API_KEY;
   if (process.env.OPENAI_BASE_URL) providerConfig.baseUrl = process.env.OPENAI_BASE_URL;

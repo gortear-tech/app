@@ -140,6 +140,8 @@ const MAX_PHOTOS_PER_PICK = 10;
 const IMAGE_TARGET_WIDTH = 1800;
 const IMAGE_RECOMPRESS_THRESHOLD = 7 * 1024 * 1024;
 const WORK_POLL_MS = 3500;
+const IMAGE_EDITOR_DEFAULT_TIMEOUT_MS = 120000;
+const IMAGE_EDITOR_MAX_TIMEOUT_MS = 180000;
 
 const styleCatalog = [
   { id: "atardecer", name: "Atardecer", detail: "Calido, dorado, social", icon: "sunny-outline" as IconName },
@@ -222,7 +224,7 @@ const defaultImageEditor = (): ImageEditorDraft => ({
   baseUrl: "",
   size: "1024x1024",
   quality: "medium",
-  timeoutMs: 30000,
+  timeoutMs: IMAGE_EDITOR_DEFAULT_TIMEOUT_MS,
   apiKeyConfigured: false,
   apiKeyInput: ""
 });
@@ -243,7 +245,7 @@ const imageEditorsFromMetadata = (metadata: Record<string, unknown>): ImageEdito
         baseUrl: stringSetting(item, "baseUrl", provider === "openai" ? "" : "https://api.openai.com/v1"),
         size: asImageEditorSize(item.size),
         quality: asImageEditorQuality(item.quality),
-        timeoutMs: numberSetting(item, "timeoutMs", 30000, 5000, 120000),
+        timeoutMs: numberSetting(item, "timeoutMs", IMAGE_EDITOR_DEFAULT_TIMEOUT_MS, IMAGE_EDITOR_DEFAULT_TIMEOUT_MS, IMAGE_EDITOR_MAX_TIMEOUT_MS),
         apiKeyConfigured: item.apiKeyConfigured === true,
         apiKeyInput: ""
       };
@@ -261,7 +263,7 @@ const imageEditorsForMetadata = (editors: ImageEditorDraft[]) =>
     baseUrl: editor.baseUrl.trim(),
     size: editor.size,
     quality: editor.quality,
-    timeoutMs: clamp(editor.timeoutMs, 5000, 120000),
+    timeoutMs: clamp(editor.timeoutMs, IMAGE_EDITOR_DEFAULT_TIMEOUT_MS, IMAGE_EDITOR_MAX_TIMEOUT_MS),
     apiKeyConfigured: editor.apiKeyConfigured || editor.apiKeyInput.trim().length > 0,
     ...(editor.apiKeyInput.trim() ? { apiKey: editor.apiKeyInput.trim() } : {}),
     ...(editor.clearApiKey ? { clearApiKey: true } : {})
@@ -1034,7 +1036,7 @@ function BootScreen() {
                 baseUrl: preset.baseUrl,
                 size: "1024x1024",
                 quality: "medium",
-                timeoutMs: 30000,
+                timeoutMs: IMAGE_EDITOR_DEFAULT_TIMEOUT_MS,
                 apiKeyConfigured: false,
                 apiKeyInput: ""
               }
@@ -2323,8 +2325,12 @@ function BootScreen() {
                 <View style={styles.inlineInputRow}>
                   <TextInput
                     value={String(editor.timeoutMs)}
-                    onChangeText={(value) => updateImageEditor(editor.id, { timeoutMs: clamp(Number(value) || 30000, 5000, 120000) })}
-                    placeholder="30000"
+                    onChangeText={(value) =>
+                      updateImageEditor(editor.id, {
+                        timeoutMs: clamp(Number(value) || IMAGE_EDITOR_DEFAULT_TIMEOUT_MS, IMAGE_EDITOR_DEFAULT_TIMEOUT_MS, IMAGE_EDITOR_MAX_TIMEOUT_MS)
+                      })
+                    }
+                    placeholder="120000"
                     placeholderTextColor={palette.muted}
                     keyboardType="number-pad"
                     style={[styles.settingInput, styles.flex]}

@@ -113,6 +113,7 @@ export type OpenAiProviderConfig = {
 
 const defaultVisionModel = "gpt-5.5";
 const defaultImageEditModel = "gpt-image-2";
+const defaultImageEditTimeoutMs = 120_000;
 const defaultPromptVersion = "vision-analysis-v1";
 const defaultCaptionPromptVersion = "caption-page-context-v1";
 const supportsReasoningEffort = (model: string) => /^(gpt-5|o[1-9]|o\d)/i.test(model);
@@ -758,7 +759,7 @@ export const createImageEditProvider = (config: OpenAiProviderConfig): ImageEdit
 
   const baseUrl = config.baseUrl ?? "https://api.openai.com/v1";
   const model = config.imageEditModel ?? defaultImageEditModel;
-  const timeoutMs = config.timeoutMs ?? 30_000;
+  const timeoutMs = config.timeoutMs ?? defaultImageEditTimeoutMs;
 
   return {
     mode: "images",
@@ -805,6 +806,11 @@ export const createImageEditProvider = (config: OpenAiProviderConfig): ImageEdit
           usage: (json as { usage?: Record<string, unknown> }).usage ?? null,
           latencyMs: Date.now() - started
         };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`OpenAI image edit request timed out after ${timeoutMs}ms`);
+        }
+        throw error;
       } finally {
         clearTimeout(timeout);
       }
