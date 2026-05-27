@@ -47,6 +47,43 @@ export const BatchDetailSchema = Type.Object({
   requestId: Type.String()
 });
 
+export const BatchStageName = Type.Union([
+  Type.Literal("upload"),
+  Type.Literal("variant_generation"),
+  Type.Literal("review"),
+  Type.Literal("scheduling"),
+  Type.Literal("publish_execution")
+]);
+
+export const BatchStageTimingStatus = Type.Union([
+  Type.Literal("running"),
+  Type.Literal("succeeded"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled")
+]);
+
+export const BatchStageTimingSchema = Type.Object({
+  id: Type.String(),
+  workspaceId: Type.String(),
+  businessId: Type.String(),
+  batchId: Type.String(),
+  stage: BatchStageName,
+  status: BatchStageTimingStatus,
+  startedAt: Type.String(),
+  completedAt: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  durationMs: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+  counters: Type.Record(Type.String(), Type.Unknown()),
+  metadata: Type.Record(Type.String(), Type.Unknown()),
+  createdAt: Type.String(),
+  updatedAt: Type.String()
+});
+
+export const BatchStageTimingsResponseSchema = Type.Object({
+  schemaVersion: Type.Literal("batch_stage_timings.v1"),
+  timings: Type.Array(BatchStageTimingSchema),
+  requestId: Type.String()
+});
+
 export const BatchesResponseSchema = Type.Object({
   schemaVersion: Type.Literal("batches.v1"),
   batches: Type.Array(BatchSummarySchema),
@@ -76,4 +113,8 @@ export const BatchMutationResponseSchema = Type.Object({
 export type BatchSummary = Static<typeof BatchSummarySchema>;
 export type Photo = Static<typeof PhotoSchema>;
 export type BatchDetail = Static<typeof BatchDetailSchema>;
+export type BatchStageTiming = Static<typeof BatchStageTimingSchema>;
+export type BatchStageName = Static<typeof BatchStageName>;
+export type BatchStageTimingStatus = Static<typeof BatchStageTimingStatus>;
+export type BatchStageTimingsResponse = Static<typeof BatchStageTimingsResponseSchema>;
 export type BatchMutationResponse = Static<typeof BatchMutationResponseSchema>;

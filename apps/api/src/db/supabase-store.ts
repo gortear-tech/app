@@ -8,6 +8,9 @@ import {
   WorkspaceMember,
   WorkspaceRole,
   Business,
+  BatchStageName,
+  BatchStageTiming,
+  BatchStageTimingStatus,
   MetaPage,
   BatchSummary,
   GalleryMediaAsset,
@@ -227,6 +230,22 @@ const toBatch = (row: Record<string, any>): BatchSummary => {
   if (row.variants_per_photo !== undefined) batch.variantsPerPhoto = row.variants_per_photo;
   return batch;
 };
+
+const toBatchStageTiming = (row: Record<string, any>): BatchStageTiming => ({
+  id: row.id,
+  workspaceId: row.workspace_id,
+  businessId: row.business_id,
+  batchId: row.batch_id,
+  stage: row.stage,
+  status: row.status,
+  startedAt: new Date(row.started_at).toISOString(),
+  completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : null,
+  durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
+  counters: json(row.counters, {}),
+  metadata: json(row.metadata, {}),
+  createdAt: new Date(row.created_at).toISOString(),
+  updatedAt: new Date(row.updated_at).toISOString()
+});
 
 const toUploadIntent = (row: Record<string, any>): UploadIntent => ({
   id: row.id,
@@ -915,6 +934,178 @@ export class SupabaseDataStoreCore {
     return result.rows.map(toAttempt);
   }
 
+  async markBatchStageStarted(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    stage: BatchStageName;
+    counters?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<BatchStageTiming> {
+    await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
+    const result = await this.pool.query(
+      `insert into public.batch_stage_timings
+       (id, workspace_id, business_id, batch_id, stage, status, started_at, counters, metadata, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, 'running', now(), $6::jsonb, $7::jsonb, now(), now())
+       on conflict (batch_id, stage) do update
+       set counters = public.batch_stage_timings.counters || excluded.counters,
+           metadata = public.batch_stage_timings.metadata || excluded.metadata,
+           updated_at = now()
+       returning *`,
+      [
+        randomUUID(),
+        input.workspaceId,
+        input.businessId,
+        input.batchId,
+        input.stage,
+        JSON.stringify(input.counters ?? {}),
+        JSON.stringify(input.metadata ?? {})
+      ]
+    );
+    return toBatchStageTiming(result.rows[0]);
+  }
+
+  async markBatchStageCompleted(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    stage: BatchStageName;
+    status?: BatchStageTimingStatus;
+    counters?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<BatchStageTiming> {
+    await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
+    const result = await this.pool.query(
+      `insert into public.batch_stage_timings
+       (id, workspace_id, business_id, batch_id, stage, status, started_at, completed_at, duration_ms, counters, metadata, created_at, updated_at)
+       values ($1, $2, $3, $4, $5, $6, now(), now(), 0, $7::jsonb, $8::jsonb, now(), now())
+       on conflict (batch_id, stage) do update
+       set status = excluded.status,
+           completed_at = now(),
+           duration_ms = greatest(0, floor(extract(epoch from (now() - public.batch_stage_timings.started_at)) * 1000))::bigint,
+           counters = public.batch_stage_timings.counters || excluded.counters,
+           metadata = public.batch_stage_timings.metadata || excluded.metadata,
+           updated_at = now()
+       returning *`,
+      [
+        randomUUID(),
+        input.workspaceId,
+        input.businessId,
+        input.batchId,
+        input.stage,
+        input.status ?? "succeeded",
+        JSON.stringify(input.counters ?? {}),
+        JSON.stringify(input.metadata ?? {})
+      ]
+    );
+    return toBatchStageTiming(result.rows[0]);
+  }
+
+  async listBatchStageTimings(input: { workspaceId: string; businessId: string; batchId: string }): Promise<BatchStageTiming[]> {
+    await this.requireBatch(input.workspaceId, input.businessId, input.batchId);
+    const result = await this.pool.query(
+      `select * from public.batch_stage_timings
+       where workspace_id = $1 and business_id = $2 and batch_id = $3
+       order by started_at asc, created_at asc`,
+      [input.workspaceId, input.businessId, input.batchId]
+    );
+    return result.rows.map(toBatchStageTiming);
+  }
+
+  private async safeMarkBatchStageStarted(input: Parameters<DataStore["markBatchStageStarted"]>[0]) {
+    try {
+      await this.markBatchStageStarted(input);
+    } catch (error) {
+      console.warn("batch_stage_timing_start_failed", error);
+    }
+  }
+
+  private async safeMarkBatchStageCompleted(input: Parameters<DataStore["markBatchStageCompleted"]>[0]) {
+    try {
+      await this.markBatchStageCompleted(input);
+    } catch (error) {
+      console.warn("batch_stage_timing_complete_failed", error);
+    }
+  }
+
+  private async completeVariantGenerationStageIfReady(input: { workspaceId: string; businessId: string; batchId: string }) {
+    const result = await this.pool.query(
+      `select
+         count(*)::int as total,
+         count(*) filter (where generated_asset_id is not null)::int as generated,
+         count(*) filter (where status in ('generada', 'aprobada', 'rechazada', 'programada', 'publicada'))::int as ready
+       from public.variants
+       where workspace_id = $1 and business_id = $2 and batch_id = $3 and status <> 'eliminada'`,
+      [input.workspaceId, input.businessId, input.batchId]
+    );
+    const total = Number(result.rows[0]?.total ?? 0);
+    const generated = Number(result.rows[0]?.generated ?? 0);
+    const ready = Number(result.rows[0]?.ready ?? 0);
+    if (total > 0 && generated >= total) {
+      await this.safeMarkBatchStageCompleted({
+        ...input,
+        stage: "variant_generation",
+        counters: { totalVariants: total, generatedVariants: generated, readyVariants: ready }
+      });
+      await this.safeMarkBatchStageStarted({
+        ...input,
+        stage: "review",
+        counters: { totalVariants: total, generatedVariants: generated },
+        metadata: { measurement: "all_variants_generated_to_calendar_confirmed" }
+      });
+    }
+  }
+
+  private async completeReviewStageIfReady(input: { workspaceId: string; businessId: string; batchId: string }) {
+    const result = await this.pool.query(
+      `select
+         count(*) filter (where generated_asset_id is not null)::int as generated,
+         count(*) filter (where status in ('aprobada', 'programada', 'publicada'))::int as approved,
+         count(*) filter (where status = 'rechazada')::int as rejected,
+         count(*) filter (where status in ('aprobada', 'rechazada', 'programada', 'publicada'))::int as reviewed
+       from public.variants
+       where workspace_id = $1 and business_id = $2 and batch_id = $3 and status <> 'eliminada'`,
+      [input.workspaceId, input.businessId, input.batchId]
+    );
+    const generated = Number(result.rows[0]?.generated ?? 0);
+    const reviewed = Number(result.rows[0]?.reviewed ?? 0);
+    if (generated > 0 && reviewed >= generated) {
+      await this.safeMarkBatchStageCompleted({
+        ...input,
+        stage: "review",
+        counters: {
+          generatedVariants: generated,
+          reviewedVariants: reviewed,
+          approvedVariants: Number(result.rows[0]?.approved ?? 0),
+          rejectedVariants: Number(result.rows[0]?.rejected ?? 0)
+        }
+      });
+    }
+  }
+
+  private async completePublishExecutionStageIfReady(input: { workspaceId: string; businessId: string; batchId: string }) {
+    const result = await this.pool.query(
+      `select
+         count(*)::int as total,
+         count(*) filter (where status in ('publicada', 'published'))::int as published,
+         count(*) filter (where status in ('fallida', 'failed'))::int as failed
+       from public.scheduled_posts
+       where workspace_id = $1 and business_id = $2 and batch_id = $3`,
+      [input.workspaceId, input.businessId, input.batchId]
+    );
+    const total = Number(result.rows[0]?.total ?? 0);
+    const published = Number(result.rows[0]?.published ?? 0);
+    const failed = Number(result.rows[0]?.failed ?? 0);
+    if (total > 0 && published + failed >= total) {
+      await this.safeMarkBatchStageCompleted({
+        ...input,
+        stage: "publish_execution",
+        status: failed > 0 ? "failed" : "succeeded",
+        counters: { totalPosts: total, publishedPosts: published, failedPosts: failed }
+      });
+    }
+  }
+
   async getBootstrapContext(userId: string): Promise<Awaited<ReturnType<DataStore["getBootstrapContext"]>>> {
     const memberships = await this.listMemberships(userId);
     const workspace = memberships[0]?.workspace;
@@ -1440,7 +1631,16 @@ export class SupabaseDataStoreCore {
         MAX_UPLOAD_BYTES
       ]
     );
-    return toUploadIntent(result.rows[0]);
+    const intent = toUploadIntent(result.rows[0]);
+    await this.safeMarkBatchStageStarted({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      batchId: input.batchId,
+      stage: "upload",
+      counters: { uploadIntentCount: 1 },
+      metadata: { measurement: "first_upload_intent_to_generate_request" }
+    });
+    return intent;
   }
 
   async completeUpload(input: Parameters<DataStore["completeUpload"]>[0]): Promise<{ photo: Photo; job: StoredJob | null }> {
@@ -2335,6 +2535,32 @@ export class SupabaseDataStoreCore {
         [input.batchId, [...terminalBatchStatuses], input.variantsPerPhoto]
       );
       await client.query("commit");
+      await this.safeMarkBatchStageCompleted({
+        workspaceId: input.workspaceId,
+        businessId: input.businessId,
+        batchId: input.batchId,
+        stage: "upload",
+        counters: {
+          photos: validPhotos.length,
+          variantsPerPhoto: input.variantsPerPhoto,
+          targetVariants: validPhotos.length * input.variantsPerPhoto
+        },
+        metadata: { completedBy: "generate_requested" }
+      });
+      await this.safeMarkBatchStageStarted({
+        workspaceId: input.workspaceId,
+        businessId: input.businessId,
+        batchId: input.batchId,
+        stage: "variant_generation",
+        counters: {
+          photos: validPhotos.length,
+          variantsPerPhoto: input.variantsPerPhoto,
+          targetVariants: validPhotos.length * input.variantsPerPhoto,
+          created,
+          available
+        },
+        metadata: { measurement: "generate_request_to_all_variants_generated" }
+      });
       return { job, created, available, variants };
     } catch (error) {
       await client.query("rollback");
@@ -2574,7 +2800,13 @@ export class SupabaseDataStoreCore {
         [current.batchId, [...terminalBatchStatuses]]
       );
       await client.query("commit");
-      return toVariant(updated.rows[0]);
+      const completedVariant = toVariant(updated.rows[0]);
+      await this.completeVariantGenerationStageIfReady({
+        workspaceId: completedVariant.workspaceId,
+        businessId: completedVariant.businessId,
+        batchId: completedVariant.batchId
+      }).catch((error) => console.warn("batch_stage_generation_complete_check_failed", error));
+      return completedVariant;
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -2622,7 +2854,13 @@ export class SupabaseDataStoreCore {
         [variant.id, publishableAssetId]
       );
       await client.query("commit");
-      return toVariant(result.rows[0]);
+      const approved = toVariant(result.rows[0]);
+      await this.completeReviewStageIfReady({
+        workspaceId: approved.workspaceId,
+        businessId: approved.businessId,
+        batchId: approved.batchId
+      }).catch((error) => console.warn("batch_stage_review_complete_check_failed", error));
+      return approved;
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -2639,7 +2877,13 @@ export class SupabaseDataStoreCore {
     const result = await this.pool.query("update public.variants set status = 'rechazada', updated_at = now() where id = $1 returning *", [
       variant.id
     ]);
-    return toVariant(result.rows[0]);
+    const rejected = toVariant(result.rows[0]);
+    await this.completeReviewStageIfReady({
+      workspaceId: rejected.workspaceId,
+      businessId: rejected.businessId,
+      batchId: rejected.batchId
+    }).catch((error) => console.warn("batch_stage_review_complete_check_failed", error));
+    return rejected;
   }
 
   async confirmCalendar(input: Parameters<DataStore["confirmCalendar"]>[0]): ReturnType<DataStore["confirmCalendar"]> {
@@ -2755,6 +2999,19 @@ export class SupabaseDataStoreCore {
         [batch.id]
       );
       await client.query("commit");
+      await this.completeReviewStageIfReady({
+        workspaceId: input.workspaceId,
+        businessId: input.businessId,
+        batchId: input.batchId
+      }).catch((error) => console.warn("batch_stage_review_complete_check_failed", error));
+      await this.safeMarkBatchStageStarted({
+        workspaceId: input.workspaceId,
+        businessId: input.businessId,
+        batchId: input.batchId,
+        stage: "scheduling",
+        counters: { approvedVariants: approved.length, scheduledPosts: scheduledPosts.length, periodDays: input.periodDays },
+        metadata: { measurement: "calendar_confirm_to_schedule_posts_job_complete" }
+      });
       return { scheduledPosts, job };
     } catch (error) {
       await client.query("rollback");
@@ -2841,6 +3098,17 @@ export class SupabaseDataStoreCore {
         "update public.batches set status = 'completado', last_activity_at = now(), updated_at = now() where id = $1",
         [batch.id]
       );
+      await this.safeMarkBatchStageCompleted({
+        workspaceId: job.workspaceId,
+        businessId: job.businessId,
+        batchId: input.batchId,
+        stage: "scheduling",
+        counters: {
+          scheduledPosts: posts.length,
+          remoteScheduledPosts: posts.filter((post) => post.remoteStatus === "confirmado_meta").length,
+          localDuePublishPosts: posts.filter((post) => post.remoteStatus === "no_enviado").length
+        }
+      });
     }
     return { scheduledPosts: posts };
   }
@@ -3060,6 +3328,14 @@ export class SupabaseDataStoreCore {
       operation: "publish_post",
       status: "started"
     });
+    await this.safeMarkBatchStageStarted({
+      workspaceId: post.workspaceId,
+      businessId: post.businessId,
+      batchId: post.batchId,
+      stage: "publish_execution",
+      counters: { startedPosts: 1 },
+      metadata: { measurement: "first_publish_job_started_to_all_posts_finished" }
+    });
     const pageResult = await this.pool.query(
       `select meta_page_id, encrypted_page_access_token, encrypted_page_access_token_ciphertext
        from public.facebook_pages where id = $1 and workspace_id = $2`,
@@ -3079,7 +3355,13 @@ export class SupabaseDataStoreCore {
         operation: "publish_post",
         status: "failed"
       });
-      return await this.failScheduledPost(post.id, "missing_meta_page_token");
+      const failed = await this.failScheduledPost(post.id, "missing_meta_page_token");
+      await this.completePublishExecutionStageIfReady({
+        workspaceId: post.workspaceId,
+        businessId: post.businessId,
+        batchId: post.batchId
+      }).catch((error) => console.warn("batch_stage_publish_complete_check_failed", error));
+      return failed;
     }
     const publishImageUrl = publicMediaUrl(String(asset.rows[0].id)) ?? (post.imageUrl && /^https:\/\//i.test(post.imageUrl) ? post.imageUrl : null);
     if (!publishImageUrl) {
@@ -3091,7 +3373,13 @@ export class SupabaseDataStoreCore {
         operation: "publish_post",
         status: "failed"
       });
-      return await this.failScheduledPost(post.id, "missing_public_media_url");
+      const failed = await this.failScheduledPost(post.id, "missing_public_media_url");
+      await this.completePublishExecutionStageIfReady({
+        workspaceId: post.workspaceId,
+        businessId: post.businessId,
+        batchId: post.batchId
+      }).catch((error) => console.warn("batch_stage_publish_complete_check_failed", error));
+      return failed;
     }
     let publishResult: Awaited<ReturnType<typeof publishFacebookPagePost>>;
     let fbUpload: { fbPhotoId: string; reused: boolean; providerTraceId?: string };
@@ -3128,6 +3416,11 @@ export class SupabaseDataStoreCore {
         operation: "publish_post",
         status: "failed"
       });
+      await this.completePublishExecutionStageIfReady({
+        workspaceId: post.workspaceId,
+        businessId: post.businessId,
+        batchId: post.batchId
+      }).catch((timingError) => console.warn("batch_stage_publish_complete_check_failed", timingError));
       throw error;
     }
     const result = await this.pool.query(
@@ -3165,7 +3458,13 @@ export class SupabaseDataStoreCore {
       operation: "publish_post",
       status: "succeeded"
     });
-    return toScheduledPost(result.rows[0]);
+    const published = toScheduledPost(result.rows[0]);
+    await this.completePublishExecutionStageIfReady({
+      workspaceId: published.workspaceId,
+      businessId: published.businessId,
+      batchId: published.batchId
+    }).catch((error) => console.warn("batch_stage_publish_complete_check_failed", error));
+    return published;
   }
 
   async updateScheduledPost(input: Parameters<DataStore["updateScheduledPost"]>[0]): ReturnType<DataStore["updateScheduledPost"]> {

@@ -4,6 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   AppError,
   AssignedStyle,
+  BatchStageName,
+  BatchStageTiming,
+  BatchStageTimingStatus,
   BatchSummary,
   Business,
   CaptionResult,
@@ -77,6 +80,7 @@ type LocalState = {
   mediaSelections: MediaSelection[];
   menuItems: MenuItem[];
   aiRuns: AiRun[];
+  batchStageTimings: BatchStageTiming[];
   variants: Variant[];
   scheduledPosts: ScheduledPost[];
   selectedByWorkspace: Record<string, { pageId?: string; businessId?: string }>;
@@ -171,6 +175,7 @@ const emptyState = (): LocalState => ({
   mediaSelections: [],
   menuItems: [],
   aiRuns: [],
+  batchStageTimings: [],
   variants: [],
   scheduledPosts: [],
   selectedByWorkspace: {},
@@ -327,6 +332,7 @@ const mergeLocalState = (latest: LocalState, current: LocalState): LocalState =>
   mediaSelections: mergeById(latest.mediaSelections ?? [], current.mediaSelections ?? []),
   menuItems: mergeById(latest.menuItems ?? [], current.menuItems ?? []),
   aiRuns: mergeById(latest.aiRuns, current.aiRuns),
+  batchStageTimings: mergeById(latest.batchStageTimings ?? [], current.batchStageTimings ?? []),
   variants: mergeById(latest.variants, current.variants),
   scheduledPosts: mergeById(latest.scheduledPosts, current.scheduledPosts),
   jobs: mergeById(latest.jobs, current.jobs),
@@ -651,6 +657,183 @@ export class LocalDataStore implements DataStore {
   async listAttempts(jobId: string): Promise<JobAttempt[]> {
     const state = await this.load();
     return state.jobAttempts.filter((attempt) => attempt.jobId === jobId);
+  }
+
+  async markBatchStageStarted(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    stage: BatchStageName;
+    counters?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<BatchStageTiming> {
+    const state = await this.load();
+    this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
+    const timestamp = now();
+    let timing = state.batchStageTimings.find(
+      (item) => item.workspaceId === input.workspaceId && item.businessId === input.businessId && item.batchId === input.batchId && item.stage === input.stage
+    );
+    if (!timing) {
+      timing = {
+        id: randomUUID(),
+        workspaceId: input.workspaceId,
+        businessId: input.businessId,
+        batchId: input.batchId,
+        stage: input.stage,
+        status: "running",
+        startedAt: timestamp,
+        completedAt: null,
+        durationMs: null,
+        counters: input.counters ?? {},
+        metadata: input.metadata ?? {},
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      state.batchStageTimings.push(timing);
+    } else {
+      timing.counters = { ...timing.counters, ...(input.counters ?? {}) };
+      timing.metadata = { ...timing.metadata, ...(input.metadata ?? {}) };
+      timing.updatedAt = timestamp;
+    }
+    await this.persist();
+    return timing;
+  }
+
+  async markBatchStageCompleted(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    stage: BatchStageName;
+    status?: BatchStageTimingStatus;
+    counters?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<BatchStageTiming> {
+    const state = await this.load();
+    this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
+    const timestamp = now();
+    let timing = state.batchStageTimings.find(
+      (item) => item.workspaceId === input.workspaceId && item.businessId === input.businessId && item.batchId === input.batchId && item.stage === input.stage
+    );
+    if (!timing) {
+      timing = {
+        id: randomUUID(),
+        workspaceId: input.workspaceId,
+        businessId: input.businessId,
+        batchId: input.batchId,
+        stage: input.stage,
+        status: input.status ?? "succeeded",
+        startedAt: timestamp,
+        completedAt: timestamp,
+        durationMs: 0,
+        counters: input.counters ?? {},
+        metadata: input.metadata ?? {},
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      state.batchStageTimings.push(timing);
+    } else {
+      timing.status = input.status ?? "succeeded";
+      timing.completedAt = timestamp;
+      timing.durationMs = Math.max(0, Date.parse(timestamp) - Date.parse(timing.startedAt));
+      timing.counters = { ...timing.counters, ...(input.counters ?? {}) };
+      timing.metadata = { ...timing.metadata, ...(input.metadata ?? {}) };
+      timing.updatedAt = timestamp;
+    }
+    await this.persist();
+    return timing;
+  }
+
+  async listBatchStageTimings(input: { workspaceId: string; businessId: string; batchId: string }): Promise<BatchStageTiming[]> {
+    const state = await this.load();
+    this.requireBatch(state, input.workspaceId, input.businessId, input.batchId);
+    return state.batchStageTimings
+      .filter((item) => item.workspaceId === input.workspaceId && item.businessId === input.businessId && item.batchId === input.batchId)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.createdAt.localeCompare(b.createdAt));
+  }
+
+  private async safeMarkBatchStageStarted(input: Parameters<DataStore["markBatchStageStarted"]>[0]) {
+    try {
+      await this.markBatchStageStarted(input);
+    } catch (error) {
+      console.warn("batch_stage_timing_start_failed", error);
+    }
+  }
+
+  private async safeMarkBatchStageCompleted(input: Parameters<DataStore["markBatchStageCompleted"]>[0]) {
+    try {
+      await this.markBatchStageCompleted(input);
+    } catch (error) {
+      console.warn("batch_stage_timing_complete_failed", error);
+    }
+  }
+
+  private async completeVariantGenerationStageIfReady(input: { workspaceId: string; businessId: string; batchId: string }) {
+    const state = await this.load();
+    const variants = state.variants.filter(
+      (variant) =>
+        variant.workspaceId === input.workspaceId &&
+        variant.businessId === input.businessId &&
+        variant.batchId === input.batchId &&
+        variant.status !== "eliminada"
+    );
+    const generated = variants.filter((variant) => variant.generatedAssetId).length;
+    const ready = variants.filter((variant) => ["generada", "aprobada", "rechazada", "programada", "publicada"].includes(variant.status)).length;
+    if (variants.length > 0 && generated >= variants.length) {
+      await this.safeMarkBatchStageCompleted({
+        ...input,
+        stage: "variant_generation",
+        counters: { totalVariants: variants.length, generatedVariants: generated, readyVariants: ready }
+      });
+      await this.safeMarkBatchStageStarted({
+        ...input,
+        stage: "review",
+        counters: { totalVariants: variants.length, generatedVariants: generated },
+        metadata: { measurement: "all_variants_generated_to_calendar_confirmed" }
+      });
+    }
+  }
+
+  private async completeReviewStageIfReady(input: { workspaceId: string; businessId: string; batchId: string }) {
+    const state = await this.load();
+    const variants = state.variants.filter(
+      (variant) =>
+        variant.workspaceId === input.workspaceId &&
+        variant.businessId === input.businessId &&
+        variant.batchId === input.batchId &&
+        variant.status !== "eliminada" &&
+        variant.generatedAssetId
+    );
+    const approved = variants.filter((variant) => ["aprobada", "programada", "publicada"].includes(variant.status)).length;
+    const rejected = variants.filter((variant) => variant.status === "rechazada").length;
+    if (variants.length > 0 && approved + rejected >= variants.length) {
+      await this.safeMarkBatchStageCompleted({
+        ...input,
+        stage: "review",
+        counters: {
+          generatedVariants: variants.length,
+          reviewedVariants: approved + rejected,
+          approvedVariants: approved,
+          rejectedVariants: rejected
+        }
+      });
+    }
+  }
+
+  private async completePublishExecutionStageIfReady(input: { workspaceId: string; businessId: string; batchId: string }) {
+    const state = await this.load();
+    const posts = state.scheduledPosts.filter(
+      (post) => post.workspaceId === input.workspaceId && post.businessId === input.businessId && post.batchId === input.batchId
+    );
+    const published = posts.filter((post) => ["publicada", "published"].includes(post.status)).length;
+    const failed = posts.filter((post) => ["fallida", "failed"].includes(post.status)).length;
+    if (posts.length > 0 && published + failed >= posts.length) {
+      await this.safeMarkBatchStageCompleted({
+        ...input,
+        stage: "publish_execution",
+        status: failed > 0 ? "failed" : "succeeded",
+        counters: { totalPosts: posts.length, publishedPosts: published, failedPosts: failed }
+      });
+    }
   }
 
   async updateBusiness(input: {
@@ -1095,6 +1278,14 @@ export class LocalDataStore implements DataStore {
     };
     state.uploadIntents.push(intent);
     await this.persist();
+    await this.safeMarkBatchStageStarted({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      batchId: input.batchId,
+      stage: "upload",
+      counters: { uploadIntentCount: 1 },
+      metadata: { measurement: "first_upload_intent_to_generate_request" }
+    });
     return intent;
   }
 
@@ -1877,6 +2068,32 @@ export class LocalDataStore implements DataStore {
       batch.updatedAt = timestamp;
     }
     await this.persist();
+    await this.safeMarkBatchStageCompleted({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      batchId: input.batchId,
+      stage: "upload",
+      counters: {
+        photos: validPhotos.length,
+        variantsPerPhoto: input.variantsPerPhoto,
+        targetVariants: validPhotos.length * input.variantsPerPhoto
+      },
+      metadata: { completedBy: "generate_requested" }
+    });
+    await this.safeMarkBatchStageStarted({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      batchId: input.batchId,
+      stage: "variant_generation",
+      counters: {
+        photos: validPhotos.length,
+        variantsPerPhoto: input.variantsPerPhoto,
+        targetVariants: validPhotos.length * input.variantsPerPhoto,
+        created,
+        available
+      },
+      metadata: { measurement: "generate_request_to_all_variants_generated" }
+    });
     return { job, created, available, variants: touched };
   }
 
@@ -2067,6 +2284,11 @@ export class LocalDataStore implements DataStore {
       batch.updatedAt = timestamp;
     }
     await this.persist();
+    await this.completeVariantGenerationStageIfReady({
+      workspaceId: variant.workspaceId,
+      businessId: variant.businessId,
+      batchId: variant.batchId
+    }).catch((error) => console.warn("batch_stage_generation_complete_check_failed", error));
     return variant;
   }
 
@@ -2193,6 +2415,19 @@ export class LocalDataStore implements DataStore {
     updatedBatch.lastActivityAt = timestamp;
     updatedBatch.updatedAt = timestamp;
     await this.persist();
+    await this.completeReviewStageIfReady({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      batchId: input.batchId
+    }).catch((error) => console.warn("batch_stage_review_complete_check_failed", error));
+    await this.safeMarkBatchStageStarted({
+      workspaceId: input.workspaceId,
+      businessId: input.businessId,
+      batchId: input.batchId,
+      stage: "scheduling",
+      counters: { approvedVariants: approved.length, scheduledPosts: scheduledPosts.length, periodDays: input.periodDays },
+      metadata: { measurement: "calendar_confirm_to_schedule_posts_job_complete" }
+    });
     return { scheduledPosts, job };
   }
 
@@ -2274,6 +2509,19 @@ export class LocalDataStore implements DataStore {
       updatedBatch.updatedAt = updatedBatch.lastActivityAt;
     }
     await this.persist();
+    if (scheduledPosts.length > 0) {
+      await this.safeMarkBatchStageCompleted({
+        workspaceId: job.workspaceId,
+        businessId: job.businessId,
+        batchId: input.batchId,
+        stage: "scheduling",
+        counters: {
+          scheduledPosts: scheduledPosts.length,
+          remoteScheduledPosts: scheduledPosts.filter((post) => post.remoteStatus === "confirmado_meta").length,
+          localDuePublishPosts: scheduledPosts.filter((post) => post.remoteStatus === "no_enviado").length
+        }
+      });
+    }
     return { scheduledPosts };
   }
 
@@ -2491,6 +2739,14 @@ export class LocalDataStore implements DataStore {
       operation: "publish_post",
       status: "started"
     });
+    await this.safeMarkBatchStageStarted({
+      workspaceId: post.workspaceId,
+      businessId: post.businessId,
+      batchId: post.batchId,
+      stage: "publish_execution",
+      counters: { startedPosts: 1 },
+      metadata: { measurement: "first_publish_job_started_to_all_posts_finished" }
+    });
     const page = state.pages.find((item) => item.id === post.pageId && item.workspaceId === post.workspaceId);
     const pageAccessToken = decodeServerToken(page?.encryptedPageAccessToken);
     if (pageAccessToken && page?.metaPageId && !page.metaPageId.startsWith("mock-")) {
@@ -2510,6 +2766,11 @@ export class LocalDataStore implements DataStore {
             status: "failed"
           });
           await this.persist();
+          await this.completePublishExecutionStageIfReady({
+            workspaceId: post.workspaceId,
+            businessId: post.businessId,
+            batchId: post.batchId
+          }).catch((timingError) => console.warn("batch_stage_publish_complete_check_failed", timingError));
           return post;
         }
         const graphApiVersion = post.graphApiVersion ?? process.env.META_GRAPH_API_VERSION ?? "v23.0";
@@ -2550,6 +2811,11 @@ export class LocalDataStore implements DataStore {
           status: "failed"
         });
         await this.persist();
+        await this.completePublishExecutionStageIfReady({
+          workspaceId: post.workspaceId,
+          businessId: post.businessId,
+          batchId: post.batchId
+        }).catch((timingError) => console.warn("batch_stage_publish_complete_check_failed", timingError));
         throw error;
       }
     } else {
@@ -2596,6 +2862,11 @@ export class LocalDataStore implements DataStore {
       status: "succeeded"
     });
     await this.persist();
+    await this.completePublishExecutionStageIfReady({
+      workspaceId: post.workspaceId,
+      businessId: post.businessId,
+      batchId: post.batchId
+    }).catch((error) => console.warn("batch_stage_publish_complete_check_failed", error));
     return post;
   }
 
@@ -2759,6 +3030,11 @@ export class LocalDataStore implements DataStore {
     variant.status = "aprobada";
     variant.updatedAt = timestamp;
     await this.persist();
+    await this.completeReviewStageIfReady({
+      workspaceId: variant.workspaceId,
+      businessId: variant.businessId,
+      batchId: variant.batchId
+    }).catch((error) => console.warn("batch_stage_review_complete_check_failed", error));
     return variant;
   }
 
@@ -2778,6 +3054,11 @@ export class LocalDataStore implements DataStore {
     variant.status = "rechazada";
     variant.updatedAt = now();
     await this.persist();
+    await this.completeReviewStageIfReady({
+      workspaceId: variant.workspaceId,
+      businessId: variant.businessId,
+      batchId: variant.batchId
+    }).catch((error) => console.warn("batch_stage_review_complete_check_failed", error));
     return variant;
   }
 

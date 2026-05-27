@@ -832,6 +832,28 @@ describe("api bootstrap and tenancy", () => {
       uploadsSaved: 0
     });
 
+    const timings = await app.inject({
+      method: "GET",
+      url: `/businesses/${businessId}/batches/${batchId}/timings`,
+      headers: { authorization }
+    });
+    expect(timings.statusCode).toBe(200);
+    const timingByStage = new Map<string, { stage: string; status: string; counters: Record<string, unknown>; durationMs: number | null }>(
+      timings.json().timings.map((timing: { stage: string; status: string; counters: Record<string, unknown>; durationMs: number | null }) => [
+        timing.stage,
+        timing
+      ])
+    );
+    expect(timingByStage.get("variant_generation")).toMatchObject({
+      status: "succeeded",
+      counters: expect.objectContaining({ totalVariants: 1, generatedVariants: 1 })
+    });
+    expect(timingByStage.get("publish_execution")).toMatchObject({
+      status: "succeeded",
+      counters: expect.objectContaining({ totalPosts: 1, publishedPosts: 1 })
+    });
+    expect(timingByStage.get("variant_generation")?.durationMs).toEqual(expect.any(Number));
+
     const replay = await app.inject({
       method: "POST",
       url: `/businesses/${businessId}/batches/${batchId}/photos/complete-upload`,

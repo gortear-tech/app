@@ -1,6 +1,9 @@
 import {
   Business,
   CaptionResult,
+  BatchStageName,
+  BatchStageTiming,
+  BatchStageTimingStatus,
   BatchSummary,
   FacebookTokenStatus,
   IdempotencyRecordStatus,
@@ -274,6 +277,24 @@ export type DataStore = {
   failJob(input: { jobId: string; error: string }): Promise<StoredJob>;
   listJobs(workspaceId: string): Promise<StoredJob[]>;
   listAttempts(jobId: string): Promise<JobAttempt[]>;
+  markBatchStageStarted(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    stage: BatchStageName;
+    counters?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<BatchStageTiming>;
+  markBatchStageCompleted(input: {
+    workspaceId: string;
+    businessId: string;
+    batchId: string;
+    stage: BatchStageName;
+    status?: BatchStageTimingStatus;
+    counters?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  }): Promise<BatchStageTiming>;
+  listBatchStageTimings(input: { workspaceId: string; businessId: string; batchId: string }): Promise<BatchStageTiming[]>;
   getBootstrapContext(userId: string): Promise<{
     selectedBusinessId: string | null;
     selectedPageId: string | null;

@@ -10,6 +10,7 @@ import {
   BootstrapStatusSchema,
   BatchDetailSchema,
   BatchMutationResponseSchema,
+  BatchStageTimingsResponseSchema,
   BatchesResponseSchema,
   BusinessesResponseSchema,
   BusinessDetailResponseSchema,
@@ -2485,6 +2486,40 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         photos: withPhotoUrls(request, detail.photos),
         variants: withVariantUrls(request, detail.variants),
         jobs: detail.jobs.map(jobSummary),
+        requestId
+      };
+    }
+  );
+
+  app.get(
+    "/businesses/:businessId/batches/:batchId/timings",
+    {
+      schema: {
+        security: [{ bearerAuth: [] }],
+        params: {
+          type: "object",
+          required: ["businessId", "batchId"],
+          properties: { businessId: { type: "string" }, batchId: { type: "string" } }
+        },
+        response: { 200: BatchStageTimingsResponseSchema, 401: AppErrorResponseSchema, 404: AppErrorResponseSchema }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const params = request.params as { businessId: string; batchId: string };
+      const { actor } = await authenticateRequest(request);
+      const { workspace, business } = await requireBusinessAccess({
+        actorId: actor.userId,
+        businessId: params.businessId,
+        allowedRoles: ["owner", "admin", "operator", "viewer"]
+      });
+      return {
+        schemaVersion: "batch_stage_timings.v1" as const,
+        timings: await input.store.listBatchStageTimings({
+          workspaceId: workspace.id,
+          businessId: business.id,
+          batchId: params.batchId
+        }),
         requestId
       };
     }
