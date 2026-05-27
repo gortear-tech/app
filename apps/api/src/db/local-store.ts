@@ -40,6 +40,7 @@ import {
   JobAttempt,
   MediaAsset,
   MetaAuthorization,
+  MobileDeviceSession,
   PersistedMetaAuthorizationInput,
   StoredMediaAssetFbUpload,
   StoredMediaAssetUsage,
@@ -58,6 +59,7 @@ type LocalMetaPage = MetaPage & {
 
 type LocalState = {
   users: User[];
+  mobileDeviceSessions: MobileDeviceSession[];
   workspaces: Workspace[];
   members: WorkspaceMember[];
   metaAuthorizations: MetaAuthorization[];
@@ -151,6 +153,7 @@ const compareMembershipForRecovery = (state: LocalState, left: WorkspaceMember, 
 
 const emptyState = (): LocalState => ({
   users: [],
+  mobileDeviceSessions: [],
   workspaces: [],
   members: [],
   metaAuthorizations: [],
@@ -302,6 +305,11 @@ const toGalleryAsset = (asset: MediaAsset): GalleryMediaAsset => ({
 const mergeLocalState = (latest: LocalState, current: LocalState): LocalState => ({
   ...emptyState(),
   users: mergeById(latest.users, current.users),
+  mobileDeviceSessions: mergeByKey(
+    latest.mobileDeviceSessions ?? [],
+    current.mobileDeviceSessions ?? [],
+    (item) => item.deviceKeyHash
+  ),
   workspaces: mergeById(latest.workspaces, current.workspaces).map(cleanWorkspace),
   members: mergeByKey(latest.members, current.members, (item) => `${item.workspaceId}:${item.userId}`),
   metaAuthorizations: mergeById(latest.metaAuthorizations, current.metaAuthorizations),
@@ -369,6 +377,38 @@ export class LocalDataStore implements DataStore {
     state.users.push(user);
     await this.persist();
     return user;
+  }
+
+  async getMobileDeviceSession(input: { deviceKeyHash: string }): Promise<MobileDeviceSession | null> {
+    const state = await this.load();
+    return state.mobileDeviceSessions.find((session) => session.deviceKeyHash === input.deviceKeyHash) ?? null;
+  }
+
+  async upsertMobileDeviceSession(input: {
+    deviceKeyHash: string;
+    userId: string;
+    userAgent?: string | null;
+  }): Promise<MobileDeviceSession> {
+    const state = await this.load();
+    const timestamp = now();
+    const existing = state.mobileDeviceSessions.find((session) => session.deviceKeyHash === input.deviceKeyHash);
+    if (existing) {
+      existing.userId = input.userId;
+      existing.lastSeenAt = timestamp;
+      existing.userAgent = input.userAgent ?? existing.userAgent ?? null;
+      await this.persist();
+      return existing;
+    }
+    const session: MobileDeviceSession = {
+      deviceKeyHash: input.deviceKeyHash,
+      userId: input.userId,
+      firstSeenAt: timestamp,
+      lastSeenAt: timestamp,
+      userAgent: input.userAgent ?? null
+    };
+    state.mobileDeviceSessions.push(session);
+    await this.persist();
+    return session;
   }
 
   async ensureDefaultWorkspace(userId: string): Promise<{ workspace: Workspace; membership: WorkspaceMember }> {
@@ -644,7 +684,9 @@ export class LocalDataStore implements DataStore {
     graphApiVersion: string;
   }> {
     const state = await this.load();
-    const membership = state.members.find((item) => item.userId === userId && item.status === "active");
+    const membership = state.members
+      .filter((item) => item.userId === userId && item.status === "active")
+      .sort((left, right) => compareMembershipForRecovery(state, left, right))[0];
     if (!membership) {
       return {
         selectedBusinessId: null,
@@ -716,6 +758,45 @@ export class LocalDataStore implements DataStore {
         }
       ]
     });
+  }
+
+  async recoverWorkspaceMembershipByMetaPages(input: {
+    actorId: string;
+    currentWorkspaceId: string;
+    metaPageIds: string[];
+  }): Promise<{ workspaceId: string } | null> {
+    const state = await this.load();
+    const metaPageIds = new Set(input.metaPageIds.filter(Boolean));
+    if (metaPageIds.size === 0) return null;
+    const candidates = state.pages
+      .filter((page) => page.workspaceId !== input.currentWorkspaceId && metaPageIds.has(page.metaPageId))
+      .map((page) => page.workspaceId);
+    const uniqueCandidates = Array.from(new Set(candidates));
+    uniqueCandidates.sort((left, right) =>
+      compareMembershipForRecovery(
+        state,
+        { workspaceId: left, userId: input.actorId, role: "owner", status: "active", createdAt: now() },
+        { workspaceId: right, userId: input.actorId, role: "owner", status: "active", createdAt: now() }
+      )
+    );
+    const workspaceId = uniqueCandidates[0];
+    if (!workspaceId) return null;
+    const timestamp = now();
+    const existing = state.members.find((member) => member.workspaceId === workspaceId && member.userId === input.actorId);
+    if (existing) {
+      existing.status = "active";
+      existing.role = existing.role ?? "owner";
+    } else {
+      state.members.push({
+        workspaceId,
+        userId: input.actorId,
+        role: "owner",
+        status: "active",
+        createdAt: timestamp
+      });
+    }
+    await this.persist();
+    return { workspaceId };
   }
 
   async upsertMetaAuthorization(input: PersistedMetaAuthorizationInput): Promise<MetaAuthorization> {

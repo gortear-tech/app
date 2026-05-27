@@ -914,7 +914,7 @@ function BootScreen() {
   });
 
   const signOut = useMutation({
-    mutationFn: clearStoredSession,
+    mutationFn: () => clearStoredSession({ clearDevice: true }),
     onSuccess: async () => {
       queryClient.clear();
       setSelectedBatchId(null);

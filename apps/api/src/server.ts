@@ -363,7 +363,106 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       action: "retry"
     });
   };
-  const createControlledMobileSession = async (requestId: string) => {
+  const deviceCredentialFrom = (input: unknown) => (typeof input === "string" && input.trim().length >= 32 ? input.trim() : null);
+  const deviceKeyHash = (deviceCredential: string) =>
+    createHash("sha256").update(`fbmaniaco-mobile-device:${deviceCredential}`).digest("hex");
+  const requestUserAgent = (request: FastifyRequest) => {
+    const value = request.headers["user-agent"];
+    return Array.isArray(value) ? value.join(" ") : value ?? null;
+  };
+  const bindMobileDevice = async (inputBind: {
+    request: FastifyRequest;
+    deviceCredential?: string | null | undefined;
+    userId: string;
+  }) => {
+    const credential = deviceCredentialFrom(
+      inputBind.deviceCredential ?? (Array.isArray(inputBind.request.headers["x-device-credential"])
+        ? inputBind.request.headers["x-device-credential"][0]
+        : inputBind.request.headers["x-device-credential"])
+    );
+    if (!credential) return;
+    await input.store.upsertMobileDeviceSession({
+      deviceKeyHash: deviceKeyHash(credential),
+      userId: inputBind.userId,
+      userAgent: requestUserAgent(inputBind.request)
+    });
+  };
+  const issueManagedMobileSession = async (inputSession: {
+    userId: string;
+    requestId: string;
+    request: FastifyRequest;
+    deviceCredential?: string | null | undefined;
+  }) => {
+    const supabase = requireSupabaseClient();
+    const { data, error } = await supabase.auth.admin.getUserById(inputSession.userId);
+    if (error || !data.user) {
+      mobileRefreshFailure(error);
+      throw new Error("Managed mobile user not found");
+    }
+    const user = data.user;
+    const metadata =
+      user.user_metadata && typeof user.user_metadata === "object" ? (user.user_metadata as Record<string, unknown>) : {};
+    const email = user.email || `device-${user.id}@sessions.fbmaniaco.local`;
+    const isManagedMobileUser =
+      user.is_anonymous ||
+      email.endsWith("@sessions.fbmaniaco.local") ||
+      metadata.source === "fbmaniaco_mobile" ||
+      metadata.authMode === "controlled_device";
+    if (!isManagedMobileUser) {
+      throw new AppError({
+        code: "mobile_session_recovery_denied",
+        statusCode: 403,
+        message: "User is not a managed mobile session user",
+        userMessage: "No pudimos recuperar esta sesion automaticamente. Conecta Facebook una vez mas.",
+        retryable: false,
+        action: "reconnect"
+      });
+    }
+    const password = `${randomBytes(32).toString("base64url")}aA1!`;
+    const updated = await supabase.auth.admin.updateUserById(user.id, {
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        ...metadata,
+        source: "fbmaniaco_mobile",
+        authMode: "controlled_device",
+        recoveredAt: new Date().toISOString()
+      }
+    });
+    if (updated.error) mobileRefreshFailure(updated.error);
+    const session = await supabase.auth.signInWithPassword({ email, password });
+    if (session.error || !session.data.session) mobileRefreshFailure(session.error);
+    await bindMobileDevice({
+      request: inputSession.request,
+      deviceCredential: inputSession.deviceCredential,
+      userId: session.data.user?.id ?? user.id
+    });
+    return mobileSessionResponse(session.data.session, session.data.user, inputSession.requestId);
+  };
+  const recoverMobileSessionFromDevice = async (inputRecover: {
+    request: FastifyRequest;
+    requestId: string;
+    deviceCredential?: string | null | undefined;
+  }) => {
+    const credential = deviceCredentialFrom(inputRecover.deviceCredential);
+    if (!credential) return null;
+    const deviceSession = await input.store.getMobileDeviceSession({ deviceKeyHash: deviceKeyHash(credential) });
+    if (!deviceSession?.userId) return null;
+    return issueManagedMobileSession({
+      userId: deviceSession.userId,
+      requestId: inputRecover.requestId,
+      request: inputRecover.request,
+      deviceCredential: credential
+    });
+  };
+  const createControlledMobileSession = async (
+    requestId: string,
+    request: FastifyRequest,
+    deviceCredential?: string | null | undefined
+  ) => {
+    const recovered = await recoverMobileSessionFromDevice({ request, requestId, deviceCredential });
+    if (recovered) return recovered;
     const supabase = requireSupabaseClient();
     const createdAt = new Date().toISOString();
     const email = `device-${randomUUID()}@sessions.fbmaniaco.local`;
@@ -378,15 +477,30 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         createdAt
       }
     });
-    if (created.error || !created.data.user) mobileAuthFailure(created.error);
+    if (created.error || !created.data.user) {
+      mobileAuthFailure(created.error);
+      throw new Error("Controlled mobile user was not created");
+    }
+    const createdUser = created.data.user;
     const session = await supabase.auth.signInWithPassword({ email, password });
     if (session.error || !session.data.session) {
-      if (created.data.user?.id) {
-        await supabase.auth.admin.deleteUser(created.data.user.id).catch(() => undefined);
-      }
+      await supabase.auth.admin.deleteUser(createdUser.id).catch(() => undefined);
       mobileAuthFailure(session.error);
     }
+    await bindMobileDevice({ request, deviceCredential, userId: session.data.user?.id ?? createdUser.id });
     return mobileSessionResponse(session.data.session, session.data.user, requestId);
+  };
+  const targetWorkspaceForMetaResult = async (inputTarget: {
+    actorId: string;
+    currentWorkspaceId: string;
+    pages: Array<{ metaPageId: string }>;
+  }) => {
+    const recovered = await input.store.recoverWorkspaceMembershipByMetaPages({
+      actorId: inputTarget.actorId,
+      currentWorkspaceId: inputTarget.currentWorkspaceId,
+      metaPageIds: inputTarget.pages.map((page) => page.metaPageId)
+    });
+    return recovered?.workspaceId ?? inputTarget.currentWorkspaceId;
   };
   const previewUrl = (request: FastifyRequest, assetId: string | null | undefined, variant: "thumb" | "preview" | "full" = "full") => {
     if (!assetId) return null;
@@ -727,6 +841,13 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     "/auth/mobile/anonymous",
     {
       schema: {
+        body: {
+          type: "object",
+          properties: {
+            deviceCredential: { type: "string", minLength: 32 }
+          },
+          additionalProperties: false
+        },
         response: {
           200: MobileAuthSessionResponseSchema,
           409: AppErrorResponseSchema,
@@ -736,6 +857,9 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     },
     async (request) => {
       const requestId = String(request.headers["x-request-id"]);
+      const body = (request.body ?? {}) as { deviceCredential?: string };
+      const recovered = await recoverMobileSessionFromDevice({ request, requestId, deviceCredential: body.deviceCredential });
+      if (recovered) return recovered;
       const { data, error } = await requireSupabaseClient().auth.signInAnonymously({
         options: {
           data: {
@@ -745,9 +869,10 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         }
       });
       if (error?.code === "anonymous_provider_disabled" || error?.message?.toLowerCase().includes("anonymous")) {
-        return createControlledMobileSession(requestId);
+        return createControlledMobileSession(requestId, request, body.deviceCredential);
       }
       if (error) mobileAuthFailure(error);
+      if (data.user?.id) await bindMobileDevice({ request, deviceCredential: body.deviceCredential, userId: data.user.id });
       return mobileSessionResponse(data.session, data.user, requestId);
     }
   );
@@ -760,7 +885,8 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
           type: "object",
           required: ["refreshToken"],
           properties: {
-            refreshToken: { type: "string", minLength: 16 }
+            refreshToken: { type: "string", minLength: 16 },
+            deviceCredential: { type: "string", minLength: 32 }
           },
           additionalProperties: false
         },
@@ -774,10 +900,52 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     },
     async (request) => {
       const requestId = String(request.headers["x-request-id"]);
-      const body = request.body as { refreshToken: string };
+      const body = request.body as { refreshToken: string; deviceCredential?: string };
       const { data, error } = await requireSupabaseClient().auth.refreshSession({ refresh_token: body.refreshToken });
-      if (error) mobileRefreshFailure(error);
+      if (error) {
+        const recovered = await recoverMobileSessionFromDevice({ request, requestId, deviceCredential: body.deviceCredential });
+        if (recovered) return recovered;
+        mobileRefreshFailure(error);
+      }
+      if (data.user?.id) await bindMobileDevice({ request, deviceCredential: body.deviceCredential, userId: data.user.id });
       return mobileSessionResponse(data.session, data.user, requestId);
+    }
+  );
+
+  app.post(
+    "/auth/mobile/recover",
+    {
+      schema: {
+        body: {
+          type: "object",
+          properties: {
+            deviceCredential: { type: "string", minLength: 32 }
+          },
+          additionalProperties: false
+        },
+        response: {
+          200: MobileAuthSessionResponseSchema,
+          401: AppErrorResponseSchema,
+          403: AppErrorResponseSchema,
+          502: AppErrorResponseSchema
+        }
+      }
+    },
+    async (request) => {
+      const requestId = String(request.headers["x-request-id"]);
+      const body = (request.body ?? {}) as { deviceCredential?: string };
+      const recovered = await recoverMobileSessionFromDevice({ request, requestId, deviceCredential: body.deviceCredential });
+      if (!recovered) {
+        throw new AppError({
+          code: "mobile_device_not_recognized",
+          statusCode: 401,
+          message: "Mobile device credential is not bound to a session",
+          userMessage: "No encontramos una sesion guardada en este dispositivo. Conecta Facebook una vez mas.",
+          retryable: false,
+          action: "reconnect"
+        });
+      }
+      return recovered;
     }
   );
 
@@ -1619,6 +1787,7 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
     async (request) => {
       const requestId = String(request.headers["x-request-id"]);
       const { actor, user } = await authenticateRequest(request);
+      await bindMobileDevice({ request, userId: actor.userId });
       return buildBootstrap(actor, user, requestId);
     }
   );
@@ -1670,15 +1839,20 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
             await syncMetaTestPages(workspace.id, actor.userId);
           } else if (metaProvider.mode === "mock") {
             const result = await metaProvider.completeOAuth({ code: "mock", state });
+            const targetWorkspaceId = await targetWorkspaceForMetaResult({
+              actorId: actor.userId,
+              currentWorkspaceId: workspace.id,
+              pages: result.pages
+            });
             await input.store.upsertMetaAuthorization({
-              workspaceId: workspace.id,
+              workspaceId: targetWorkspaceId,
               actorId: actor.userId,
               authorization: result.authorization,
               pages: result.pages
             });
           }
-          const pages = await input.store.listMetaPages(workspace.id);
           const bootstrap = await buildBootstrap(actor, user, requestId);
+          const pages = bootstrap.workspace?.id ? await input.store.listMetaPages(bootstrap.workspace.id) : [];
           return {
             schemaVersion: "meta_connect.v1" as const,
             bootstrap,
@@ -1737,8 +1911,13 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
       } catch {
         return reply.redirect(`${mobileMetaConnectedUrl}?status=error&reason=exchange`);
       }
+      const targetWorkspaceId = await targetWorkspaceForMetaResult({
+        actorId: decodedState.actorId,
+        currentWorkspaceId: decodedState.workspaceId,
+        pages: result.pages
+      });
       await input.store.upsertMetaAuthorization({
-        workspaceId: decodedState.workspaceId,
+        workspaceId: targetWorkspaceId,
         actorId: decodedState.actorId,
         authorization: result.authorization,
         pages: result.pages
@@ -1799,16 +1978,22 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         routeKey: "/auth/meta/callback",
         handler: async () => {
           const result = await metaProvider.completeOAuth({ code: body.code, state: body.state });
+          const targetWorkspaceId = await targetWorkspaceForMetaResult({
+            actorId: actor.userId,
+            currentWorkspaceId: decodedState.workspaceId,
+            pages: result.pages
+          });
           await input.store.upsertMetaAuthorization({
-            workspaceId: decodedState.workspaceId,
+            workspaceId: targetWorkspaceId,
             actorId: actor.userId,
             authorization: result.authorization,
             pages: result.pages
           });
+          const bootstrap = await buildBootstrap(actor, user, requestId);
           return {
             schemaVersion: "meta_connect.v1" as const,
-            bootstrap: await buildBootstrap(actor, user, requestId),
-            pages: await input.store.listMetaPages(decodedState.workspaceId),
+            bootstrap,
+            pages: bootstrap.workspace?.id ? await input.store.listMetaPages(bootstrap.workspace.id) : [],
             requestId
           };
         }
@@ -1835,16 +2020,22 @@ export const buildServer = async (input: { config: ApiConfig; store: DataStore; 
         routeKey: "/auth/meta/refresh",
         handler: async () => {
           const result = await metaProvider.refreshAuthorization();
+          const targetWorkspaceId = await targetWorkspaceForMetaResult({
+            actorId: actor.userId,
+            currentWorkspaceId: workspace.id,
+            pages: result.pages
+          });
           await input.store.upsertMetaAuthorization({
-            workspaceId: workspace.id,
+            workspaceId: targetWorkspaceId,
             actorId: actor.userId,
             authorization: result.authorization,
             pages: result.pages
           });
+          const bootstrap = await buildBootstrap(actor, user, requestId);
           return {
             schemaVersion: "meta_connect.v1" as const,
-            bootstrap: await buildBootstrap(actor, user, requestId),
-            pages: await input.store.listMetaPages(workspace.id),
+            bootstrap,
+            pages: bootstrap.workspace?.id ? await input.store.listMetaPages(bootstrap.workspace.id) : [],
             requestId
           };
         }

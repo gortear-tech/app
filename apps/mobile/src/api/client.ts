@@ -25,6 +25,7 @@ import {
   UpdateBusinessBody,
   VariantMutationResponse
 } from "@fbmaniaco/shared";
+import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import { getMobileConfig } from "../config";
 
@@ -45,6 +46,7 @@ type BatchUploadIntentResponse = {
 
 const LEGACY_SESSION_TOKEN_KEY = "fbmaniaco.sessionToken";
 const SESSION_KEY = "fbmaniaco.authSession.v1";
+const DEVICE_CREDENTIAL_KEY = "fbmaniaco.deviceCredential.v1";
 const REFRESH_WINDOW_SECONDS = 90;
 
 type StoredAuthSession = {
@@ -57,6 +59,7 @@ type StoredAuthSession = {
 };
 
 let memorySession: StoredAuthSession | null = null;
+let memoryDeviceCredential: string | null = null;
 let refreshInFlight: { refreshToken: string; promise: Promise<StoredAuthSession> } | null = null;
 
 export class ApiClientError extends Error {
@@ -181,11 +184,40 @@ const canUseSecureStore = async () => {
   }
 };
 
+const newDeviceCredential = () => {
+  const uuid = typeof Crypto.randomUUID === "function" ? Crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  return `maniaco-device-${uuid}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+};
+
+const getOrCreateDeviceCredential = async () => {
+  if (memoryDeviceCredential) return memoryDeviceCredential;
+  if (await canUseSecureStore()) {
+    const stored = await SecureStore.getItemAsync(DEVICE_CREDENTIAL_KEY);
+    if (stored && stored.length >= 32) {
+      memoryDeviceCredential = stored;
+      return stored;
+    }
+    const created = newDeviceCredential();
+    await SecureStore.setItemAsync(DEVICE_CREDENTIAL_KEY, created);
+    memoryDeviceCredential = created;
+    return created;
+  }
+  memoryDeviceCredential = newDeviceCredential();
+  return memoryDeviceCredential;
+};
+
+const clearStoredDeviceCredential = async () => {
+  memoryDeviceCredential = null;
+  if (await canUseSecureStore()) await SecureStore.deleteItemAsync(DEVICE_CREDENTIAL_KEY);
+};
+
 export const getStoredSessionToken = async () => {
   const session = await getStoredSession();
   if (!session?.accessToken) return null;
   const now = Math.floor(Date.now() / 1000);
   if (!session.refreshToken && session.expiresAt && session.expiresAt <= now) {
+    const recovered = await refreshStoredSessionToken();
+    if (recovered) return recovered;
     await clearStoredSession();
     return null;
   }
@@ -250,12 +282,13 @@ const storeSession = async (session: StoredAuthSession) => {
   }
 };
 
-export const clearStoredSession = async () => {
+export const clearStoredSession = async (options: { clearDevice?: boolean } = {}) => {
   memorySession = null;
   if (await canUseSecureStore()) {
     await SecureStore.deleteItemAsync(SESSION_KEY);
     await SecureStore.deleteItemAsync(LEGACY_SESSION_TOKEN_KEY);
   }
+  if (options.clearDevice) await clearStoredDeviceCredential();
 };
 
 const clearStoredSessionIfRefreshTokenMatches = async (refreshToken: string) => {
@@ -265,15 +298,20 @@ const clearStoredSessionIfRefreshTokenMatches = async (refreshToken: string) => 
   }
 };
 
-const mobileAuthRequest = async (path: "anonymous" | "refresh", body: Record<string, unknown>): Promise<MobileAuthSessionResponse> => {
+const mobileAuthRequest = async (
+  path: "anonymous" | "refresh" | "recover",
+  body: Record<string, unknown>
+): Promise<MobileAuthSessionResponse> => {
   const { apiUrl } = getMobileConfig();
+  const deviceCredential = await getOrCreateDeviceCredential();
   const json = await jsonRequest(`${apiUrl}/auth/mobile/${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
+      "x-device-credential": deviceCredential,
       "x-request-id": `mobile-${Date.now()}`
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ ...body, deviceCredential })
   }, "No pudimos iniciar sesion.");
   return json as MobileAuthSessionResponse;
 };
@@ -312,14 +350,30 @@ const refreshStoredSession = async (refreshToken: string) => {
 
 export const refreshStoredSessionToken = async () => {
   const session = await getStoredSession();
-  if (!session?.refreshToken) return null;
+  if (!session?.refreshToken) {
+    try {
+      const recovered = await mobileAuthRequest("recover", {});
+      const nextSession = sessionFromApiResponse(recovered);
+      await storeSession(nextSession);
+      return nextSession.accessToken;
+    } catch {
+      return null;
+    }
+  }
   try {
     const refreshed = await refreshStoredSession(session.refreshToken);
     return refreshed.accessToken;
   } catch (error) {
     if (isAuthSessionError(error) || isRefreshPayloadError(error)) {
-      await clearStoredSessionIfRefreshTokenMatches(session.refreshToken);
-      return null;
+      try {
+        const recovered = await mobileAuthRequest("recover", {});
+        const nextSession = sessionFromApiResponse(recovered);
+        await storeSession(nextSession);
+        return nextSession.accessToken;
+      } catch {
+        await clearStoredSessionIfRefreshTokenMatches(session.refreshToken);
+        return null;
+      }
     }
     throw error;
   }
@@ -352,11 +406,16 @@ const idempotencyKey = (scope: string) => `${scope}-${Date.now()}-${Math.random(
 const authorizedJsonRequest = async (token: string, path: string, init: RequestInit, fallback: string) => {
   const { apiUrl } = getMobileConfig();
   const freshToken = (await getStoredSessionToken()) ?? token;
+  const deviceCredential = await getOrCreateDeviceCredential();
   return jsonRequest(
     `${apiUrl}${path}`,
     {
       ...init,
-      headers: setHeaderValue(init.headers, "authorization", `Bearer ${freshToken}`)
+      headers: setHeaderValue(
+        setHeaderValue(init.headers, "authorization", `Bearer ${freshToken}`),
+        "x-device-credential",
+        deviceCredential
+      )
     },
     fallback
   );

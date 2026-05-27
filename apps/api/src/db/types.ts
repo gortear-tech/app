@@ -103,6 +103,14 @@ export type WorkerStatus = {
   status?: WorkerHeartbeat["status"];
 };
 
+export type MobileDeviceSession = {
+  deviceKeyHash: string;
+  userId: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  userAgent?: string | null;
+};
+
 export type MetaAuthorization = {
   id: string;
   workspaceId: string;
@@ -232,6 +240,8 @@ export type DataStore = {
   ready(): Promise<DbReadiness>;
   getUser(userId: string): Promise<User | null>;
   upsertLocalUser(input: { userId: string; email: string; displayName?: string | undefined }): Promise<User>;
+  getMobileDeviceSession(input: { deviceKeyHash: string }): Promise<MobileDeviceSession | null>;
+  upsertMobileDeviceSession(input: { deviceKeyHash: string; userId: string; userAgent?: string | null }): Promise<MobileDeviceSession>;
   ensureDefaultWorkspace(userId: string): Promise<{ workspace: Workspace; membership: WorkspaceMember }>;
   listMemberships(userId: string): Promise<Array<{ workspace: Workspace; membership: WorkspaceMember }>>;
   assertWorkspaceRole(input: {
@@ -275,6 +285,11 @@ export type DataStore = {
     graphApiVersion: string;
   }>;
   upsertMockMetaAuthorization(input: { workspaceId: string; actorId: string }): Promise<MetaAuthorization>;
+  recoverWorkspaceMembershipByMetaPages(input: {
+    actorId: string;
+    currentWorkspaceId: string;
+    metaPageIds: string[];
+  }): Promise<{ workspaceId: string } | null>;
   upsertMetaAuthorization(input: PersistedMetaAuthorizationInput): Promise<MetaAuthorization>;
   listMetaPages(workspaceId: string): Promise<MetaPage[]>;
   selectMetaPage(input: { workspaceId: string; actorId: string; pageId: string; requestId: string }): Promise<Business>;

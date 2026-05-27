@@ -169,6 +169,59 @@ describe("api bootstrap and tenancy", () => {
     await rm(path, { force: true });
   });
 
+  it("recovers an existing workspace when the same Meta page is connected from a new mobile session", async () => {
+    const path = join(tmpdir(), `fbmaniaco-api-meta-recovery-${Date.now()}.json`);
+    const config = makeConfig(path);
+    const store = new LocalDataStore(path);
+    const app = await buildServer({ config, store });
+    const oldAuthorization = "Bearer dev:user-old-session:old@example.com";
+    const newAuthorization = "Bearer dev:user-new-session:new@example.com";
+
+    const oldConnect = await app.inject({
+      method: "POST",
+      url: "/auth/meta/connect",
+      headers: { authorization: oldAuthorization, "idempotency-key": "old-connect" },
+      payload: { flow: "oauth" }
+    });
+    const oldPage = oldConnect.json().pages.find((item: { canPublish: boolean }) => item.canPublish);
+    const oldSelect = await app.inject({
+      method: "POST",
+      url: "/meta/pages/select",
+      headers: { authorization: oldAuthorization, "idempotency-key": "old-select" },
+      payload: { pageId: oldPage.id }
+    });
+    const oldWorkspaceId = oldSelect.json().business.workspaceId as string;
+    const oldBusinessId = oldSelect.json().business.id as string;
+    const oldBatch = await app.inject({
+      method: "POST",
+      url: `/businesses/${oldBusinessId}/batches`,
+      headers: { authorization: oldAuthorization, "idempotency-key": "old-batch" },
+      payload: {}
+    });
+    expect(oldBatch.statusCode).toBe(200);
+
+    const newBootstrap = await app.inject({
+      method: "GET",
+      url: "/auth/bootstrap-status",
+      headers: { authorization: newAuthorization }
+    });
+    expect(newBootstrap.statusCode).toBe(200);
+    expect(newBootstrap.json().workspace.id).not.toBe(oldWorkspaceId);
+
+    const recoveredConnect = await app.inject({
+      method: "POST",
+      url: "/auth/meta/connect",
+      headers: { authorization: newAuthorization, "idempotency-key": "new-connect" },
+      payload: { flow: "oauth" }
+    });
+    expect(recoveredConnect.statusCode).toBe(200);
+    expect(recoveredConnect.json().bootstrap.workspace.id).toBe(oldWorkspaceId);
+    expect(recoveredConnect.json().bootstrap.selectedBusinessId).toBe(oldBusinessId);
+
+    await app.close();
+    await rm(path, { force: true });
+  });
+
   it("deletes a batch without leaving it active", async () => {
     const path = join(tmpdir(), `fbmaniaco-api-delete-batch-${Date.now()}.json`);
     const config = makeConfig(path);

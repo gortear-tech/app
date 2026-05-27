@@ -37,9 +37,10 @@ import {
   JobAttempt,
   MediaAsset,
   MetaAuthorization,
+  MobileDeviceSession,
   PersistedMetaAuthorizationInput,
   StoredJob,
-  WorkerHeartbeat,
+  WorkerHeartbeat
 } from "./types.js";
 import { classifyMediaAssetCategory } from "./media-classifier.js";
 import { publishFacebookPagePost, uploadUnpublishedFacebookPagePhoto } from "@fbmaniaco/providers";
@@ -496,6 +497,46 @@ export class SupabaseDataStoreCore {
       [input.userId, input.email, input.displayName ?? null]
     );
     return toUser(result.rows[0]);
+  }
+
+  async getMobileDeviceSession(input: { deviceKeyHash: string }): Promise<MobileDeviceSession | null> {
+    const result = await this.pool.query("select * from public.mobile_device_sessions where device_key_hash = $1", [
+      input.deviceKeyHash
+    ]);
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      deviceKeyHash: row.device_key_hash,
+      userId: row.user_id,
+      firstSeenAt: new Date(row.first_seen_at).toISOString(),
+      lastSeenAt: new Date(row.last_seen_at).toISOString(),
+      userAgent: row.user_agent ?? null
+    };
+  }
+
+  async upsertMobileDeviceSession(input: {
+    deviceKeyHash: string;
+    userId: string;
+    userAgent?: string | null;
+  }): Promise<MobileDeviceSession> {
+    const result = await this.pool.query(
+      `insert into public.mobile_device_sessions (device_key_hash, user_id, first_seen_at, last_seen_at, user_agent)
+       values ($1, $2, now(), now(), $3)
+       on conflict (device_key_hash) do update
+       set user_id = excluded.user_id,
+           last_seen_at = now(),
+           user_agent = coalesce(excluded.user_agent, public.mobile_device_sessions.user_agent)
+       returning *`,
+      [input.deviceKeyHash, input.userId, input.userAgent ?? null]
+    );
+    const row = result.rows[0];
+    return {
+      deviceKeyHash: row.device_key_hash,
+      userId: row.user_id,
+      firstSeenAt: new Date(row.first_seen_at).toISOString(),
+      lastSeenAt: new Date(row.last_seen_at).toISOString(),
+      userAgent: row.user_agent ?? null
+    };
   }
 
   async ensureDefaultWorkspace(userId: string): Promise<{ workspace: Workspace; membership: WorkspaceMember }> {
@@ -971,6 +1012,53 @@ export class SupabaseDataStoreCore {
         }
       ]
     });
+  }
+
+  async recoverWorkspaceMembershipByMetaPages(input: {
+    actorId: string;
+    currentWorkspaceId: string;
+    metaPageIds: string[];
+  }): Promise<{ workspaceId: string } | null> {
+    const metaPageIds = input.metaPageIds.filter(Boolean);
+    if (metaPageIds.length === 0) return null;
+    const workspaceRecoveryStatuses = Array.from(recoverableBatchStatuses);
+    const result = await this.pool.query(
+      `select fp.workspace_id
+       from public.facebook_pages fp
+       where fp.meta_page_id = any($1::text[])
+         and fp.workspace_id <> $2
+       group by fp.workspace_id
+       order by
+         exists (
+           select 1 from public.batches b
+           where b.workspace_id = fp.workspace_id and b.status = any($3::text[])
+         ) desc,
+         exists (
+           select 1 from public.businesses b
+           join public.facebook_pages selected_page on selected_page.id = b.facebook_page_id
+           where b.workspace_id = fp.workspace_id
+             and selected_page.is_selected = true
+             and selected_page.is_granted = true
+             and selected_page.can_publish = true
+         ) desc,
+         max(fp.updated_at) desc
+       limit 1`,
+      [metaPageIds, input.currentWorkspaceId, workspaceRecoveryStatuses]
+    );
+    const workspaceId = result.rows[0]?.workspace_id;
+    if (!workspaceId) return null;
+    await this.pool.query(
+      `insert into public.workspace_members (workspace_id, user_id, role, status, created_at)
+       values ($1, $2, 'owner', 'active', now())
+       on conflict (workspace_id, user_id) do update
+       set status = 'active',
+           role = case
+             when public.workspace_members.role in ('owner', 'admin') then public.workspace_members.role
+             else 'owner'
+           end`,
+      [workspaceId, input.actorId]
+    );
+    return { workspaceId };
   }
 
   async upsertMetaAuthorization(input: PersistedMetaAuthorizationInput): Promise<MetaAuthorization> {
