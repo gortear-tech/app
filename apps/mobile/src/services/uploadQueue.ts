@@ -1,6 +1,7 @@
 import NetInfo from "@react-native-community/netinfo";
 import * as FileSystem from "expo-file-system";
 import { uploadGalleryAsset } from "../api/client";
+import { getMobileConfig } from "../config";
 import { sha256OfFile } from "../data/gallery/hash";
 import { createUploadQueue, OfflineUploadFile, OfflineUploadJob, UploadQueueStorage } from "./uploadQueueCore";
 
@@ -49,6 +50,36 @@ const removePersistedUploadFile = async (uri: string) => {
   await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
 };
 
+const canReachUploadBackend = async () => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4500);
+  try {
+    const { apiUrl } = getMobileConfig();
+    const response = await fetch(`${apiUrl}/health`, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const isUploadNetworkAvailable = async () => {
+  try {
+    const state = await NetInfo.fetch();
+    if (state.isConnected === false || state.isInternetReachable === false) {
+      return canReachUploadBackend();
+    }
+    return true;
+  } catch {
+    return canReachUploadBackend();
+  }
+};
+
 export const enqueueGalleryUploads = async (input: {
   token: string;
   workspaceId: string;
@@ -62,10 +93,7 @@ export const enqueueGalleryUploads = async (input: {
   }
   const storage = workspaceStorage(input.workspaceId);
   const queue = createUploadQueue(storage, {
-    isOnline: async () => {
-      const state = await NetInfo.fetch();
-      return state.isConnected !== false && state.isInternetReachable !== false;
-    },
+    isOnline: isUploadNetworkAvailable,
     hash: (file) => sha256OfFile(file.uri),
     upload: async (file, sha256) => {
       await uploadGalleryAsset(input.token, input.businessId, file, sha256, input.workspaceId);
@@ -87,10 +115,7 @@ export const drainGalleryUploadQueue = async (input: {
 }) => {
   const storage = workspaceStorage(input.workspaceId);
   const queue = createUploadQueue(storage, {
-    isOnline: async () => {
-      const state = await NetInfo.fetch();
-      return state.isConnected !== false && state.isInternetReachable !== false;
-    },
+    isOnline: isUploadNetworkAvailable,
     hash: (file) => sha256OfFile(file.uri),
     upload: async (file, sha256) => {
       await uploadGalleryAsset(input.token, input.businessId, file, sha256, input.workspaceId);

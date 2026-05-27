@@ -1192,7 +1192,7 @@ function BootScreen() {
       setGalleryUploadProgress(null);
       setGalleryNotice(
         result.remaining > 0
-          ? `${result.remaining} fotos quedaron en cola y se subiran al volver internet.`
+          ? `${result.remaining} fotos quedaron en cola y se intentaran subir con datos moviles o Wi-Fi cuando haya conexion.`
           : result.queued > 0
             ? `Galeria actualizada con ${result.processed} foto${result.processed === 1 ? "" : "s"}.`
             : null
