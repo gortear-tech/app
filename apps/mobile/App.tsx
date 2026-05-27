@@ -2003,7 +2003,7 @@ function BootScreen() {
           {([7, 14, 30] as PeriodDays[]).map((days) => (
             <Pressable key={days} style={[styles.periodCard, periodDays === days ? styles.periodCardActive : null]} onPress={() => setPeriodDays(days)}>
               <Text style={[styles.periodNumber, periodDays === days ? styles.periodNumberActive : null]}>{days}</Text>
-              <Text style={styles.muted}>{days === 7 ? "c/24h" : days === 14 ? "c/48h" : "c/4d"}</Text>
+              <Text style={styles.muted}>{days} dias</Text>
             </Pressable>
           ))}
         </View>
@@ -3210,18 +3210,27 @@ function SwipeReviewCard({
 }
 
 function SchedulePreview({ periodDays, acceptedCount }: { periodDays: PeriodDays; acceptedCount: number }) {
-  const preview = Array.from({ length: Math.min(acceptedCount, 4) }, (_, index) => {
+  const basePerDay = acceptedCount > 0 ? Math.floor(acceptedCount / periodDays) : 0;
+  const daysWithExtra = acceptedCount > 0 ? acceptedCount % periodDays : 0;
+  const dailyLabel =
+    acceptedCount === 0
+      ? "Sin variantes aceptadas"
+      : daysWithExtra === 0
+        ? `${basePerDay} por dia`
+        : `${basePerDay} a ${basePerDay + 1} por dia`;
+  const preview = Array.from({ length: Math.min(periodDays, 7) }, (_, index) => {
     const date = new Date();
-    const spacing = periodDays === 7 ? 1 : periodDays === 14 ? 2 : 4;
-    date.setDate(date.getDate() + index * spacing + 1);
-    date.setHours(index % 2 === 0 ? 9 : 18, index % 2 === 0 ? 0 : 30, 0, 0);
-    return date;
+    date.setDate(date.getDate() + index + 1);
+    date.setHours(13, 0, 0, 0);
+    const countForDay = basePerDay + (index < daysWithExtra ? 1 : 0);
+    return { date, countForDay };
   });
   return (
     <View style={styles.previewBox}>
-      <Text style={styles.rowTitle}>Smart Schedule</Text>
-      {preview.map((date) => (
-        <Text key={date.toISOString()} style={styles.muted}>{formatDate(date)} - {formatTime(date)}</Text>
+      <Text style={styles.rowTitle}>{acceptedCount} publicaciones en {periodDays} dias</Text>
+      <Text style={styles.muted}>{dailyLabel}. Se usan varios horarios libres por dia cuando hace falta.</Text>
+      {preview.map(({ date, countForDay }) => (
+        <Text key={date.toISOString()} style={styles.muted}>{formatDate(date)} - {countForDay} publicacion(es)</Text>
       ))}
     </View>
   );

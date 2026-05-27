@@ -2322,6 +2322,23 @@ export class LocalDataStore implements DataStore {
           !state.scheduledPosts.some((post) => post.variantId === variant.id && post.status !== "cancelada")
       )
       .sort((a, b) => (a.styleId ?? "").localeCompare(b.styleId ?? "") || a.updatedAt.localeCompare(b.updatedAt));
+    const pendingReviewCount = state.variants.filter(
+      (variant) =>
+        variant.workspaceId === input.workspaceId &&
+        variant.businessId === input.businessId &&
+        variant.batchId === input.batchId &&
+        ["generada", "generated", "pendiente", "generando", "queued", "generating"].includes(variant.status)
+    ).length;
+    if (pendingReviewCount > 0) {
+      throw new AppError({
+        code: "batch_review_incomplete",
+        statusCode: 409,
+        message: "Batch still has variants pending review before calendar confirmation",
+        userMessage: `Aun quedan ${pendingReviewCount} variante(s) por aceptar o rechazar. Revisa todo el lote antes de programar para no dejar fotos fuera.`,
+        retryable: false,
+        action: "refresh"
+      });
+    }
     if (approved.length === 0) {
       throw new AppError({
         code: "no_approved_variants",

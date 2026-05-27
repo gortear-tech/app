@@ -50,6 +50,34 @@ describe("allocateScheduleSlots", () => {
     expect(secondBatch.map(localTimeKey)).toEqual(Array(7).fill("10:30"));
   });
 
+  it("distributes 21 posts as 3 posts per day over 7 days", () => {
+    const slots = allocateScheduleSlots({ count: 21, periodDays: 7, now: fixedNow });
+    const dayCounts = slots.reduce<Record<string, number>>((acc, slot) => {
+      const day = localDayKey(slot);
+      acc[day] = (acc[day] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    expect(slots).toHaveLength(21);
+    expect(Object.values(dayCounts)).toEqual(Array(7).fill(3));
+    expect(slots.map(localTimeKey).filter((time) => time === "13:00")).toHaveLength(7);
+    expect(slots.map(localTimeKey).filter((time) => time === "10:30")).toHaveLength(7);
+    expect(slots.map(localTimeKey).filter((time) => time === "16:30")).toHaveLength(7);
+  });
+
+  it("distributes 70 posts as 10 posts per day over 7 days", () => {
+    const slots = allocateScheduleSlots({ count: 70, periodDays: 7, now: fixedNow });
+    const dayCounts = slots.reduce<Record<string, number>>((acc, slot) => {
+      const day = localDayKey(slot);
+      acc[day] = (acc[day] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    expect(slots).toHaveLength(70);
+    expect(Object.values(dayCounts)).toEqual(Array(7).fill(10));
+    expect(new Set(slots.map((slot) => slot.slice(0, 16))).size).toBe(70);
+  });
+
   it("places a second 30-post batch around an existing 30-post batch without repeating slots", () => {
     const firstBatch = allocateScheduleSlots({ count: 30, periodDays: 7, now: fixedNow });
     const secondBatch = allocateScheduleSlots({ count: 30, periodDays: 7, occupiedSlots: firstBatch, now: fixedNow });

@@ -2910,6 +2910,26 @@ export class SupabaseDataStoreCore {
       [input.workspaceId, input.businessId, input.batchId]
     );
     const approved = approvedResult.rows.map(toVariant);
+    const pendingReviewResult = await this.pool.query(
+      `select count(*)::int as count
+       from public.variants
+       where workspace_id = $1
+         and business_id = $2
+         and batch_id = $3
+         and status = any($4::text[])`,
+      [input.workspaceId, input.businessId, input.batchId, ["generada", "generated", "pendiente", "generando", "queued", "generating"]]
+    );
+    const pendingReviewCount = Number(pendingReviewResult.rows[0]?.count ?? 0);
+    if (pendingReviewCount > 0) {
+      throw new AppError({
+        code: "batch_review_incomplete",
+        statusCode: 409,
+        message: "Batch still has variants pending review before calendar confirmation",
+        userMessage: `Aun quedan ${pendingReviewCount} variante(s) por aceptar o rechazar. Revisa todo el lote antes de programar para no dejar fotos fuera.`,
+        retryable: false,
+        action: "refresh"
+      });
+    }
     if (approved.length === 0) {
       throw new AppError({
         code: "no_approved_variants",
