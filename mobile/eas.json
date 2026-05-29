@@ -27,7 +27,8 @@
       "channel": "production",
       "distribution": "internal",
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "credentialsSource": "local"
       },
       "env": {
         "EXPO_PUBLIC_API_BASE_URL": "https://cadencia-backend.onrender.com"

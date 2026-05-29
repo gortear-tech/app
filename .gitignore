@@ -13,6 +13,8 @@ coverage/
 .env.*
 !.env.example
 tokens y apis.txt
+mobile/credentials.json
+mobile/credentials/
 
 *.log
 npm-debug.log*
