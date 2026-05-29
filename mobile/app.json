@@ -21,6 +21,7 @@
       },
       "allowBackup": false,
       "blockedPermissions": [
+        "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.ACCESS_WIFI_STATE",
         "android.permission.CAMERA",
         "android.permission.READ_EXTERNAL_STORAGE",
