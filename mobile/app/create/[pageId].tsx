@@ -439,16 +439,6 @@ export default function CreateFlowScreen() {
       return;
     }
 
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-    if (!permission.granted) {
-      setState((current) => ({
-        ...current,
-        notice: 'Necesito permiso para abrir tus fotos.',
-      }));
-      return;
-    }
-
     const result = await ImagePicker.launchImageLibraryAsync({
       allowsMultipleSelection: true,
       base64: state.source === 'meta',

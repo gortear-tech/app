@@ -485,16 +485,6 @@ export default function PageHomeScreen() {
       return;
     }
 
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-
-    if (!permission.granted) {
-      setState((current) => ({
-        ...current,
-        notice: 'Necesito permiso para leer tus fotos y subirlas a la galeria de Cadencia.',
-      }));
-      return;
-    }
-
     const result = await ImagePicker.launchImageLibraryAsync({
       allowsMultipleSelection: true,
       base64: true,
