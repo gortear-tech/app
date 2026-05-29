@@ -11,17 +11,35 @@ function getActionName(intent) {
   return action?.['android:name'];
 }
 
+function createRemoveIntent(actionName) {
+  return {
+    $: {
+      'tools:node': 'remove',
+    },
+    action: [
+      {
+        $: {
+          'android:name': actionName,
+        },
+      },
+    ],
+  };
+}
+
 function withAndroidManifestHardening(config) {
   return withAndroidManifest(config, (expoConfig) => {
     const manifest = expoConfig.modResults.manifest;
-    const queries = manifest.queries?.[0];
+    manifest.queries = manifest.queries ?? [{}];
+
+    const queries = manifest.queries[0];
 
     if (queries?.intent) {
       queries.intent = queries.intent.filter((intent) => !REMOVED_QUERY_ACTIONS.has(getActionName(intent)));
+    }
 
-      if (queries.intent.length === 0) {
-        delete queries.intent;
-      }
+    queries.intent = queries.intent ?? [];
+    for (const actionName of REMOVED_QUERY_ACTIONS) {
+      queries.intent.push(createRemoveIntent(actionName));
     }
 
     return expoConfig;
