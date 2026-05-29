@@ -4,6 +4,7 @@
     "baseUrl": ".",
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
+    "ignoreDeprecations": "6.0",
     "isolatedModules": true,
     "moduleResolution": "Bundler",
     "noFallthroughCasesInSwitch": true,
@@ -19,4 +20,3 @@
     "strict": true
   }
 }
-
