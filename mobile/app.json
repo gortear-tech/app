@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "Cadencia",
+    "slug": "cadencia",
+    "scheme": "cadencia",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "backgroundColor": "#FAFAFA"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cadencia.app"
+    },
+    "android": {
+      "package": "com.cadencia.app"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "958ab376-33a2-42d9-91bb-97311731f453"
+      }
+    },
+    "owner": "tremender",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "checkAutomatically": "ON_LOAD",
+      "url": "https://u.expo.dev/958ab376-33a2-42d9-91bb-97311731f453"
+    }
+  }
+}

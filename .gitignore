@@ -1,0 +1,24 @@
+.DS_Store
+Thumbs.db
+
+node_modules/
+.tools/
+.expo/
+.expo-shared/
+dist/
+build/
+coverage/
+
+.env
+.env.*
+!.env.example
+tokens y apis.txt
+
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+android/
+ios/

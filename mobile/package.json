@@ -1,0 +1,44 @@
+{
+  "name": "@cadencia/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "android": "expo start --android",
+    "build": "expo export",
+    "ios": "expo start --ios",
+    "lint": "eslint app src --ext .ts,.tsx",
+    "start": "expo start",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@cadencia/shared": "file:../shared",
+    "@expo-google-fonts/inter": "*",
+    "@expo/vector-icons": "^15.0.3",
+    "@react-native-community/netinfo": "*",
+    "@shopify/flash-list": "*",
+    "expo": "^56.0.5",
+    "expo-font": "*",
+    "expo-haptics": "*",
+    "expo-image": "*",
+    "expo-image-picker": "*",
+    "expo-linear-gradient": "*",
+    "expo-router": "*",
+    "expo-status-bar": "*",
+    "expo-updates": "~56.0.17",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "react-native": "0.85.3",
+    "react-native-gesture-handler": "*",
+    "react-native-paper": "^5.13.0",
+    "react-native-reanimated": "*",
+    "react-native-safe-area-context": "*",
+    "react-native-screens": "*",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.6",
+    "typescript": "^5.8.3"
+  }
+}

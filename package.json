@@ -1,0 +1,34 @@
+{
+  "name": "cadencia",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cadencia: app para crear, revisar y programar publicaciones de Facebook con IA.",
+  "workspaces": [
+    "shared",
+    "backend",
+    "mobile"
+  ],
+  "scripts": {
+    "backend": "npm --workspace backend run dev",
+    "build": "npm --workspaces run build",
+    "format": "prettier --write .",
+    "lint": "npm --workspaces run lint",
+    "mobile": "npm --workspace mobile run start",
+    "typecheck": "npm --workspaces run typecheck"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.0",
+    "eslint": "^9.30.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.35.0"
+  },
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
