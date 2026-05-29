@@ -54,7 +54,8 @@
             "usesCleartextTraffic": false
           }
         }
-      ]
+      ],
+      "./plugins/with-android-manifest-hardening"
     ],
     "experiments": {
       "typedRoutes": true
