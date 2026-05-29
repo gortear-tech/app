@@ -13,13 +13,12 @@ import type {
 } from '@cadencia/shared';
 
 const productionApiBaseUrl = 'https://cadencia-backend.onrender.com';
-const developmentApiBaseUrl = ['http:', '', 'localhost:4000'].join('/');
 
 function resolveApiBaseUrl() {
   const configuredUrl = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
 
   if (!configuredUrl) {
-    return __DEV__ ? developmentApiBaseUrl : productionApiBaseUrl;
+    return productionApiBaseUrl;
   }
 
   if (!__DEV__ && !configuredUrl.toLowerCase().startsWith('https://')) {
@@ -399,7 +398,7 @@ export function describeApiError(error: unknown): string {
     return error.message;
   }
 
-  return 'No pude conectar con el backend local. Mostrando datos de muestra.';
+  return 'No pude conectar con el backend. Mostrando datos de muestra.';
 }
 
 export function isMetaAuthError(error: unknown): boolean {
