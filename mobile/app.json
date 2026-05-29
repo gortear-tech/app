@@ -6,6 +6,7 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -14,10 +15,38 @@
       "bundleIdentifier": "com.cadencia.app"
     },
     "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#F8FAF7",
+        "foregroundImage": "./assets/adaptive-icon.png"
+      },
+      "allowBackup": false,
+      "blockedPermissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
       "package": "com.cadencia.app"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": false,
+          "microphonePermission": false,
+          "photosPermission": "Cadencia necesita acceder a tus fotos para preparar publicaciones."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "usesCleartextTraffic": false
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

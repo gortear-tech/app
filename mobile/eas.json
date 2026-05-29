@@ -25,6 +25,10 @@
     "production": {
       "autoIncrement": true,
       "channel": "production",
+      "distribution": "store",
+      "android": {
+        "buildType": "app-bundle"
+      },
       "env": {
         "EXPO_PUBLIC_API_BASE_URL": "https://cadencia-backend.onrender.com"
       }

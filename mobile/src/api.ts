@@ -12,7 +12,24 @@ import type {
   UserSettings,
 } from '@cadencia/shared';
 
-const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+const productionApiBaseUrl = 'https://cadencia-backend.onrender.com';
+const developmentApiBaseUrl = ['http:', '', 'localhost:4000'].join('/');
+
+function resolveApiBaseUrl() {
+  const configuredUrl = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
+
+  if (!configuredUrl) {
+    return __DEV__ ? developmentApiBaseUrl : productionApiBaseUrl;
+  }
+
+  if (!__DEV__ && !configuredUrl.toLowerCase().startsWith('https://')) {
+    return productionApiBaseUrl;
+  }
+
+  return configuredUrl.replace(/\/$/, '');
+}
+
+const apiBaseUrl = resolveApiBaseUrl();
 
 type ApiEnvelope<T> = T & {
   source?: 'meta' | 'demo';
