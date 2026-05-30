@@ -177,6 +177,50 @@ export function createRoutes(env: ServerEnv): Router {
     });
   });
 
+  router.get('/legal/privacy', (_request, response) => {
+    response.type('html').send(`
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Politica de privacidad - Cadencia</title>
+        </head>
+        <body>
+          <main>
+            <h1>Politica de privacidad de Cadencia</h1>
+            <p>Cadencia usa Facebook Login para que el usuario conecte paginas que administra y pueda preparar publicaciones desde la app.</p>
+            <p>Los tokens de Meta se guardan solo en el backend y se usan para listar paginas, guardar la conexion y publicar contenido solicitado por el usuario.</p>
+            <p>Las fotos, borradores y configuraciones se guardan para operar el flujo de publicacion de la cuenta conectada. El usuario puede desconectar Facebook desde la app.</p>
+            <p>Contacto: soporte@gortear.com</p>
+          </main>
+        </body>
+      </html>
+    `);
+  });
+
+  router.get('/legal/terms', (_request, response) => {
+    response.type('html').send(`
+      <!doctype html>
+      <html lang="es">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Terminos de servicio - Cadencia</title>
+        </head>
+        <body>
+          <main>
+            <h1>Terminos de servicio de Cadencia</h1>
+            <p>Cadencia es una herramienta para crear, revisar y programar publicaciones en paginas conectadas por el usuario.</p>
+            <p>El usuario es responsable de revisar el contenido antes de publicarlo y de mantener permisos validos en Meta.</p>
+            <p>La app no vende tokens ni credenciales. La desconexion elimina la sesion activa del backend.</p>
+            <p>Contacto: soporte@gortear.com</p>
+          </main>
+        </body>
+      </html>
+    `);
+  });
+
   router.get('/api/meta/status', async (_request, response) => {
     response.json(await getMetaConnectionStatus(env));
   });
@@ -206,7 +250,7 @@ export function createRoutes(env: ServerEnv): Router {
   router.get('/auth/meta/callback', async (request, response) => {
     const code = String(request.query.code ?? '');
     const state = String(request.query.state ?? '');
-    const errorMessage = String(request.query.error_message ?? '');
+    const errorMessage = normalizeMetaOAuthError(request.query);
     let returnTarget: OAuthReturnTarget = 'web';
 
     try {
@@ -1424,6 +1468,19 @@ function safeEqual(value: string, expected: string): boolean {
 
 function normalizeOAuthReturnTarget(value: unknown): OAuthReturnTarget {
   return value === 'mobile' ? 'mobile' : 'web';
+}
+
+function normalizeMetaOAuthError(query: Record<string, unknown>): string {
+  const candidates = [
+    query.error_message,
+    query.error_description,
+    query.error_reason,
+    query.error,
+  ];
+
+  return candidates
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .find((value) => value.length > 0) ?? '';
 }
 
 function buildOAuthReturnUrl(

@@ -12,7 +12,7 @@ import type {
   UserSettings,
 } from '@cadencia/shared';
 
-const productionApiBaseUrl = 'https://cadencia-backend.onrender.com';
+const productionApiBaseUrl = 'https://fbmaniaco-api.onrender.com';
 
 function resolveApiBaseUrl() {
   const configuredUrl = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();

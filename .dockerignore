@@ -1,0 +1,14 @@
+.git
+.tools
+node_modules
+mobile/android
+mobile/ios
+dist
+build
+coverage
+.env
+.env.*
+tokens y apis.txt
+mobile/credentials.json
+mobile/credentials
+*.log

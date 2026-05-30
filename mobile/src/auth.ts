@@ -3,6 +3,12 @@ import { router } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import { fetchMetaLoginUrl } from './api';
 
+const mobileRedirectUrl = 'cadencia:///';
+
+if (Platform.OS === 'web') {
+  WebBrowser.maybeCompleteAuthSession();
+}
+
 export async function openMetaLogin(): Promise<void> {
   const target = Platform.OS === 'web' ? 'web' : 'mobile';
   const url = await fetchMetaLoginUrl(target);
@@ -15,24 +21,24 @@ export async function openMetaLogin(): Promise<void> {
   let result: WebBrowser.WebBrowserAuthSessionResult;
 
   try {
-    result = await WebBrowser.openAuthSessionAsync(url, 'cadencia://', {
-      createTask: true,
+    await WebBrowser.warmUpAsync();
+    result = await WebBrowser.openAuthSessionAsync(url, mobileRedirectUrl, {
       enableDefaultShareMenuItem: false,
       showTitle: true,
     });
   } catch (error) {
-    const canOpenUrl = await Linking.canOpenURL(url).catch(() => false);
-
-    if (canOpenUrl) {
+    try {
       await Linking.openURL(url);
       return;
-    }
+    } catch {
+      if (error instanceof Error) {
+        throw error;
+      }
 
-    if (error instanceof Error) {
-      throw error;
+      throw new Error('Android no encontro un navegador disponible para abrir Facebook.');
     }
-
-    throw new Error('Android no encontro un navegador disponible para abrir Facebook.');
+  } finally {
+    await WebBrowser.coolDownAsync().catch(() => undefined);
   }
 
   if (result.type === 'success') {
