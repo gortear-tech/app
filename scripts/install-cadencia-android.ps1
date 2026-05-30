@@ -1,7 +1,7 @@
 param(
   [string]$ApkPath = "",
   [string]$ApkUrl = "",
-  [string]$ExpectedSha256 = "2440A7F01F6E8030AD90CB16F1F12E0D508F07AAF7A6D40F1746E8A27E5FF447",
+  [string]$ExpectedSha256 = "02C494B337C558E5F883D0867130A57ABC4C145ACA52F48ED0B68AB8BFA8B838",
   [string]$PackageName = "com.cadencia.app"
 )
 
@@ -18,7 +18,6 @@ function Find-Adb {
     "$env:ANDROID_HOME\platform-tools\adb.exe",
     "$env:ANDROID_SDK_ROOT\platform-tools\adb.exe",
     "C:\Users\Gabriel\Desktop\Cadencia\.tools\android-sdk\platform-tools\adb.exe",
-    "C:\Users\Gabriel\Desktop\FBmaniaco v1\.tools\android-sdk\platform-tools\adb.exe",
     "C:\Users\Gabriel\Desktop\TapalpaDamus\.tools\android-sdk\platform-tools\adb.exe"
   )
 
@@ -121,7 +120,7 @@ function Install-Apk {
 
 $repoRoot = Resolve-RepoRoot
 if (-not $ApkPath) {
-  $ApkPath = Join-Path $repoRoot ".tools\apk-audit\cadencia-sideload-v18-review-flow-hardened.apk"
+  $ApkPath = Join-Path $repoRoot ".tools\apk-audit\cadencia-sideload-v19-target34.apk"
 }
 $adb = Find-Adb
 $apk = Ensure-Apk -Url $ApkUrl -ExpectedHash $ExpectedSha256 -OutputPath $ApkPath
