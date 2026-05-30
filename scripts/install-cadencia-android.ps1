@@ -1,6 +1,7 @@
 param(
-  [string]$ApkUrl = "https://expo.dev/artifacts/eas/oi6oYuBi6J5KVmSJ9Kh9w5.apk",
-  [string]$ExpectedSha256 = "8126BC11AF94D7000DC2246EF238AB9BD917ED9337B6A9352AACA82BBB8335E8",
+  [string]$ApkPath = "",
+  [string]$ApkUrl = "",
+  [string]$ExpectedSha256 = "9A835A1FC75D8510442E02EC6933B0D8BAAAC6B844335699932F382C30175DB8",
   [string]$PackageName = "com.cadencia.app"
 )
 
@@ -76,6 +77,10 @@ function Ensure-Apk {
   }
 
   if ($needsDownload) {
+    if (-not $Url) {
+      throw "No encontre el APK esperado en $OutputPath."
+    }
+
     New-Item -ItemType Directory -Force (Split-Path -Parent $OutputPath) | Out-Null
     Invoke-WebRequest -Uri $Url -OutFile $OutputPath
   }
@@ -114,9 +119,11 @@ function Install-Apk {
 }
 
 $repoRoot = Resolve-RepoRoot
-$apkPath = Join-Path $repoRoot ".tools\apk-audit\cadencia-sideload-arm64.apk"
+if (-not $ApkPath) {
+  $ApkPath = Join-Path $repoRoot ".tools\apk-audit\cadencia-sideload-v14-auth-browser.apk"
+}
 $adb = Find-Adb
-$apk = Ensure-Apk -Url $ApkUrl -ExpectedHash $ExpectedSha256 -OutputPath $apkPath
+$apk = Ensure-Apk -Url $ApkUrl -ExpectedHash $ExpectedSha256 -OutputPath $ApkPath
 $device = Get-ConnectedDevice -Adb $adb
 
 Write-Host "Instalando Cadencia por USB en $device..."

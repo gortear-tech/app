@@ -16,6 +16,7 @@ const REMOVED_META_DATA = new Set([
   'expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS',
   'expo.modules.updates.EXPO_UPDATE_URL',
 ]);
+const OPTIONAL_HARDWARE_FEATURES = new Set(['android.hardware.camera']);
 
 function getActionName(intent) {
   const action = intent?.action?.[0]?.$;
@@ -82,6 +83,19 @@ function createImageContentIntent() {
   };
 }
 
+function getFeatureName(feature) {
+  return feature?.$?.['android:name'];
+}
+
+function createOptionalFeature(featureName) {
+  return {
+    $: {
+      'android:name': featureName,
+      'android:required': 'false',
+    },
+  };
+}
+
 function getComponentName(component) {
   return component?.$?.['android:name'];
 }
@@ -90,6 +104,7 @@ function createRemoveReceiver(receiverName) {
   return {
     $: {
       'android:name': receiverName,
+      'tools:ignore': 'MissingClass',
       'tools:node': 'remove',
     },
   };
@@ -124,6 +139,14 @@ function withAndroidManifestHardening(config) {
       queries.intent.push(createRemoveIntent(actionName));
     }
     queries.intent.push(createImageContentIntent());
+
+    manifest['uses-feature'] = manifest['uses-feature'] ?? [];
+    const existingFeatures = new Set(manifest['uses-feature'].map(getFeatureName).filter(Boolean));
+    for (const featureName of OPTIONAL_HARDWARE_FEATURES) {
+      if (!existingFeatures.has(featureName)) {
+        manifest['uses-feature'].push(createOptionalFeature(featureName));
+      }
+    }
 
     const application = manifest.application?.[0];
     if (application) {

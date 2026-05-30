@@ -403,6 +403,10 @@ export function describeApiError(error: unknown): string {
     return error.message;
   }
 
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
   return 'No pude conectar con el backend. Mostrando datos de muestra.';
 }
 
