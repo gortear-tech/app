@@ -1,4 +1,9 @@
-const { withAndroidManifest } = require('@expo/config-plugins');
+/* eslint-disable @typescript-eslint/no-require-imports */
+/* global require, module */
+
+const fs = require('fs');
+const path = require('path');
+const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
 
 const REMOVED_QUERY_ACTIONS = new Set([
   'android.intent.action.GET_CONTENT',
@@ -17,6 +22,51 @@ const REMOVED_META_DATA = new Set([
   'expo.modules.updates.EXPO_UPDATE_URL',
 ]);
 const OPTIONAL_HARDWARE_FEATURES = new Set(['android.hardware.camera']);
+const SCOPED_STORAGE_REMOVED_PERMISSIONS = new Set([
+  'android.permission.READ_EXTERNAL_STORAGE',
+  'android.permission.WRITE_EXTERNAL_STORAGE',
+]);
+
+const backupRulesXml = `<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+  <exclude domain="root" path="."/>
+  <exclude domain="file" path="."/>
+  <exclude domain="database" path="."/>
+  <exclude domain="sharedpref" path="."/>
+  <exclude domain="external" path="."/>
+  <exclude domain="device_root" path="."/>
+  <exclude domain="device_file" path="."/>
+  <exclude domain="device_database" path="."/>
+  <exclude domain="device_sharedpref" path="."/>
+</full-backup-content>
+`;
+
+const dataExtractionRulesXml = `<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+  <cloud-backup disableIfNoEncryptionCapabilities="true">
+    <exclude domain="root" path="."/>
+    <exclude domain="file" path="."/>
+    <exclude domain="database" path="."/>
+    <exclude domain="sharedpref" path="."/>
+    <exclude domain="external" path="."/>
+    <exclude domain="device_root" path="."/>
+    <exclude domain="device_file" path="."/>
+    <exclude domain="device_database" path="."/>
+    <exclude domain="device_sharedpref" path="."/>
+  </cloud-backup>
+  <device-transfer>
+    <exclude domain="root" path="."/>
+    <exclude domain="file" path="."/>
+    <exclude domain="database" path="."/>
+    <exclude domain="sharedpref" path="."/>
+    <exclude domain="external" path="."/>
+    <exclude domain="device_root" path="."/>
+    <exclude domain="device_file" path="."/>
+    <exclude domain="device_database" path="."/>
+    <exclude domain="device_sharedpref" path="."/>
+  </device-transfer>
+</data-extraction-rules>
+`;
 
 function getActionName(intent) {
   const action = intent?.action?.[0]?.$;
@@ -124,11 +174,21 @@ function createRemoveMetaData(metaDataName) {
 }
 
 function withAndroidManifestHardening(config) {
-  return withAndroidManifest(config, (expoConfig) => {
+  config = withAndroidManifest(config, (expoConfig) => {
     const manifest = expoConfig.modResults.manifest;
     manifest.queries = manifest.queries ?? [{}];
 
     const queries = manifest.queries[0];
+
+    if (manifest['uses-permission']) {
+      for (const permission of manifest['uses-permission']) {
+        const permissionName = permission?.$?.['android:name'];
+
+        if (SCOPED_STORAGE_REMOVED_PERMISSIONS.has(permissionName) && permission.$?.['tools:node'] === 'remove') {
+          permission.$['tools:ignore'] = 'ScopedStorage';
+        }
+      }
+    }
 
     if (queries?.intent) {
       queries.intent = queries.intent.filter((intent) => !REMOVED_QUERY_ACTIONS.has(getActionName(intent)));
@@ -150,6 +210,9 @@ function withAndroidManifestHardening(config) {
 
     const application = manifest.application?.[0];
     if (application) {
+      application.$ = application.$ ?? {};
+      application.$['android:dataExtractionRules'] = '@xml/data_extraction_rules';
+      application.$['android:fullBackupContent'] = '@xml/backup_rules';
       application.receiver = application.receiver ?? [];
       application.receiver = application.receiver.filter((receiver) => !REMOVED_RECEIVERS.has(getComponentName(receiver)));
 
@@ -167,6 +230,19 @@ function withAndroidManifestHardening(config) {
 
     return expoConfig;
   });
+
+  return withDangerousMod(config, [
+    'android',
+    async (expoConfig) => {
+      const xmlDir = path.join(expoConfig.modRequest.platformProjectRoot, 'app', 'src', 'main', 'res', 'xml');
+
+      fs.mkdirSync(xmlDir, { recursive: true });
+      fs.writeFileSync(path.join(xmlDir, 'backup_rules.xml'), backupRulesXml);
+      fs.writeFileSync(path.join(xmlDir, 'data_extraction_rules.xml'), dataExtractionRulesXml);
+
+      return expoConfig;
+    },
+  ]);
 }
 
 module.exports = withAndroidManifestHardening;

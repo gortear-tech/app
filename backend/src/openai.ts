@@ -260,6 +260,7 @@ function buildPublicationTextPrompt(page: Page, photo: Photo, style: string): st
     'Debe sonar natural en espanol de Mexico, ser breve y publicable.',
     'No inventes descuentos, precios, promociones, horarios, entregas ni datos no proporcionados.',
     'Si el contexto no alcanza, mantente general y enfocate en antojo/presentacion/ambiente.',
+    'No menciones el estilo visual, la palabra variante, prompts, IA, edicion, generacion ni instrucciones internas.',
     '',
     `Pagina: ${page.name}`,
     `Categoria: ${page.category}`,
@@ -291,6 +292,11 @@ function extractOutputText(body: OpenAiResponseBody): string {
 function normalizeCaption(value: string): string {
   return value
     .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/^\s*(copy|texto|publicacion|publicación|caption)\s*:\s*/i, '')
+    .split('\n')
+    .filter((line) => !/^\s*estilo\s*(visual)?\s*:/i.test(line))
+    .join('\n')
+    .replace(/\b(estilo visual aplicado|variante visual|generado por ia|generada por ia)\b/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
     .slice(0, 2200);

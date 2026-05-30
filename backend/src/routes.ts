@@ -1248,7 +1248,7 @@ export function createRoutes(env: ServerEnv): Router {
               prompt: buildImagePrompt(variant.style),
               status: 'ready',
               style: variant.style,
-              text: buildFallbackPublicationText(page, photo, variant.style),
+              text: buildFallbackPublicationText(page, photo),
               variantIndex: variant.variantIndex,
             };
           }),
@@ -1281,7 +1281,7 @@ export function createRoutes(env: ServerEnv): Router {
             style: variant.style,
           }),
           generatePublicationText(env, { page, photo, style: variant.style }).catch(() =>
-            buildFallbackPublicationText(page, photo, variant.style),
+            buildFallbackPublicationText(page, photo),
           ),
         ]);
         const uploaded = await uploadGeneratedVariantImageToStore(
@@ -1726,7 +1726,7 @@ function normalizeImageMimeType(value: string | null): string {
   return 'image/jpeg';
 }
 
-function buildFallbackPublicationText(page: Page, photo: Photo, style: string): string {
+function buildFallbackPublicationText(page: Page, photo: Photo): string {
   const settings = page.settings;
   const context = photo.context ?? photo.description ?? photo.name;
   const signature = settings.brand.signature ? `\n\n${settings.brand.signature}` : '';
@@ -1736,8 +1736,8 @@ function buildFallbackPublicationText(page: Page, photo: Photo, style: string): 
       : '';
 
   return [
-    `${page.name}: una propuesta con estilo ${style}.`,
-    context ? `Foto base: ${context}` : 'Lista para compartir con tu comunidad.',
+    `${page.name}: listo para compartirse con tu comunidad.`,
+    context ? context : 'Una imagen preparada para mantener activa tu pagina.',
     settings.generation.promptSuffix,
   ]
     .filter(Boolean)

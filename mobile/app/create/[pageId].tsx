@@ -218,7 +218,7 @@ export default function CreateFlowScreen() {
         text:
           variantTexts[id] ??
           generated?.text ??
-          buildVariantText(state.page, photo, assignment.style),
+          buildVariantText(state.page, photo),
         variantIndex: assignment.variantIndex,
       };
     });
@@ -616,13 +616,15 @@ export default function CreateFlowScreen() {
   }
 
   function setDecision(variantId: string, decision: ReviewDecision) {
-    setReviewDecisions((current) => ({
-      ...current,
+    const nextDecisions = {
+      ...reviewDecisions,
       [variantId]: decision,
-    }));
+    };
+
+    setReviewDecisions(nextDecisions);
 
     const nextIndex = generatedVariants.findIndex((variant, index) => {
-      return index > reviewIndex && reviewDecisions[variant.id] === 'pending';
+      return index > reviewIndex && nextDecisions[variant.id] === 'pending';
     });
 
     setReviewIndex(nextIndex >= 0 ? nextIndex : generatedVariants.length);
@@ -914,7 +916,7 @@ export default function CreateFlowScreen() {
       ) : null}
 
       {stage === 'review' ? (
-        <View style={styles.content}>
+        <ScrollView contentContainerStyle={styles.content}>
           {currentVariant ? (
             <View style={styles.reviewCard}>
               <View style={styles.rowBetween}>
@@ -926,7 +928,6 @@ export default function CreateFlowScreen() {
                 style={styles.reviewImage}
                 contentFit="cover"
               />
-              <Text variant="titleSmall">Estilo: {currentVariant.style}</Text>
               <Text variant="bodyMedium" numberOfLines={5}>
                 {currentVariant.text}
               </Text>
@@ -999,7 +1000,7 @@ export default function CreateFlowScreen() {
               )}
             </View>
           )}
-        </View>
+        </ScrollView>
       ) : null}
 
       {stage === 'schedule' ? (
@@ -1225,25 +1226,19 @@ function PhaseProgress({ activeIndex }: { activeIndex: number }) {
   );
 }
 
-function buildVariantText(page: Page | undefined, photo: Photo | undefined, style: string): string {
+function buildVariantText(page: Page | undefined, photo: Photo | undefined): string {
   const pageName = page?.name ?? 'tu pagina';
   const settings = page?.settings;
-  const voice = settings
-    ? ` Tono: ${settings.brand.voice}${settings.brand.voiceCustom ? `, ${settings.brand.voiceCustom}` : ''}.`
-    : '';
-  const keywords = settings?.generation.seoKeywords.length
-    ? ` Keywords: ${settings.generation.seoKeywords.join(', ')}.`
-    : '';
   const suffix = settings?.generation.promptSuffix ? ` ${settings.generation.promptSuffix}` : '';
   const signature = settings?.brand.signature ? `\n\n${settings.brand.signature}` : '';
   const hashtags = settings?.brand.defaultHashtags.length
     ? `\n\n${settings.brand.defaultHashtags.join(' ')}`
     : '';
   const context = photo?.context
-    ? ` Foto base: ${photo.context}`
-    : ' Foto base pendiente de contexto detallado.';
+    ? photo.context
+    : photo?.description ?? 'Una imagen preparada para mantener activa tu pagina.';
 
-  return `${pageName}: propuesta visual con estilo ${style}.${context}${voice}${keywords}${suffix}${signature}${hashtags}`;
+  return `${pageName}: ${context}${suffix}${signature}${hashtags}`.slice(0, facebookTextLimit);
 }
 
 function Notice({ text }: { text: string }) {
