@@ -6,7 +6,7 @@ import type { Page } from '@cadencia/shared';
 import { openMetaLogin } from '../src/auth';
 import { PageCard } from '../src/components/PageCard';
 import { Screen } from '../src/components/Screen';
-import { fetchMetaStatus, type MetaConnectionStatus } from '../src/api';
+import { describeApiError, fetchMetaStatus, type MetaConnectionStatus } from '../src/api';
 import { loadPages, type DataSource } from '../src/data/live';
 import { radius, spacing } from '../src/theme';
 
@@ -68,6 +68,11 @@ export default function PageSelectionScreen() {
 
     try {
       await openMetaLogin();
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        notice: describeApiError(error),
+      }));
     } finally {
       setConnecting(false);
     }

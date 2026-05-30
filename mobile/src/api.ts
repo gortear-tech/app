@@ -34,6 +34,8 @@ type ApiEnvelope<T> = T & {
   source?: 'meta' | 'demo';
 };
 
+export type MetaLoginTarget = 'mobile' | 'web';
+
 type BatchPreviewInput = {
   pageId: string;
   photoIds: string[];
@@ -163,8 +165,11 @@ export async function fetchMetaStatus(): Promise<MetaConnectionStatus> {
   return request<MetaConnectionStatus>('/api/meta/status');
 }
 
-export async function fetchMetaLoginUrl(): Promise<string> {
-  const data = await request<{ configured: boolean; url: string }>('/api/auth/meta/login-url');
+export async function fetchMetaLoginUrl(target: MetaLoginTarget = 'web'): Promise<string> {
+  const query = target === 'mobile' ? '?target=mobile' : '';
+  const data = await request<{ configured: boolean; url: string }>(
+    `/api/auth/meta/login-url${query}`,
+  );
   return data.url;
 }
 

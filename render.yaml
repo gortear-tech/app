@@ -12,6 +12,8 @@ services:
         value: production
       - key: APP_BASE_URL
         value: https://cadencia-web.onrender.com
+      - key: MOBILE_DEEP_LINK_BASE_URL
+        value: cadencia:///
       - key: META_OAUTH_REDIRECT_URI
         value: https://cadencia-backend.onrender.com/auth/meta/callback
       - key: META_GRAPH_VERSION

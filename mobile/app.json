@@ -66,13 +66,6 @@
         "projectId": "958ab376-33a2-42d9-91bb-97311731f453"
       }
     },
-    "owner": "tremender",
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "updates": {
-      "checkAutomatically": "ON_LOAD",
-      "url": "https://u.expo.dev/958ab376-33a2-42d9-91bb-97311731f453"
-    }
+    "owner": "tremender"
   }
 }

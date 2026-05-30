@@ -164,10 +164,10 @@ export default function PageHomeScreen() {
 
     try {
       await openMetaLogin();
-    } catch {
+    } catch (error) {
       setState((current) => ({
         ...current,
-        notice: 'Falta META_APP_ID para iniciar sesion con Facebook desde la app.',
+        notice: describeApiError(error),
       }));
     } finally {
       setMetaConnecting(false);

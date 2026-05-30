@@ -5,7 +5,6 @@ import { StatusBar } from 'expo-status-bar';
 import { PaperProvider } from 'react-native-paper';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold } from '@expo-google-fonts/inter';
 import { darkTheme, lightTheme } from '../src/theme';
-import { useRuntimeUpdates } from '../src/useRuntimeUpdates';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -15,7 +14,6 @@ export default function RootLayout() {
     Inter_600SemiBold,
   });
   const theme = colorScheme === 'dark' ? darkTheme : lightTheme;
-  useRuntimeUpdates();
 
   if (!fontsLoaded) {
     return null;

@@ -5,7 +5,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { ActivityIndicator, Button, Text, useTheme } from 'react-native-paper';
 import { openMetaLogin } from '../src/auth';
 import { Screen } from '../src/components/Screen';
-import { fetchMetaStatus, type MetaConnectionStatus } from '../src/api';
+import { describeApiError, fetchMetaStatus, type MetaConnectionStatus } from '../src/api';
 import { radius, spacing } from '../src/theme';
 
 export default function LoginScreen() {
@@ -26,9 +26,9 @@ export default function LoginScreen() {
           setStatus(result);
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (active) {
-          setNotice('No pude revisar la conexion con el backend local.');
+          setNotice(describeApiError(error));
         }
       })
       .finally(() => {
@@ -63,8 +63,8 @@ export default function LoginScreen() {
 
     try {
       await openMetaLogin();
-    } catch {
-      setNotice('Falta configurar META_APP_ID para iniciar sesion con Facebook.');
+    } catch (error) {
+      setNotice(describeApiError(error));
     } finally {
       setConnecting(false);
     }

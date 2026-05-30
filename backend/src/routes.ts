@@ -74,6 +74,10 @@ const oauthStateTtlMs = 10 * 60 * 1000;
 const oauthStateFutureSkewMs = 60 * 1000;
 const demoBatchesById = new Map<string, Batch>();
 const demoCalendarItemsByPage = new Map<string, CalendarItem[]>();
+type OAuthReturnTarget = 'mobile' | 'web';
+type OAuthStatePayload = {
+  target: OAuthReturnTarget;
+};
 
 const batchPreviewSchema = z.object({
   pageId: z.string().min(1),
@@ -179,7 +183,8 @@ export function createRoutes(env: ServerEnv): Router {
 
   router.get('/api/auth/meta/login-url', (_request, response) => {
     try {
-      const state = createOAuthState(env);
+      const target = normalizeOAuthReturnTarget(_request.query.target);
+      const state = createOAuthState(env, target);
       response.json({
         configured: canStartMetaOAuth(env),
         url: buildMetaOAuthUrl(env, state),
@@ -191,7 +196,7 @@ export function createRoutes(env: ServerEnv): Router {
 
   router.get('/auth/meta/start', (_request, response) => {
     try {
-      const state = createOAuthState(env);
+      const state = createOAuthState(env, 'web');
       response.redirect(buildMetaOAuthUrl(env, state));
     } catch (error) {
       sendApiError(response, error);
@@ -202,13 +207,20 @@ export function createRoutes(env: ServerEnv): Router {
     const code = String(request.query.code ?? '');
     const state = String(request.query.state ?? '');
     const errorMessage = String(request.query.error_message ?? '');
+    let returnTarget: OAuthReturnTarget = 'web';
 
     try {
+      const statePayload = parseOAuthState(env, state);
+
+      if (statePayload) {
+        returnTarget = statePayload.target;
+      }
+
       if (errorMessage) {
         throw new MetaGraphError(errorMessage, { status: 400 });
       }
 
-      if (!code || !isValidOAuthState(env, state)) {
+      if (!code || !statePayload) {
         throw new MetaGraphError(
           'No pude validar el regreso de Facebook. Intenta iniciar sesion otra vez.',
           {
@@ -223,15 +235,21 @@ export function createRoutes(env: ServerEnv): Router {
         await syncMetaPagesToStore(env, await getMetaPageSnapshots(env));
       }
 
-      response.redirect(`${env.appBaseUrl}/pages?meta=connected`);
+      response.redirect(
+        buildOAuthReturnUrl(env, returnTarget, '/pages', {
+          meta: 'connected',
+        }),
+      );
     } catch (error) {
-      const target = new URL('/?meta=error', env.appBaseUrl);
+      const query: Record<string, string> = {
+        meta: 'error',
+      };
 
       if (error instanceof MetaGraphError) {
-        target.searchParams.set('code', String(error.code ?? error.status));
+        query.code = String(error.code ?? error.status);
       }
 
-      response.redirect(target.toString());
+      response.redirect(buildOAuthReturnUrl(env, returnTarget, '/', query));
     }
   });
 
@@ -1345,40 +1363,48 @@ async function pagesForListRequest(env: ServerEnv) {
   }
 }
 
-function createOAuthState(env: ServerEnv): string {
+function createOAuthState(env: ServerEnv, target: OAuthReturnTarget): string {
   const issuedAt = String(Date.now());
   const nonce = randomUUID();
-  const payload = `${issuedAt}.${nonce}`;
+  const payload = `${issuedAt}.${nonce}.${target}`;
   const signature = signOAuthState(env, payload);
 
   return `${payload}.${signature}`;
 }
 
-function isValidOAuthState(env: ServerEnv, state: string): boolean {
+function parseOAuthState(env: ServerEnv, state: string): OAuthStatePayload | undefined {
   const parts = state.split('.');
 
-  if (parts.length !== 3) {
-    return false;
+  if (parts.length !== 3 && parts.length !== 4) {
+    return undefined;
   }
 
-  const [issuedAtText, nonce, signature] = parts;
+  const [issuedAtText, nonce] = parts;
+  const target = parts.length === 4 ? normalizeOAuthReturnTarget(parts[2]) : 'web';
+  const signature = parts.at(-1);
 
   if (!issuedAtText || !nonce || !signature) {
-    return false;
+    return undefined;
   }
 
   const issuedAt = Number(issuedAtText);
   const now = Date.now();
 
   if (!Number.isFinite(issuedAt)) {
-    return false;
+    return undefined;
   }
 
   if (now - issuedAt > oauthStateTtlMs || issuedAt - now > oauthStateFutureSkewMs) {
-    return false;
+    return undefined;
   }
 
-  return safeEqual(signature, signOAuthState(env, `${issuedAtText}.${nonce}`));
+  const payload = parts.length === 4 ? `${issuedAtText}.${nonce}.${target}` : `${issuedAtText}.${nonce}`;
+
+  if (!safeEqual(signature, signOAuthState(env, payload))) {
+    return undefined;
+  }
+
+  return { target };
 }
 
 function signOAuthState(env: ServerEnv, payload: string): string {
@@ -1394,6 +1420,27 @@ function safeEqual(value: string, expected: string): boolean {
   return (
     valueBuffer.length === expectedBuffer.length && timingSafeEqual(valueBuffer, expectedBuffer)
   );
+}
+
+function normalizeOAuthReturnTarget(value: unknown): OAuthReturnTarget {
+  return value === 'mobile' ? 'mobile' : 'web';
+}
+
+function buildOAuthReturnUrl(
+  env: ServerEnv,
+  target: OAuthReturnTarget,
+  path: string,
+  query: Record<string, string>,
+): string {
+  const baseUrl = target === 'mobile' ? env.mobileDeepLinkBaseUrl : env.appBaseUrl;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const url = new URL(normalizedPath, baseUrl);
+
+  Object.entries(query).forEach(([key, value]) => {
+    url.searchParams.set(key, value);
+  });
+
+  return url.toString();
 }
 
 async function pageForRequest(env: ServerEnv, pageId: string) {

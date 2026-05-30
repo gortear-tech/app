@@ -1,6 +1,7 @@
 const { withAndroidManifest } = require('@expo/config-plugins');
 
 const REMOVED_QUERY_ACTIONS = new Set([
+  'android.intent.action.GET_CONTENT',
   'android.intent.action.OPEN_DOCUMENT_TREE',
   'android.media.action.IMAGE_CAPTURE',
   'android.media.action.ACTION_VIDEO_CAPTURE',
@@ -14,7 +15,7 @@ function getActionName(intent) {
 }
 
 function createRemoveIntent(actionName) {
-  return {
+  const intent = {
     $: {
       'tools:node': 'remove',
     },
@@ -22,6 +23,51 @@ function createRemoveIntent(actionName) {
       {
         $: {
           'android:name': actionName,
+        },
+      },
+    ],
+  };
+
+  if (actionName === 'android.intent.action.GET_CONTENT') {
+    intent.category = [
+      {
+        $: {
+          'android:name': 'android.intent.category.OPENABLE',
+        },
+      },
+    ];
+    intent.data = [
+      {
+        $: {
+          'android:mimeType': '*/*',
+        },
+      },
+    ];
+  }
+
+  return intent;
+}
+
+function createImageContentIntent() {
+  return {
+    action: [
+      {
+        $: {
+          'android:name': 'android.intent.action.GET_CONTENT',
+        },
+      },
+    ],
+    category: [
+      {
+        $: {
+          'android:name': 'android.intent.category.OPENABLE',
+        },
+      },
+    ],
+    data: [
+      {
+        $: {
+          'android:mimeType': 'image/*',
         },
       },
     ],
@@ -56,6 +102,7 @@ function withAndroidManifestHardening(config) {
     for (const actionName of REMOVED_QUERY_ACTIONS) {
       queries.intent.push(createRemoveIntent(actionName));
     }
+    queries.intent.push(createImageContentIntent());
 
     const application = manifest.application?.[0];
     if (application) {
