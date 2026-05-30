@@ -3,7 +3,7 @@ services:
     name: cadencia-backend
     runtime: node
     plan: free
-    buildCommand: npm ci && npm --workspace @cadencia/shared run build && npm --workspace @cadencia/backend run build
+    buildCommand: npm ci --include=dev && npm --workspace @cadencia/shared run build && npm --workspace @cadencia/backend run build
     startCommand: npm --workspace @cadencia/backend run start
     healthCheckPath: /health
     autoDeployTrigger: commit
@@ -36,7 +36,7 @@ services:
   - type: web
     name: cadencia-web
     runtime: static
-    buildCommand: npm ci && npm --workspace @cadencia/shared run build && npm --workspace @cadencia/mobile run build
+    buildCommand: npm ci --include=dev && npm --workspace @cadencia/shared run build && npm --workspace @cadencia/mobile run build
     staticPublishPath: mobile/dist
     autoDeployTrigger: commit
     envVars:

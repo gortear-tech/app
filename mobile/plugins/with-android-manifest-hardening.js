@@ -8,6 +8,14 @@ const REMOVED_QUERY_ACTIONS = new Set([
 ]);
 
 const REMOVED_RECEIVERS = new Set(['androidx.profileinstaller.ProfileInstallReceiver']);
+const REMOVED_META_DATA = new Set([
+  'expo.modules.updates.ENABLED',
+  'expo.modules.updates.ENABLE_BSDIFF_PATCH_SUPPORT',
+  'expo.modules.updates.EXPO_RUNTIME_VERSION',
+  'expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH',
+  'expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS',
+  'expo.modules.updates.EXPO_UPDATE_URL',
+]);
 
 function getActionName(intent) {
   const action = intent?.action?.[0]?.$;
@@ -87,6 +95,19 @@ function createRemoveReceiver(receiverName) {
   };
 }
 
+function getMetaDataName(metaData) {
+  return metaData?.$?.['android:name'];
+}
+
+function createRemoveMetaData(metaDataName) {
+  return {
+    $: {
+      'android:name': metaDataName,
+      'tools:node': 'remove',
+    },
+  };
+}
+
 function withAndroidManifestHardening(config) {
   return withAndroidManifest(config, (expoConfig) => {
     const manifest = expoConfig.modResults.manifest;
@@ -111,6 +132,13 @@ function withAndroidManifestHardening(config) {
 
       for (const receiverName of REMOVED_RECEIVERS) {
         application.receiver.push(createRemoveReceiver(receiverName));
+      }
+
+      application['meta-data'] = application['meta-data'] ?? [];
+      application['meta-data'] = application['meta-data'].filter((metaData) => !REMOVED_META_DATA.has(getMetaDataName(metaData)));
+
+      for (const metaDataName of REMOVED_META_DATA) {
+        application['meta-data'].push(createRemoveMetaData(metaDataName));
       }
     }
 
