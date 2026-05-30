@@ -39,9 +39,11 @@ import {
   describeApiError,
   fetchSchedulingSuggestion,
   generatePhotoContext,
+  generatePublicationVariants,
   saveBatchDraft,
   updatePhotoContext,
   uploadPagePhotos,
+  type GeneratedPublicationVariant,
   type PhotoUpload,
 } from '../../src/api';
 import { loadPageBundle, type DataSource } from '../../src/data/live';
@@ -63,6 +65,7 @@ type FlowState = {
 };
 
 type GeneratedVariant = {
+  generatedImagePath?: string | null;
   id: string;
   imageUrl?: string;
   photoId: string;
@@ -101,6 +104,9 @@ export default function CreateFlowScreen() {
   const [readyCount, setReadyCount] = useState(0);
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, ReviewDecision>>({});
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [generatedVariantResults, setGeneratedVariantResults] = useState<
+    Record<string, GeneratedPublicationVariant>
+  >({});
   const [variantTexts, setVariantTexts] = useState<Record<string, string>>({});
   const [editingVariantId, setEditingVariantId] = useState<string | undefined>();
   const [editingText, setEditingText] = useState('');
@@ -199,18 +205,24 @@ export default function CreateFlowScreen() {
     return assignments.map((assignment, index) => {
       const photo = selectedPhotos.find((item) => item.id === assignment.photoId);
       const id = `${assignment.photoId}-${assignment.variantIndex + 1}`;
+      const generated = generatedVariantResults[id];
 
       return {
+        generatedImagePath: generated?.generatedImagePath ?? null,
         id,
-        imageUrl: photo?.thumbnailUrl,
+        imageUrl: generated?.imageUrl ?? photo?.thumbnailUrl,
         photoId: assignment.photoId,
-        status: index < readyCount || stage !== 'generating' ? 'ready' : 'generating',
+        status:
+          generated || index < readyCount || stage !== 'generating' ? 'ready' : 'generating',
         style: assignment.style,
-        text: variantTexts[id] ?? buildVariantText(state.page, photo, assignment.style),
+        text:
+          variantTexts[id] ??
+          generated?.text ??
+          buildVariantText(state.page, photo, assignment.style),
         variantIndex: assignment.variantIndex,
       };
     });
-  }, [assignments, readyCount, selectedPhotos, stage, state.page, variantTexts]);
+  }, [assignments, generatedVariantResults, readyCount, selectedPhotos, stage, state.page, variantTexts]);
 
   const approvedVariants = useMemo(() => {
     if (skipReview) {
@@ -347,7 +359,7 @@ export default function CreateFlowScreen() {
   ]);
 
   useEffect(() => {
-    if (stage !== 'generating') {
+    if (stage !== 'generating' || state.source === 'meta') {
       return undefined;
     }
 
@@ -387,7 +399,7 @@ export default function CreateFlowScreen() {
     }, Math.max(220, Math.min(650, 2800 / Math.max(1, total))));
 
     return () => clearInterval(timer);
-  }, [assignments, skipReview, stage]);
+  }, [assignments, skipReview, stage, state.source]);
 
   useEffect(() => {
     if (
@@ -546,13 +558,49 @@ export default function CreateFlowScreen() {
         }
       }
 
+      const pendingDecisions = Object.fromEntries(
+        assignments.map((assignment) => [
+          `${assignment.photoId}-${assignment.variantIndex + 1}`,
+          'pending' as ReviewDecision,
+        ]),
+      );
+
+      setGeneratedVariantResults({});
       setReadyCount(0);
+      setReviewDecisions(pendingDecisions);
       setStage('generating');
+
+      if (state.source === 'meta') {
+        const generated = await generatePublicationVariants({
+          pageId: page.id,
+          variants: assignments.map((assignment) => ({
+            photoId: assignment.photoId,
+            style: assignment.style,
+            variantIndex: assignment.variantIndex,
+          })),
+        });
+        const generatedById = Object.fromEntries(generated.map((variant) => [variant.id, variant]));
+
+        setGeneratedVariantResults(generatedById);
+        setReadyCount(generated.length);
+
+        if (skipReview) {
+          setReviewDecisions(
+            Object.fromEntries(generated.map((variant) => [variant.id, 'approved'])),
+          );
+          setStage('schedule');
+          setUseSuggestion(true);
+        } else {
+          setReviewIndex(0);
+          setStage('review');
+        }
+      }
     } catch (error) {
       setState((current) => ({
         ...current,
         notice: describeApiError(error),
       }));
+      setStage('prepare');
     } finally {
       setWorking(false);
     }
@@ -638,6 +686,7 @@ export default function CreateFlowScreen() {
         pageId: page.id,
         skipReview,
         variants: approvedVariants.map((variant, index) => ({
+          generatedImagePath: variant.generatedImagePath ?? null,
           generatedText: variant.text,
           photoId: variant.photoId,
           scheduledAt: selectedSchedule[index]?.scheduledAt ?? new Date().toISOString(),
@@ -1041,6 +1090,7 @@ export default function CreateFlowScreen() {
               onPress={() => {
                 setDraftIdState(undefined);
                 setSelectedPhotoIds([]);
+                setGeneratedVariantResults({});
                 setReviewDecisions({});
                 setVariantTexts({});
                 setStage('prepare');

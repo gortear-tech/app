@@ -92,10 +92,29 @@ export type BatchPreview = {
 };
 
 export type BatchCommitVariant = {
+  generatedImagePath?: string | null;
   generatedText: string;
   photoId: string;
   scheduledAt: string;
   style: string;
+  variantIndex: number;
+};
+
+export type PublicationVariantRequest = {
+  photoId: string;
+  style: string;
+  variantIndex: number;
+};
+
+export type GeneratedPublicationVariant = {
+  generatedImagePath: string | null;
+  id: string;
+  imageUrl: string;
+  photoId: string;
+  prompt?: string;
+  status: 'ready';
+  style: string;
+  text: string;
   variantIndex: number;
 };
 
@@ -382,6 +401,23 @@ export async function fetchBatchPreview(input: BatchPreviewInput): Promise<Batch
     },
     method: 'POST',
   });
+}
+
+export async function generatePublicationVariants(input: {
+  pageId: string;
+  variants: PublicationVariantRequest[];
+}): Promise<GeneratedPublicationVariant[]> {
+  const data = await request<ApiEnvelope<{ variants: GeneratedPublicationVariant[] }>>(
+    '/api/batches/generate',
+    {
+      body: JSON.stringify(input),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    },
+  );
+  return data.variants;
 }
 
 export async function commitPublicationBatch(input: BatchCommitInput): Promise<BatchCommitResult> {

@@ -18,6 +18,8 @@ import {
   userSettingsSchema,
   type Batch,
   type CalendarItem,
+  type Page,
+  type Photo,
 } from '@cadencia/shared';
 import type { ServerEnv } from './env.js';
 import { secretStatus } from './env.js';
@@ -41,7 +43,13 @@ import {
   isMetaPageId,
   MetaGraphError,
 } from './meta.js';
-import { generatePhotoContext, hasOpenAiContext, OpenAiContextError } from './openai.js';
+import {
+  generateImageVariant,
+  generatePhotoContext,
+  generatePublicationText,
+  hasOpenAiContext,
+  OpenAiContextError,
+} from './openai.js';
 import {
   commitBatchToStore,
   archiveStoredBatch,
@@ -67,6 +75,7 @@ import {
   updatePageSettingsInStore,
   updatePhotoContextInStore,
   upsertDraftBatchToStore,
+  uploadGeneratedVariantImageToStore,
   uploadPhotosToStore,
 } from './store.js';
 
@@ -93,6 +102,7 @@ const batchCommitSchema = z.object({
   variants: z
     .array(
       z.object({
+        generatedImagePath: z.string().nullable().optional(),
         generatedText: z.string().trim().min(1).max(2200),
         photoId: z.string().min(1),
         scheduledAt: z.string().datetime(),
@@ -103,6 +113,20 @@ const batchCommitSchema = z.object({
     .min(1)
     .max(100),
   variantsPerPhoto: z.number().int().min(1).max(10),
+});
+
+const batchGenerateSchema = z.object({
+  pageId: z.string().min(1),
+  variants: z
+    .array(
+      z.object({
+        photoId: z.string().min(1),
+        style: z.string().trim().min(1).max(120),
+        variantIndex: z.number().int().min(0).max(9),
+      }),
+    )
+    .min(1)
+    .max(30),
 });
 
 const batchDraftSchema = z.object({
@@ -1175,6 +1199,121 @@ export function createRoutes(env: ServerEnv): Router {
     }
   });
 
+  router.post('/api/batches/generate', async (request, response) => {
+    const parsed = batchGenerateSchema.safeParse(request.body);
+
+    if (!parsed.success) {
+      response.status(400).json({
+        error: 'invalid_batch_generation',
+        issues: parsed.error.issues,
+      });
+      return;
+    }
+
+    try {
+      const { pageId, variants } = parsed.data;
+      const page = await pageForRequest(env, pageId);
+
+      if (!page) {
+        response.status(404).json({ error: 'page_not_found' });
+        return;
+      }
+
+      const pagePhotos = await photosForRequest(env, pageId);
+      const photosById = new Map(pagePhotos.map((photo) => [photo.id, photo]));
+      const missingPhotoIds = variants
+        .map((variant) => variant.photoId)
+        .filter((photoId) => !photosById.has(photoId));
+
+      if (missingPhotoIds.length > 0) {
+        response.status(400).json({
+          error: 'photos_not_in_active_page',
+          missingPhotoIds: [...new Set(missingPhotoIds)],
+        });
+        return;
+      }
+
+      if (!isMetaPageId(pageId)) {
+        response.json({
+          source: 'demo',
+          variants: variants.map((variant) => {
+            const photo = photosById.get(variant.photoId)!;
+            const id = `${variant.photoId}-${variant.variantIndex + 1}`;
+
+            return {
+              generatedImagePath: null,
+              id,
+              imageUrl: photo.thumbnailUrl,
+              photoId: variant.photoId,
+              prompt: buildImagePrompt(variant.style),
+              status: 'ready',
+              style: variant.style,
+              text: buildFallbackPublicationText(page, photo, variant.style),
+              variantIndex: variant.variantIndex,
+            };
+          }),
+        });
+        return;
+      }
+
+      if (!hasSupabaseStore(env)) {
+        response.status(503).json({
+          error: 'supabase_not_configured',
+          message: 'Falta configurar Supabase para guardar variantes generadas.',
+        });
+        return;
+      }
+
+      if (!hasOpenAiContext(env)) {
+        throw new OpenAiContextError('Falta OPENAI_API_KEY para generar variantes.', 503);
+      }
+
+      const generatedVariants = await mapWithConcurrency(variants, 2, async (variant) => {
+        const photo = photosById.get(variant.photoId)!;
+        const id = `${variant.photoId}-${variant.variantIndex + 1}`;
+        const sourceImage = await fetchImageForGeneration(photo.thumbnailUrl);
+        const [generatedImage, generatedText] = await Promise.all([
+          generateImageVariant(env, {
+            image: sourceImage.buffer,
+            mimeType: sourceImage.mimeType,
+            page,
+            photo,
+            style: variant.style,
+          }),
+          generatePublicationText(env, { page, photo, style: variant.style }).catch(() =>
+            buildFallbackPublicationText(page, photo, variant.style),
+          ),
+        ]);
+        const uploaded = await uploadGeneratedVariantImageToStore(
+          env,
+          page.id,
+          id,
+          generatedImage.buffer,
+          generatedImage.mimeType,
+        );
+
+        return {
+          generatedImagePath: uploaded.storagePath,
+          id,
+          imageUrl: uploaded.imageUrl,
+          photoId: variant.photoId,
+          prompt: generatedImage.prompt,
+          status: 'ready',
+          style: variant.style,
+          text: generatedText,
+          variantIndex: variant.variantIndex,
+        };
+      });
+
+      response.status(201).json({
+        source: 'meta',
+        variants: generatedVariants,
+      });
+    } catch (error) {
+      sendApiError(response, error);
+    }
+  });
+
   router.post('/api/batches', async (request, response) => {
     const parsed = batchCommitSchema.safeParse(request.body);
 
@@ -1533,6 +1672,78 @@ async function calendarForRequest(env: ServerEnv, pageId: string) {
   }
 
   return demoCalendarForPage(pageId);
+}
+
+async function fetchImageForGeneration(
+  imageUrl: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const imageResponse = await fetch(imageUrl);
+
+  if (!imageResponse.ok) {
+    throw new OpenAiContextError('No pude leer la foto base para generar variantes.', 502);
+  }
+
+  return {
+    buffer: Buffer.from(await imageResponse.arrayBuffer()),
+    mimeType: normalizeImageMimeType(imageResponse.headers.get('content-type')),
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const item = items[index];
+
+      if (item === undefined) {
+        continue;
+      }
+
+      results[index] = await mapper(item, index);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
+function normalizeImageMimeType(value: string | null): string {
+  const mimeType = value?.split(';')[0]?.trim().toLowerCase();
+
+  if (mimeType === 'image/png' || mimeType === 'image/webp' || mimeType === 'image/jpeg') {
+    return mimeType;
+  }
+
+  return 'image/jpeg';
+}
+
+function buildFallbackPublicationText(page: Page, photo: Photo, style: string): string {
+  const settings = page.settings;
+  const context = photo.context ?? photo.description ?? photo.name;
+  const signature = settings.brand.signature ? `\n\n${settings.brand.signature}` : '';
+  const hashtags =
+    settings.brand.defaultHashtags.length > 0
+      ? `\n\n${settings.brand.defaultHashtags.join(' ')}`
+      : '';
+
+  return [
+    `${page.name}: una propuesta con estilo ${style}.`,
+    context ? `Foto base: ${context}` : 'Lista para compartir con tu comunidad.',
+    settings.generation.promptSuffix,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .concat(signature, hashtags)
+    .slice(0, 2200);
 }
 
 function demoCalendarForPage(pageId: string): CalendarItem[] {

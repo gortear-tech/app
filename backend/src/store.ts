@@ -152,6 +152,7 @@ export type PhotoUploadResult = {
 };
 
 export type BatchVariantCommitInput = {
+  generatedImagePath?: string | null;
   generatedText: string;
   photoId: string;
   scheduledAt: string;
@@ -171,6 +172,11 @@ export type BatchCommitResult = {
   batchId: string;
   calendar: CalendarItem[];
   variantsCount: number;
+};
+
+export type GeneratedVariantUploadResult = {
+  imageUrl: string;
+  storagePath: string;
 };
 
 export type BatchDraftInput = {
@@ -633,6 +639,34 @@ export async function uploadPhotosToStore(
   };
 }
 
+export async function uploadGeneratedVariantImageToStore(
+  env: ServerEnv,
+  pageId: string,
+  variantKey: string,
+  image: Buffer,
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp' = 'image/png',
+): Promise<GeneratedVariantUploadResult> {
+  const client = requireSupabase(env);
+  await ensurePhotoBucket(client);
+
+  const extension = extensionForMimeType(mimeType);
+  const safeKey = safeStorageSegment(variantKey);
+  const storagePath = `${pageId}/generated/${Date.now()}-${safeKey}-${randomUUID()}.${extension}`;
+  const { error } = await client.storage.from(photoBucket).upload(storagePath, image, {
+    contentType: mimeType,
+    upsert: false,
+  });
+
+  if (error) {
+    throw new SupabaseStoreError(error.message);
+  }
+
+  return {
+    imageUrl: (await signedUrlForPath(client, storagePath)) ?? storagePath,
+    storagePath,
+  };
+}
+
 export async function updatePhotoContextInStore(
   env: ServerEnv,
   pageId: string,
@@ -1039,13 +1073,14 @@ export async function commitBatchToStore(
 
       await client.query(
         `insert into public.cadencia_variants
-          (id, batch_id, source_photo_id, variant_type, style, generated_text, status, scheduled_at)
-         values ($1, $2, $3, 'ai_image', $4, $5, 'scheduled', $6)`,
+          (id, batch_id, source_photo_id, variant_type, style, generated_image_path, generated_text, status, scheduled_at)
+         values ($1, $2, $3, 'ai_image', $4, $5, $6, 'scheduled', $7)`,
         [
           variantId,
           batchId,
           variant.photoId,
           variant.style,
+          variant.generatedImagePath ?? null,
           variant.generatedText.trim(),
           variant.scheduledAt,
         ],
@@ -1161,6 +1196,10 @@ async function signedUrlForPath(
 function stripDataUrlPrefix(value: string): string {
   const commaIndex = value.indexOf(',');
   return commaIndex >= 0 ? value.slice(commaIndex + 1) : value;
+}
+
+function safeStorageSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80) || 'variant';
 }
 
 function extensionForMimeType(mimeType: string): string {
