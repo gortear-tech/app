@@ -29,7 +29,8 @@
         "android.permission.VIBRATE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
-      "package": "com.cadencia.app"
+      "package": "com.cadencia.app",
+      "versionCode": 21
     },
     "plugins": [
       "expo-router",

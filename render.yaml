@@ -15,7 +15,7 @@ services:
       - key: MOBILE_DEEP_LINK_BASE_URL
         value: cadencia:///
       - key: META_OAUTH_REDIRECT_URI
-        value: https://fbmaniaco-api.onrender.com/auth/meta/callback
+        value: https://cadencia-backend.onrender.com/auth/meta/callback
       - key: META_GRAPH_VERSION
         value: v24.0
       - key: SUPABASE_URL
@@ -41,7 +41,7 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: EXPO_PUBLIC_API_BASE_URL
-        value: https://fbmaniaco-api.onrender.com
+        value: https://cadencia-backend.onrender.com
       - key: EXPO_PUBLIC_SUPABASE_URL
         sync: false
       - key: EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY

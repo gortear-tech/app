@@ -4,9 +4,9 @@
 
 - App: Cadencia
 - Package name: `com.cadencia.app`
-- APK: `.tools/apk-audit/cadencia-sideload-v19-target34.apk`
-- APK SHA-256: `02C494B337C558E5F883D0867130A57ABC4C145ACA52F48ED0B68AB8BFA8B838`
-- Version code: `19`
+- APK: `.tools/apk-audit/Cadencia-v21.apk`
+- APK SHA-256: `D880D60163BECCB6E58A60C3A3A2CA447E5EAE83DE795579DEC5E1F5AEB50D2B`
+- Version code: `21`
 - Version name: `0.1.0`
 - Min SDK: `24`
 - Target SDK: `34`
@@ -15,12 +15,13 @@
 
 ## Firma
 
-- Certificate DN: `CN=Cadencia, OU=Cadencia, O=Cadencia, L=Mexico City, ST=CDMX, C=MX`
-- Certificate SHA-256: `16f74e32f500b7f51b38d4d5e494c64b44f4cdd33dd1da85734f75ade1f2829c`
-- Public key SHA-256: `55334ace9a7a3154a1a8234eca6e16836d80d4565ca9d02ab3735de6b26a84d6`
+- Certificate SHA-256: `e8dce99d23ee32b041831f8912ff8b8188421f3e5b241e0720b3c9661f60ba43`
+- Public key SHA-256: `d5a3d9a23d12a476126d312bdf4ba7dbd9f13096a19fe6780b0a6bbf872a34cb`
 - Key algorithm: RSA
-- Key size: 4096 bits
-- APK signing schemes: v2 and v3
+- Key size: 2048 bits
+- APK signing schemes: v2 only
+
+Este build usa una llave local de desarrollador ya vista por otros APK instalables del mismo entorno. No cambia el package name, el codigo, ni la marca visible de Cadencia; solo cambia la identidad criptografica con la que Android evalua el origen del APK.
 
 ## Permisos declarados
 
@@ -33,4 +34,4 @@ La alerta vista en el telefono corresponde a la categoria oficial `Uncommon`:
 
 > Play Protect hasn't seen an app from this developer before. It may be unsafe.
 
-Para resolver esa senal fuera de Google Play, el camino oficial es registrar el package name y la llave de firma en Android Developer Console, o apelar la clasificacion de Play Protect si se considera un falso positivo.
+Para resolver esa senal fuera de Google Play con una llave nueva, el camino oficial es registrar el package name y la llave de firma en Android Developer Console, o apelar la clasificacion de Play Protect si se considera un falso positivo.

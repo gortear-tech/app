@@ -1,7 +1,7 @@
 param(
   [string]$ApkPath = "",
   [string]$ApkUrl = "",
-  [string]$ExpectedSha256 = "02C494B337C558E5F883D0867130A57ABC4C145ACA52F48ED0B68AB8BFA8B838",
+  [string]$ExpectedSha256 = "D880D60163BECCB6E58A60C3A3A2CA447E5EAE83DE795579DEC5E1F5AEB50D2B",
   [string]$PackageName = "com.cadencia.app"
 )
 
@@ -120,7 +120,7 @@ function Install-Apk {
 
 $repoRoot = Resolve-RepoRoot
 if (-not $ApkPath) {
-  $ApkPath = Join-Path $repoRoot ".tools\apk-audit\cadencia-sideload-v19-target34.apk"
+  $ApkPath = Join-Path $repoRoot ".tools\apk-audit\Cadencia-v21.apk"
 }
 $adb = Find-Adb
 $apk = Ensure-Apk -Url $ApkUrl -ExpectedHash $ExpectedSha256 -OutputPath $ApkPath
