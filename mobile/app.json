@@ -30,7 +30,7 @@
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
       "package": "com.cadencia.app",
-      "versionCode": 21
+      "versionCode": 22
     },
     "plugins": [
       "expo-router",

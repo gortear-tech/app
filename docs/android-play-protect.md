@@ -4,9 +4,9 @@
 
 - App: Cadencia
 - Package name: `com.cadencia.app`
-- APK: `.tools/apk-audit/Cadencia-v21.apk`
-- APK SHA-256: `D880D60163BECCB6E58A60C3A3A2CA447E5EAE83DE795579DEC5E1F5AEB50D2B`
-- Version code: `21`
+- APK: `.tools/apk-audit/Cadencia-v22.apk`
+- APK SHA-256: `EFA0A729D8ABC24F29FC7D84B4AB69A981D6F3F80728532FE3B635C610FA14A1`
+- Version code: `22`
 - Version name: `0.1.0`
 - Min SDK: `24`
 - Target SDK: `34`
@@ -35,3 +35,10 @@ La alerta vista en el telefono corresponde a la categoria oficial `Uncommon`:
 > Play Protect hasn't seen an app from this developer before. It may be unsafe.
 
 Para resolver esa senal fuera de Google Play con una llave nueva, el camino oficial es registrar el package name y la llave de firma en Android Developer Console, o apelar la clasificacion de Play Protect si se considera un falso positivo.
+
+## Higiene del build local
+
+- `mobile/android` es generado y no debe tratarse como fuente de verdad; si sus caches contienen rutas absolutas viejas, se limpian antes del release.
+- `mobile/.env` afecta el APK local. Para release debe apuntar a `https://cadencia-backend.onrender.com`, no a `localhost`.
+- `mobile/credentials.json` y `mobile/credentials/android/cadencia-release.jks` son locales e ignorados por git; deben mantenerse alineados con la llave establecida usada para el APK sideload.
+- Usar `scripts/build-cadencia-android.ps1` para generar el APK evita mezclar ambiente local, firma incorrecta y caches nativas viejas.
